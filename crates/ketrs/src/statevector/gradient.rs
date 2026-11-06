@@ -10,8 +10,8 @@
 //! memory, however many parameters there are.
 
 use super::hamiltonian::{CompiledPauliSum, Imaginary, chunked_sum};
-use super::kernels::{CACHE_BLOCK_QUBITS, Prepared, Tile};
-use super::{DenseState, FUSION_MIN_QUBITS};
+use super::kernels::{CACHE_BLOCK_QUBITS, Local, Prepared, Tile};
+use super::{DenseState, fuses};
 use crate::circuit::{Circuit, Operation};
 use crate::error::Error;
 use crate::gate::Gate;
@@ -164,15 +164,16 @@ enum Step<T> {
 /// A [`Step`] localised to a tile.
 enum TileStep<T> {
     Overlap(TileGenerator),
-    Apply(Prepared<T>),
+    Apply(Local<T>),
 }
 
 impl<T: Scalar> Step<T> {
-    /// The qubits a tile must include to take the step.
-    fn qubit_mask(&self) -> usize {
+    /// The qubits a tile must include to take the step, and every qubit
+    /// it touches.
+    fn masks(&self) -> (usize, usize) {
         match self {
-            Step::Overlap(g, _) => g.masks.x,
-            Step::Apply(op) => op.qubit_mask(),
+            Step::Overlap(g, _) => (g.masks.x, g.masks.x | g.masks.z | g.controls),
+            Step::Apply(op) => (op.active_mask(), op.qubit_mask()),
         }
     }
 }
@@ -192,7 +193,7 @@ fn backward_steps<T: Scalar>(circuit: &Circuit, bound: &Circuit) -> Result<Vec<S
             terms.push((b.parameter, b.scale));
         }
         if !terms.is_empty() {
-            let ops = if n >= FUSION_MIN_QUBITS {
+            let ops = if fuses(n) {
                 segment.fused_where(|op| op.max_qubit() >= CACHE_BLOCK_QUBITS)
             } else {
                 segment
@@ -221,9 +222,10 @@ fn sweep<T: Scalar>(steps: &[Step<T>], psi: &mut [T], lambda: &mut [T], gradient
     let n_qubits = psi.len().trailing_zeros() as usize;
     let mut rest = steps;
     while let Some(first) = rest.first() {
-        let (tile, count) = Tile::cover(n_qubits, TILE_QUBITS, rest.iter().map(Step::qubit_mask));
-        if count >= 2 {
-            let (batch, tail) = rest.split_at(count);
+        // In order: overlaps read the vectors at fixed points.
+        let cover = Tile::cover(n_qubits, TILE_QUBITS, rest.iter().map(Step::masks), false);
+        if let Some((tile, taken)) = cover.filter(|(_, taken)| taken.len() >= 2) {
+            let (batch, tail) = rest.split_at(taken.len());
             let local: Vec<_> = batch
                 .iter()
                 .map(|step| match step {
@@ -243,8 +245,8 @@ fn sweep<T: Scalar>(steps: &[Step<T>], psi: &mut [T], lambda: &mut [T], gradient
                         match step {
                             TileStep::Overlap(g) => sums.push(g.overlap(base, lambda, psi)),
                             TileStep::Apply(op) => {
-                                op.apply(psi);
-                                op.apply(lambda);
+                                op.apply(base, psi);
+                                op.apply(base, lambda);
                             }
                         }
                     }

@@ -74,6 +74,72 @@ fn operation(n: usize) -> impl Strategy<Value = Operation> {
     ]
 }
 
+fn diagonal_gate() -> impl Strategy<Value = Gate> {
+    prop_oneof![
+        Just(Gate::Z),
+        Just(Gate::S),
+        Just(Gate::T),
+        angle().prop_map(Gate::Rz),
+        angle().prop_map(Gate::Phase),
+    ]
+}
+
+/// Operations that are diagonal, or diagonal on every qubit but one: tiles
+/// need not include the qubits they only control or phase.
+fn diagonal_operation(n: usize) -> impl Strategy<Value = Operation> {
+    let z_or_i = prop_oneof![Just(Pauli::I), Just(Pauli::Z)];
+    prop_oneof![
+        (diagonal_gate(), 0..n).prop_map(|(gate, target)| Operation::Gate { gate, target }),
+        (diagonal_gate(), pair(n)).prop_map(|(gate, (control, target))| {
+            Operation::Controlled {
+                gate,
+                control,
+                target,
+            }
+        }),
+        (gate(), 0..n, prop::collection::vec(0..n, 0..4)).prop_map(
+            |(gate, target, mut controls)| {
+                controls.retain(|&q| q != target);
+                controls.sort_unstable();
+                controls.dedup();
+                Operation::MultiControlled {
+                    gate,
+                    controls,
+                    target,
+                }
+            }
+        ),
+        (diagonal_gate(), diagonal_gate(), pair(n)).prop_map(|(g0, g1, (q0, q1))| {
+            Operation::Unitary2 {
+                matrix: kron(&g1.matrix(), &g0.matrix()),
+                qubits: [q0, q1],
+            }
+        }),
+        (prop::collection::vec(z_or_i, n), angle()).prop_map(|(ps, theta)| {
+            Operation::PauliRotation {
+                pauli: PauliString::new(ps.into_iter().enumerate()).unwrap(),
+                theta,
+            }
+        }),
+        // A few X or Y factors among many Z: active on few qubits.
+        (prop::collection::vec(0..4usize, n), angle()).prop_map(|(ps, theta)| {
+            let paulis = ps.into_iter().enumerate().map(|(q, p)| {
+                let p = match p {
+                    0 if q % 5 == 0 => Pauli::X,
+                    1 if q % 7 == 0 => Pauli::Y,
+                    0 | 1 => Pauli::I,
+                    _ => Pauli::Z,
+                };
+                (q, p)
+            });
+            Operation::PauliRotation {
+                pauli: PauliString::new(paulis).unwrap(),
+                theta,
+            }
+        }),
+    ]
+}
+
 fn circuit() -> impl Strategy<Value = Circuit> {
     circuit_on(2..=6)
 }
@@ -218,6 +284,29 @@ proptest! {
 
     #[test]
     fn large_circuits_match_reference(circ in circuit_on(15..=16)) {
+        assert_matches_reference(&circ)?;
+    }
+}
+
+proptest! {
+    // From 13 qubits, states are split into tiles of any qubits, which
+    // settle controls and phases on the rest tile by tile, and take
+    // operations out of order where they commute.
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn split_tiles_match_reference(
+        circ in (13usize..=15).prop_flat_map(|n| {
+            let op = prop_oneof![operation(n), diagonal_operation(n), diagonal_operation(n)];
+            prop::collection::vec(op, 0..60).prop_map(move |ops| {
+                let mut circ = Circuit::new(n);
+                for op in ops {
+                    circ.push(op).unwrap();
+                }
+                circ
+            })
+        })
+    ) {
         assert_matches_reference(&circ)?;
     }
 }

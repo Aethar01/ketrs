@@ -108,7 +108,9 @@ pub trait Scalar:
     /// multiples of `2·half`.
     #[inline]
     fn apply_quad_strided(m: &[[Self; 4]; 4], lo: &mut [Self], hi: &mut [Self], half: usize) {
-        let pairs = lo.chunks_exact_mut(2 * half).zip(hi.chunks_exact_mut(2 * half));
+        let pairs = lo
+            .chunks_exact_mut(2 * half)
+            .zip(hi.chunks_exact_mut(2 * half));
         for (l, h) in pairs {
             let (s00, s01) = l.split_at_mut(half);
             let (s10, s11) = h.split_at_mut(half);
@@ -250,11 +252,17 @@ impl Scalar for C64 {
             unsafe { simd::apply_quad_strided_avx2(m, lo, hi, half) };
             return;
         }
-        let pairs = lo.chunks_exact_mut(2 * half).zip(hi.chunks_exact_mut(2 * half));
+        let pairs = lo
+            .chunks_exact_mut(2 * half)
+            .zip(hi.chunks_exact_mut(2 * half));
         for (l, h) in pairs {
             let (s00, s01) = l.split_at_mut(half);
             let (s10, s11) = h.split_at_mut(half);
-            let quads = s00.iter_mut().zip(s01.iter_mut()).zip(s10.iter_mut()).zip(s11);
+            let quads = s00
+                .iter_mut()
+                .zip(s01.iter_mut())
+                .zip(s10.iter_mut())
+                .zip(s11);
             for (((a0, a1), a2), a3) in quads {
                 let v = [*a0, *a1, *a2, *a3];
                 let row = |r: usize| (0..4).map(|c| m[r][c] * v[c]).sum::<C64>();
@@ -466,7 +474,10 @@ mod simd {
         assert!(len.is_multiple_of(2) && len <= MAX_PATTERN && s.len().is_multiple_of(len));
         let factors: [_; MAX_PATTERN / 2] = std::array::from_fn(|j| {
             let (a, b) = (pattern.get(2 * j), pattern.get(2 * j + 1));
-            column(a.copied().unwrap_or_default(), b.copied().unwrap_or_default())
+            column(
+                a.copied().unwrap_or_default(),
+                b.copied().unwrap_or_default(),
+            )
         });
         let ptr = s.as_mut_ptr().cast::<f64>();
         for chunk in 0..s.len() / len {
@@ -547,7 +558,9 @@ mod simd {
         half: usize,
     ) {
         if half > 1 {
-            let pairs = lo.chunks_exact_mut(2 * half).zip(hi.chunks_exact_mut(2 * half));
+            let pairs = lo
+                .chunks_exact_mut(2 * half)
+                .zip(hi.chunks_exact_mut(2 * half));
             for (l, h) in pairs {
                 let (s00, s01) = l.split_at_mut(half);
                 let (s10, s11) = h.split_at_mut(half);
@@ -564,7 +577,10 @@ mod simd {
         for k in 0..n {
             // SAFETY: amplitudes 2k and 2k + 1 of both slices are in bounds.
             unsafe {
-                let (l, h) = (_mm256_loadu_pd(lo_ptr.add(4 * k)), _mm256_loadu_pd(hi_ptr.add(4 * k)));
+                let (l, h) = (
+                    _mm256_loadu_pd(lo_ptr.add(4 * k)),
+                    _mm256_loadu_pd(hi_ptr.add(4 * k)),
+                );
                 let v = [
                     broadcast::<false>(l),
                     broadcast::<true>(l),

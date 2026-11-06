@@ -28,6 +28,13 @@ use rayon::prelude::*;
 /// specialised kernels beat fused generic matrices.
 const FUSION_MIN_QUBITS: usize = 16;
 
+/// Whether to fuse circuits on `n_qubits`. From `GATHER_MIN_QUBITS`, tiles
+/// take gates on any few qubits, so fusing saves no passes over memory,
+/// and it hides diagonal gates, which tiles take on any qubits.
+fn fuses(n_qubits: usize) -> bool {
+    (FUSION_MIN_QUBITS..kernels::GATHER_MIN_QUBITS).contains(&n_qubits)
+}
+
 /// A pure state on `n` qubits, stored as `2ⁿ` amplitudes of type `T`.
 ///
 /// Usually named through [`Statevector`] or [`RealStatevector`].
@@ -181,7 +188,7 @@ impl<T: Scalar> DenseState<T> {
         })?;
         // Circuit operations are validated on insertion, so only the width
         // needed checking.
-        let prepared = if self.n_qubits >= FUSION_MIN_QUBITS {
+        let prepared = if fuses(self.n_qubits) {
             // Gates on low qubits are already cheap through cache blocking,
             // so only fuse gates that need a full pass over memory.
             let fused = circuit.fused_where(|op| op.max_qubit() >= kernels::CACHE_BLOCK_QUBITS);
