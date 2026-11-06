@@ -240,6 +240,57 @@ fn relative_phase_toffolis() {
 }
 
 #[test]
+fn subroutines_are_inlined() {
+    let source = r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        input float theta;
+        qubit[3] r;
+        qubit s;
+        def entangle(qubit[3] reg, float[64] a) {
+            h reg[0];
+            for uint i in [0:1] { cx reg[i], reg[i + 1]; }
+            rz(a) reg[2];
+        }
+        def pair(qubit a, qubit b) { cx a, b; }
+        entangle(r, theta / 2);
+        pair(r[2], s);
+        entangle(r, 0.3);
+    "#;
+    let circ = qasm::parse(source).unwrap();
+    let mut want = Circuit::new(4);
+    let p = want.parameter();
+    want.h(0).cx(0, 1).cx(1, 2).rz(0.5 * p, 2);
+    want.cx(2, 3);
+    want.h(0).cx(0, 1).cx(1, 2).rz(0.3, 2);
+    for value in [0.4, -1.0] {
+        assert_state_eq(
+            &Statevector::from_circuit(&circ.bind(&[value]).unwrap()),
+            Statevector::from_circuit(&want.bind(&[value]).unwrap()).amplitudes(),
+        );
+    }
+
+    // Measurements and conditions inside a subroutine.
+    let source = r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit[2] q;
+        bit c;
+        def copy(qubit from, qubit to) {
+            c = measure from;
+            if (c) { x to; }
+        }
+        x q[0];
+        copy(q[0], q[1]);
+    "#;
+    let circ = qasm::parse(source).unwrap();
+    let mut s = Statevector::zero(2);
+    s.run_trajectory(&circ, &mut StdRng::seed_from_u64(1))
+        .unwrap();
+    assert!((s.amplitudes()[3].norm() - 1.0).abs() < 1e-12);
+}
+
+#[test]
 fn inputs_become_parameters() {
     let source = r#"
         OPENQASM 3.0;
@@ -326,7 +377,14 @@ fn errors_name_the_line() {
     let cases = [
         ("qubit[2] q;\nfoo q[0];", 2, "unknown gate"),
         ("qubit[2] q;\nh q[5];", 2, "out of range"),
-        ("qubit q;\ndef f() {}", 2, "not supported"),
+        ("qubit q;\nlet x = q;", 2, "not supported"),
+        ("qubit q;\ndef f(qubit a) -> bit { }", 2, "return values"),
+        (
+            "qubit[2] q;\ndef f(qubit a, qubit b) { cx a, b; }\nf(q[0], q[0]);",
+            3,
+            "twice",
+        ),
+        ("qubit q;\ndef f(qubit a) { f(a); }\nf(q);", 2, "recurses"),
         ("input float t;\nqubit q;\nrx(t * t) q;", 3, "linear"),
         ("qubit[2] q;\ncx q[0] q[1];", 2, "expected `;`"),
         ("qubit q;\nif (true) { qubit r; }", 2, "top level"),

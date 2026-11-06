@@ -13,10 +13,12 @@
 //!   broadcasting over whole registers;
 //! - `measure` in both syntaxes, `reset`, `barrier` (ignored), `gphase`;
 //! - `if`/`else` and `while` on classical expressions of bits and
-//!   registers, and `for` loops over ranges or sets, unrolled.
+//!   registers, and `for` loops over ranges or sets, unrolled;
+//! - `def` subroutines taking qubits, qubit arrays and numbers, without
+//!   return values, inlined at each call.
 //!
 //! Angles may use `pi`, `π`, `tau`, `euler`, arithmetic and the usual
-//! functions. Other statements (`def`, `let`, `switch`, timing, …) are
+//! functions. Other statements (`let`, `switch`, `break`, timing, …) are
 //! errors naming the line.
 
 use crate::circuit::Circuit;
@@ -25,6 +27,7 @@ use crate::error::Error;
 use crate::gate::Gate;
 use crate::parameter::{Angle, Parameter};
 use num_complex::Complex64 as C64;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::f64::consts::{E, PI, TAU};
 
@@ -237,6 +240,7 @@ enum Kind {
         name: String,
     },
     GateDef(GateDef),
+    Def(Subroutine),
     Call {
         name: String,
         modifiers: Vec<Modifier>,
@@ -272,6 +276,22 @@ struct GateDef {
     params: Vec<String>,
     qubits: Vec<String>,
     body: Vec<Stmt>,
+}
+
+/// A `def` subroutine without a return value, inlined at each call.
+#[derive(Clone, Debug)]
+struct Subroutine {
+    name: String,
+    params: Vec<SubParam>,
+    body: Vec<Stmt>,
+}
+
+#[derive(Clone, Debug)]
+enum SubParam {
+    /// `qubit q` (size `None`) or `qubit[n] q`.
+    Qubits(String, Option<Ex>),
+    /// A classical number: `float[64] x`, `angle a`, `int i`, ….
+    Value(String),
 }
 
 #[derive(Clone, Debug)]
@@ -561,7 +581,46 @@ impl Parser {
                 self.expect_sym(";")?;
                 Ok(Kind::GlobalPhase(phase))
             }
-            "def" | "let" | "const" | "switch" | "box" | "delay" | "defcal" | "cal" | "extern"
+            "def" => {
+                self.next();
+                let name = self.ident()?;
+                self.expect_sym("(")?;
+                let mut params = Vec::new();
+                while !self.eat_sym(")") {
+                    let ty = self.ident()?;
+                    let size = if self.eat_sym("[") {
+                        let size = self.expr()?;
+                        self.expect_sym("]")?;
+                        Some(size)
+                    } else {
+                        None
+                    };
+                    let param = self.ident()?;
+                    params.push(match ty.as_str() {
+                        "qubit" => SubParam::Qubits(param, size),
+                        "float" | "angle" | "int" | "uint" => SubParam::Value(param),
+                        _ => {
+                            return Err(error(
+                                self.line(),
+                                format!("subroutine arguments of type {ty} are not supported"),
+                            ));
+                        }
+                    });
+                    self.eat_sym(",");
+                }
+                if self.is_sym("->") {
+                    return Err(error(
+                        self.line(),
+                        "subroutines with return values are not supported",
+                    ));
+                }
+                if !self.is_sym("{") {
+                    return Err(error(self.line(), "expected the subroutine body"));
+                }
+                let body = self.block()?;
+                Ok(Kind::Def(Subroutine { name, params, body }))
+            }
+            "let" | "const" | "switch" | "box" | "delay" | "defcal" | "cal" | "extern"
             | "return" | "break" | "continue" | "output" | "int" | "uint" | "float" | "angle"
             | "bool" | "complex" | "stretch" | "duration" => Err(error(
                 self.line(),
@@ -679,7 +738,11 @@ impl Parser {
         Ok(Operand { name, index })
     }
 
+    /// Comma-separated operands, possibly none (as for subroutine calls).
     fn operands(&mut self) -> Result<Vec<Operand>, Error> {
+        if self.is_sym(";") {
+            return Ok(Vec::new());
+        }
         let mut operands = vec![self.operand()?];
         while self.eat_sym(",") {
             operands.push(self.operand()?);
@@ -815,6 +878,8 @@ struct Register {
 struct Scope {
     values: HashMap<String, Angle>,
     qubits: HashMap<String, usize>,
+    /// Qubit array arguments of a subroutine.
+    arrays: HashMap<String, Vec<usize>>,
     /// Inside a block, loop or gate body, where declarations aren't allowed.
     nested: bool,
 }
@@ -836,6 +901,9 @@ struct Lowering {
     inputs: HashMap<String, Parameter>,
     n_parameters: usize,
     gates: HashMap<String, GateDef>,
+    subroutines: HashMap<String, Subroutine>,
+    /// Subroutine calls in progress.
+    depth: Cell<usize>,
 }
 
 impl Lowering {
@@ -849,6 +917,8 @@ impl Lowering {
             inputs: HashMap::new(),
             n_parameters: 0,
             gates: HashMap::new(),
+            subroutines: HashMap::new(),
+            depth: Cell::new(0),
         };
         for stmt in program {
             match &stmt.kind {
@@ -879,6 +949,9 @@ impl Lowering {
                 }
                 Kind::GateDef(def) => {
                     l.gates.insert(def.name.clone(), def.clone());
+                }
+                Kind::Def(def) => {
+                    l.subroutines.insert(def.name.clone(), def.clone());
                 }
                 _ => {}
             }
@@ -912,11 +985,25 @@ impl Lowering {
         let instruction =
             |r: Result<&mut Circuit, Error>| r.map(|_| ()).map_err(|e| error(line, e.to_string()));
         match &stmt.kind {
-            Kind::Nothing | Kind::Input { .. } | Kind::GateDef(_) => Ok(()),
+            Kind::Nothing | Kind::Input { .. } | Kind::GateDef(_) | Kind::Def(_) => Ok(()),
             Kind::Qubits { .. } | Kind::Bits { .. } if scope.nested => {
                 Err(error(line, "declarations must be at the top level"))
             }
             Kind::Qubits { .. } | Kind::Bits { .. } => Ok(()),
+            Kind::Call {
+                name,
+                modifiers,
+                args,
+                operands,
+            } if self.subroutines.contains_key(name) => {
+                if !modifiers.is_empty() || !operands.is_empty() {
+                    return Err(error(
+                        line,
+                        format!("`{name}` is a subroutine: call it as `{name}(…);`"),
+                    ));
+                }
+                self.subroutine(circ, &self.subroutines[name], args, scope, line)
+            }
             Kind::Call {
                 name,
                 modifiers,
@@ -1025,6 +1112,81 @@ impl Lowering {
         }
     }
 
+    /// Inline a call to `def`. Its body sees its arguments and the global
+    /// registers, inputs and gates, but not the caller's local names.
+    fn subroutine(
+        &self,
+        circ: &mut Circuit,
+        def: &Subroutine,
+        args: &[Ex],
+        scope: &Scope,
+        line: usize,
+    ) -> Result<(), Error> {
+        if args.len() != def.params.len() {
+            return Err(error(
+                line,
+                format!("`{}` takes {} arguments", def.name, def.params.len()),
+            ));
+        }
+        let mut inner = Scope {
+            nested: true,
+            ..Scope::default()
+        };
+        let mut used: Vec<usize> = Vec::new();
+        for (param, arg) in def.params.iter().zip(args) {
+            match param {
+                SubParam::Value(name) => {
+                    inner
+                        .values
+                        .insert(name.clone(), self.angle(arg, scope, line)?);
+                }
+                SubParam::Qubits(name, size) => {
+                    let operand = match arg {
+                        Ex::Ident(n) => Operand {
+                            name: n.clone(),
+                            index: None,
+                        },
+                        Ex::Index(n, k) => Operand {
+                            name: n.clone(),
+                            index: Some((**k).clone()),
+                        },
+                        _ => return Err(error(line, format!("`{name}` takes qubits"))),
+                    };
+                    let qubits = self.qubits(&operand, scope, line)?;
+                    let want = match size {
+                        Some(size) => self.int(size, &Scope::default(), line)? as usize,
+                        None => 1,
+                    };
+                    if qubits.len() != want {
+                        return Err(error(
+                            line,
+                            format!("`{name}` takes {want} qubits, got {}", qubits.len()),
+                        ));
+                    }
+                    if let Some(q) = qubits.iter().find(|q| used.contains(q)) {
+                        return Err(error(line, format!("qubit {q} passed twice")));
+                    }
+                    used.extend(&qubits);
+                    match size {
+                        Some(_) => inner.arrays.insert(name.clone(), qubits),
+                        None => inner
+                            .qubits
+                            .insert(name.clone(), qubits[0])
+                            .map(|q| vec![q]),
+                    };
+                }
+            }
+        }
+        // Recursion could only be infinite, with no return values.
+        if self.depth.get() >= 64 {
+            return Err(error(line, format!("`{}` recurses too deeply", def.name)));
+        }
+        self.depth.set(self.depth.get() + 1);
+        let result = self.statements(circ, &def.body, &inner);
+        self.depth.set(self.depth.get() - 1);
+        result
+    }
+
     /// The qubit lists of a gate call: whole registers broadcast together.
     fn broadcast(
         &self,
@@ -1082,6 +1244,21 @@ impl Lowering {
                 return Err(error(line, "gate arguments can't be indexed"));
             }
             return Ok(vec![q]);
+        }
+        if let Some(array) = scope.arrays.get(&operand.name) {
+            return match &operand.index {
+                None => Ok(array.clone()),
+                Some(index) => {
+                    let k = self.int(index, scope, line)?;
+                    match usize::try_from(k).ok().and_then(|k| array.get(k)) {
+                        Some(&q) => Ok(vec![q]),
+                        None => Err(error(
+                            line,
+                            format!("index {k} out of range for `{}`", operand.name),
+                        )),
+                    }
+                }
+            };
         }
         self.register(&self.qregs, operand, scope, line, "qubit register")
     }
@@ -1535,6 +1712,7 @@ impl Lowering {
                         .cloned()
                         .zip(qubits.iter().copied())
                         .collect(),
+                    arrays: HashMap::new(),
                     nested: true,
                 };
                 for stmt in &def.body {

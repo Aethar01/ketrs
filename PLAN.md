@@ -138,7 +138,7 @@ Added along the way (from the Schwinger project's optimisations):
   a syntax tree, lowered onto `Circuit`: registers, inputs as parameters,
   `stdgates.inc` and `qelib1.inc`, gate definitions, modifiers,
   broadcasting, measurement, reset, `if`/`while` on classical expressions,
-  unrolled `for`. Round-trips Qiskit's `qasm3.dumps` and `qasm2.dumps`.
+  unrolled `for`, inlined `def` subroutines. Round-trips Qiskit's `qasm3.dumps` and `qasm2.dumps`.
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
@@ -160,7 +160,8 @@ Added along the way (from the Schwinger project's optimisations):
 
 - Noise on statevectors by quantum trajectories (for more qubits than a
   density matrix allows); readout error; Aer noise-model import.
-- OpenQASM: export (`to_qasm`), `def` subroutines.
+- OpenQASM: export (`to_qasm`); `break`/`continue`, which need loop
+  control in the classical driver.
 
 ## Benchmarks
 
