@@ -22,6 +22,7 @@ use crate::scalar::Scalar;
 use kernels::Prepared;
 use num_complex::Complex64 as C64;
 use rayon::prelude::*;
+use std::borrow::Cow;
 
 /// Circuits are partly fused (see [`Circuit::fused_where`]) before running
 /// on states at least this large. Below it the state fits in cache and the
@@ -250,8 +251,16 @@ impl<T: Scalar> DenseState<T> {
 /// `circuit` with each swap made by relabelling the qubits of everything
 /// after it, followed by the swaps that put the qubits back: at most one
 /// per qubit, never more than the circuit had, and they join batches of
-/// other gates wherever they fit. The global phase is left out.
-fn relabel_swaps(circuit: &Circuit) -> Circuit {
+/// other gates wherever they fit. The global phase is left out. Circuits
+/// without swaps are borrowed as they are.
+fn relabel_swaps(circuit: &Circuit) -> Cow<'_, Circuit> {
+    if !circuit
+        .ops()
+        .iter()
+        .any(|op| matches!(op, Operation::Swap(..)))
+    {
+        return Cow::Borrowed(circuit);
+    }
     let n = circuit.n_qubits();
     // Logical qubit q is held in physical qubit at[q]; holder is inverse.
     let mut at: Vec<usize> = (0..n).collect();
@@ -279,7 +288,7 @@ fn relabel_swaps(circuit: &Circuit) -> Circuit {
             (at[p], holder[p]) = (p, p);
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 fn prepare<T: Scalar>(ops: &[Operation]) -> Result<Vec<Prepared<T>>, Error> {
