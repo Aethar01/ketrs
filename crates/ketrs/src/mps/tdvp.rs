@@ -40,9 +40,8 @@ impl Mps {
     /// truncation, energy are conserved.
     ///
     /// While bonds are still growing (from a product state, say), each step
-    /// first enlarges them with the directions of `H|ψ⟩` (see the
-    /// [module docs](self)), so long-range couplings act from the first
-    /// step. With bonds already large enough, steps are exact up to the
+    /// first enlarges them with the directions of `H|ψ⟩` (a subspace
+    /// expansion), so long-range couplings act from the first step. With bonds already large enough, steps are exact up to the
     /// Krylov tolerance.
     pub fn tdvp(&mut self, hamiltonian: &PauliSum, time: f64, steps: usize) -> Result<(), Error> {
         let n = self.n_qubits();

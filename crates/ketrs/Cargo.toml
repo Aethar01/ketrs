@@ -1,6 +1,7 @@
 [package]
 name = "ketrs"
-description = "Quantum computer simulation backend"
+description = "Quantum computer simulator: statevectors, density matrices, MPS and Vulkan GPU, with OpenQASM 3"
+readme = "../../README.md"
 keywords = ["quantum", "simulation", "statevector", "physics"]
 categories = ["science", "simulation"]
 version.workspace = true

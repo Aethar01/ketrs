@@ -11,12 +11,25 @@ license = "MIT OR Apache-2.0"
 authors = [{ name = "Elliott Ashby" }]
 dependencies = ["numpy>=1.24"]
 dynamic = ["version"]
+keywords = ["quantum", "simulator", "statevector", "mps", "qiskit"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Repository = "https://github.com/Aethar01/ketrs"
+Changelog = "https://github.com/Aethar01/ketrs/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 qiskit = ["qiskit>=1.0"]
+aer = ["qiskit>=1.0", "qiskit-aer"]
 
 [dependency-groups]
-dev = ["maturin>=1.9,<2", "pytest", "qiskit>=1.0", "qiskit-aer"]
+dev = ["maturin>=1.9,<2", "pytest", "qiskit>=1.0", "qiskit-aer", "qiskit-qasm3-import", "scipy"]
 
 [tool.maturin]
 manifest-path = "crates/ketrs-py/Cargo.toml"

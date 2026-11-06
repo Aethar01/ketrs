@@ -13,7 +13,7 @@ A public, tested and benchmarked simulator. Make the core solid before adding mo
 - **Licence:** MIT OR Apache-2.0.
 - **Linear algebra:** `faer` (pure Rust, fast SVD, no system BLAS, so wheels are easy to build).
 - **MSRV:** Rust 1.88 (let-chains).
-- **Release point:** not decided yet.
+- **Release point:** 0.1.0, once CI passes on GitHub.
 
 ## Layout
 

@@ -29,14 +29,16 @@ basis-state index, and Pauli labels have qubit 0 rightmost.
 |---|---|
 | `Statevector` / `RealStatevector` | Any circuit, exactly. Parallel, cache-blocked, with gate fusion. The real (f64) variant halves memory for real circuits; single-precision `Statevector32` / `RealStatevector32` (`dtype="complex64"` / `"float32"`) halve it again and run 1.65× / 4× faster than complex128 at 22–26 qubits, to about `1e-6`. |
 | `SectorStatevector` | States confined to fixed Hamming weights (particle number, spin, charge): stores only that subspace, rejecting anything that leaves it. |
-| `DensityMatrix` | Mixed states and noise: Kraus channels (depolarizing, amplitude and phase damping, Pauli, any Kraus set) and noise models after every gate, matching Qiskit Aer's density-matrix method and 1.3–4.2× faster. |
-| `MPS` | Weakly entangled states of many qubits: TEBD, TDVP for Hamiltonians of any range, DMRG ground states, sampling, with controlled truncation. |
+| `DensityMatrix` | Mixed states and noise: Kraus channels (depolarizing, amplitude and phase damping, Pauli, any Kraus set) and noise models after every gate, matching Qiskit Aer's density-matrix method and 1.3–4.2× faster. For more qubits, statevectors run the same noise models (plus readout error) as quantum trajectories. |
+| `MPS` | Weakly entangled states of many qubits: TEBD, TDVP for Hamiltonians of any range (with subspace expansion while bonds grow), DMRG ground states, sampling, with controlled truncation. |
 | `GpuStatevector` | Large circuits on any Vulkan 1.2 GPU (NVIDIA, AMD, …), up to 31 qubits memory permitting, in double precision where the GPU has 64-bit floats or single (`complex64`, 2.8–5.8× faster on consumer cards) anywhere; expectation values, sampling, `H|ψ⟩`, adjoint gradients and exact `exp(-iHt)` (2.8–6.5× faster than the CPU at 18–24 qubits) run on the GPU. Needs only the system Vulkan driver at run time: no CUDA or ROCm. |
 
 ## Features
 
-- Gates from Qiskit's standard set, arbitrary 1- and 2-qubit unitaries, and
-  Pauli rotations `exp(-iθ/2·P)` of any weight applied in one pass.
+- Gates from Qiskit's standard set, arbitrary 1- and 2-qubit unitaries,
+  Pauli rotations `exp(-iθ/2·P)` of any weight applied in one pass, and
+  gates and swaps with any number of controls (`ccx`, `mcx`, `cswap`, …) on
+  every engine. `Circuit.control` controls a whole circuit.
 - Trotter–Suzuki circuits of any order; Qiskit `PauliEvolutionGate`s map
   directly.
 - Hamiltonians as Pauli sums, applied without forming a matrix: expectation
@@ -45,6 +47,9 @@ basis-state index, and Pauli labels have qubit 0 rightmost.
   an energy and its full gradient cost 2.3–3.5 energy evaluations (4-layer
   ansatz, 14–22 qubits), however many parameters there are.
 - Sampling and mid-circuit measurement on states.
+- Noise on statevectors by quantum trajectories (`noise=` on `run` and
+  `sample_circuit`), with readout error; `ketrs.qiskit.noise_model_from_aer`
+  converts Aer noise models that treat every qubit alike.
 - Measurement, reset and classical control (`if_test` with else branches,
   `while_loop`, conditions on bits, registers or classical expressions)
   inside circuits, on every engine: `run_trajectory` samples one
@@ -52,12 +57,16 @@ basis-state index, and Pauli labels have qubit 0 rightmost.
   prefix once and sampling the final state directly when all measurements
   are terminal.
 - `ketrs.from_qasm` (Rust: `ketrs::qasm::parse`) reads OpenQASM 3 and 2:
-  registers, inputs as parameters, the standard gates, `gate` definitions,
-  `inv`/`ctrl`/`pow` modifiers, measurement, reset, `if`, `while` and `for`.
+  registers, inputs as parameters, the standard gates and `qelib1.inc`,
+  `gate` definitions and `def` subroutines, `inv`/`ctrl(n)`/`negctrl(n)`/`pow`
+  modifiers, measurement, reset, `if`, `while` and `for`.
+  `Circuit.to_qasm()` writes OpenQASM 3 with standard gates only, which
+  Qiskit's `qasm3.loads` reads.
 - `ketrs.qiskit.from_qiskit` converts Qiskit circuits, including parametric
   ones, measurements, resets, `if_test`, `while_loop` and `for_loop` blocks
-  and classical expressions; unsupported gates are
-  expanded through their Qiskit definitions.
+  and classical expressions; controlled gates become native
+  multi-controlled ones, and other unsupported gates are expanded through
+  their Qiskit definitions.
 
 ## Performance
 
@@ -93,7 +102,7 @@ method.
 ## Development
 
 ```sh
-uv venv && uv pip install maturin pytest qiskit qiskit-aer numpy scipy
+uv venv && uv pip install maturin pytest qiskit qiskit-aer qiskit-qasm3-import numpy scipy
 maturin develop --release     # build the Python module (add --features gpu)
 cargo test --workspace        # Rust tests (add --all-features for the GPU)
 pytest                        # Python tests
@@ -105,7 +114,8 @@ GPU support is opt-in: build with `--features gpu` (Rust) or
 distribution's `shaderc`/`glslc` package, or set `GLSLC` to its path. Running
 needs only a Vulkan driver.
 
-Status: early development. See [PLAN.md](PLAN.md).
+Status: 0.1.0, the first release; APIs may still change. See
+[CHANGELOG.md](CHANGELOG.md) and [PLAN.md](PLAN.md).
 
 ## Licence
 
