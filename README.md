@@ -167,8 +167,8 @@ GPU support is opt-in: build with `--features gpu` (Rust) or
 distribution's `shaderc`/`glslc` package, or set `GLSLC` to its path. Running
 needs only a Vulkan driver.
 
-Status: 0.1.0, the first release; APIs may still change. See
-[CHANGELOG.md](CHANGELOG.md) and [PLAN.md](PLAN.md).
+Status: early releases (0.1); APIs may still change. See
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Licence
 
