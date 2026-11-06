@@ -158,7 +158,7 @@ impl Circuit {
                 block.binding = binding;
                 block
             };
-            if qubits.len() > 2 || qubits.is_empty() {
+            if qubits.len() > 2 || qubits.is_empty() || op.is_multi_controlled() {
                 for &q in &qubits {
                     last[q] = Some(blocks.len());
                 }
@@ -211,8 +211,12 @@ impl Circuit {
 
 /// The matrix of an operation on one or two qubits, indexed so that bit `t`
 /// of a row or column is the value of `qubits[t]`, with
-/// `qubits = op.qubits()`. `None` for larger operations.
+/// `qubits = op.qubits()`. `None` for larger operations and for
+/// multi-controlled ones, which engines apply directly.
 pub(crate) fn local_matrix(op: &Operation) -> Option<(Vec<usize>, Vec<Vec<C64>>)> {
+    if op.is_multi_controlled() {
+        return None;
+    }
     let qubits = op.qubits();
     let matrix = match qubits[..] {
         [_] => matrix2(op).iter().map(|row| row.to_vec()).collect(),
@@ -240,6 +244,9 @@ fn matrix4(op: &Operation, qubits: [usize; 2]) -> Matrix4 {
         Operation::Gate { gate, target } => return embed(&gate.matrix(), target == qubits[1]),
         Operation::PauliRotation { ref pauli, theta } => {
             return rotation(theta, |r, c| pauli_product(pauli, qubits, r, c));
+        }
+        Operation::MultiControlled { .. } | Operation::ControlledSwap { .. } => {
+            unreachable!("multi-controlled operations are never fused")
         }
         Operation::Controlled {
             gate,

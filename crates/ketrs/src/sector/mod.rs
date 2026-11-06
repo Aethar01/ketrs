@@ -345,6 +345,11 @@ impl<T: Scalar> SectorOp<T> {
         let breaks = || Error::BreaksSymmetry(format!("{op:?} leaves the sector"));
         let not_real =
             || Error::NotReal(format!("{op:?} has complex entries; use a complex state"));
+        if op.is_multi_controlled() {
+            return Err(Error::InvalidArgument(
+                "sector states don't support multi-controlled operations yet".into(),
+            ));
+        }
         if let Some((qubits, m)) = local_matrix(op) {
             let mut rows = vec![Vec::new(); m.len()];
             for (r, row) in m.iter().enumerate() {

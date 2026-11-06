@@ -45,6 +45,18 @@ pub(super) enum Prepared<T> {
         target: usize,
     },
     Swap(usize, usize),
+    /// `op` on `target` where every bit of the mask `controls` is set.
+    MultiControlled {
+        op: PairOp<T>,
+        controls: usize,
+        target: usize,
+    },
+    /// Exchange `a` and `b` where every bit of the mask `controls` is set.
+    ControlledSwap {
+        controls: usize,
+        a: usize,
+        b: usize,
+    },
     /// A 4×4 matrix with basis index `2·b(q1) + b(q0)`.
     Quad {
         op: QuadOp<T>,
@@ -61,6 +73,11 @@ pub(super) enum Prepared<T> {
         qubits: Vec<usize>,
         rows: Vec<Vec<(usize, T)>>,
     },
+}
+
+/// The bit mask of `qubits`.
+fn mask(qubits: &[usize]) -> usize {
+    qubits.iter().fold(0, |acc, q| acc | 1 << q)
 }
 
 impl<T: Scalar> Prepared<T> {
@@ -105,6 +122,20 @@ impl<T: Scalar> Prepared<T> {
                 target: *target,
             },
             Operation::Swap(a, b) => Prepared::Swap(*a, *b),
+            Operation::MultiControlled {
+                gate,
+                controls,
+                target,
+            } => Prepared::MultiControlled {
+                op: PairOp::new(&gate.matrix()).ok_or_else(not_real)?,
+                controls: mask(controls),
+                target: *target,
+            },
+            Operation::ControlledSwap { controls, a, b } => Prepared::ControlledSwap {
+                controls: mask(controls),
+                a: *a,
+                b: *b,
+            },
             Operation::Unitary2 { matrix, qubits } => Prepared::Quad {
                 op: QuadOp::new(matrix).ok_or_else(not_real)?,
                 q0: qubits[0],
@@ -128,6 +159,10 @@ impl<T: Scalar> Prepared<T> {
                 control, target, ..
             } => 1 << control | 1 << target,
             Prepared::Swap(a, b) => 1 << a | 1 << b,
+            Prepared::MultiControlled {
+                controls, target, ..
+            } => controls | 1 << target,
+            Prepared::ControlledSwap { controls, a, b } => controls | 1 << a | 1 << b,
             Prepared::Quad { q0, q1, .. } => 1 << q0 | 1 << q1,
             Prepared::Pauli { masks, .. } => masks.x | masks.z,
             Prepared::Dense { ref qubits, .. } => qubits.iter().fold(0, |acc, q| acc | 1 << q),
@@ -145,6 +180,12 @@ impl<T: Scalar> Prepared<T> {
                 control, target, ..
             } => (*control, *target) = (q(*control), q(*target)),
             Prepared::Swap(a, b) => (*a, *b) = (q(*a), q(*b)),
+            Prepared::MultiControlled {
+                controls, target, ..
+            } => (*controls, *target) = (tile.local(*controls), q(*target)),
+            Prepared::ControlledSwap { controls, a, b } => {
+                (*controls, *a, *b) = (tile.local(*controls), q(*a), q(*b))
+            }
             Prepared::Quad { q0, q1, .. } => (*q0, *q1) = (q(*q0), q(*q1)),
             Prepared::Pauli { masks, .. } => {
                 masks.x = tile.local(masks.x);
@@ -167,6 +208,20 @@ impl<T: Scalar> Prepared<T> {
                 target,
             } => apply_controlled(amps, op, *control, *target),
             Prepared::Swap(a, b) => apply_swap(amps, *a, *b),
+            Prepared::MultiControlled {
+                op,
+                controls,
+                target,
+            } => {
+                let t = 1 << target;
+                for_each_fixed_pair(amps, *controls, t, t, |x, y| {
+                    op.apply(std::slice::from_mut(x), std::slice::from_mut(y))
+                })
+            }
+            Prepared::ControlledSwap { controls, a, b } => {
+                let (a, b) = (1 << a, 1 << b);
+                for_each_fixed_pair(amps, controls | a, b, a | b, std::mem::swap)
+            }
             Prepared::Quad { op, q0, q1 } => apply_quad(amps, op, *q0, *q1),
             Prepared::Pauli { masks, op, .. } => apply_pauli_rotation(amps, *masks, op),
             Prepared::Dense { qubits, rows } => apply_dense(amps, qubits, rows),
@@ -514,6 +569,46 @@ fn apply_dense<T: Scalar>(amps: &mut [T], qubits: &[usize], rows: &[Vec<(usize, 
             .for_each(|c| run(c * chunk..((c + 1) * chunk).min(groups)));
     } else {
         run(0..groups);
+    }
+}
+
+/// Call `f(ψᵢ, ψ_{i⊕flip})` for every index `i` with every bit of `one`
+/// set and every bit of `zero` clear, touching only that subspace. `flip`
+/// must lie within `one | zero`, so the pairs are disjoint.
+fn for_each_fixed_pair<T: Scalar>(
+    amps: &mut [T],
+    one: usize,
+    zero: usize,
+    flip: usize,
+    f: impl Fn(&mut T, &mut T) + Sync,
+) {
+    let fixed = one | zero;
+    // The unchecked accesses below rely on this.
+    assert!(
+        fixed < amps.len() && one & zero == 0 && flip != 0 && flip & !fixed == 0,
+        "fixed bits within the state"
+    );
+    let free = (amps.len() - 1) & !fixed;
+    let count = amps.len() >> fixed.count_ones();
+    let pointer = SharedMut(amps.as_mut_ptr());
+    let run = |range: std::ops::Range<usize>| {
+        let amps = pointer.get();
+        for g in range {
+            let i = deposit(g, free) | one;
+            // SAFETY: i and i ⊕ flip are distinct (flip ≠ 0 within the
+            // fixed bits), in range, and differ from every other pair's
+            // indices, since the free bits g set are unique to this pair;
+            // each pair is handled by one task.
+            unsafe { f(&mut *amps.add(i), &mut *amps.add(i ^ flip)) };
+        }
+    };
+    if amps.len() >= PARALLEL_THRESHOLD {
+        let chunk = BLOCK;
+        (0..count.div_ceil(chunk))
+            .into_par_iter()
+            .for_each(|c| run(c * chunk..((c + 1) * chunk).min(count)));
+    } else {
+        run(0..count);
     }
 }
 

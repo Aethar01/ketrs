@@ -526,6 +526,20 @@ fn conjugate(op: &Operation, shift: usize) -> Operation {
             target: target + shift,
         },
         Operation::Swap(a, b) => Operation::Swap(a + shift, b + shift),
+        Operation::MultiControlled {
+            gate,
+            controls,
+            target,
+        } => Operation::MultiControlled {
+            gate: Gate::Unitary(conj2(gate.matrix())),
+            controls: controls.iter().map(|c| c + shift).collect(),
+            target: target + shift,
+        },
+        Operation::ControlledSwap { controls, a, b } => Operation::ControlledSwap {
+            controls: controls.iter().map(|c| c + shift).collect(),
+            a: a + shift,
+            b: b + shift,
+        },
         Operation::Unitary2 { .. } => {
             let (qubits, m) = local_matrix(op).expect("two-qubit operation");
             Operation::Unitary2 {

@@ -25,8 +25,29 @@ pub enum Operation {
         /// Target qubit.
         target: usize,
     },
+    /// A single-qubit gate applied to `target` where every one of
+    /// `controls` is `|1⟩` (any number, including none). Toffoli is `X` with
+    /// two controls.
+    MultiControlled {
+        /// The gate applied to `target`.
+        gate: Gate,
+        /// Control qubits.
+        controls: Vec<usize>,
+        /// Target qubit.
+        target: usize,
+    },
     /// Exchange two qubits.
     Swap(usize, usize),
+    /// Exchange `a` and `b` where every one of `controls` is `|1⟩` (any
+    /// number); Fredkin is one control.
+    ControlledSwap {
+        /// Control qubits.
+        controls: Vec<usize>,
+        /// First qubit exchanged.
+        a: usize,
+        /// Second qubit exchanged.
+        b: usize,
+    },
     /// An arbitrary two-qubit unitary.
     ///
     /// The matrix basis index is `2·b₁ + b₀`, where `bᵢ` is the value of
@@ -61,7 +82,22 @@ impl Operation {
             Operation::Swap(a, b) => vec![*a, *b],
             Operation::Unitary2 { qubits, .. } => qubits.to_vec(),
             Operation::PauliRotation { pauli, .. } => pauli.qubits().collect(),
+            Operation::MultiControlled {
+                controls, target, ..
+            } => controls.iter().copied().chain([*target]).collect(),
+            Operation::ControlledSwap { controls, a, b } => {
+                controls.iter().copied().chain([*a, *b]).collect()
+            }
         }
+    }
+
+    /// Whether the operation is a multi-controlled one, which engines
+    /// apply directly rather than as a matrix.
+    pub(crate) fn is_multi_controlled(&self) -> bool {
+        matches!(
+            self,
+            Operation::MultiControlled { .. } | Operation::ControlledSwap { .. }
+        )
     }
 
     /// The highest qubit index this operation acts on, or 0 if it acts on
@@ -75,6 +111,9 @@ impl Operation {
             Operation::Swap(a, b) => *a.max(b),
             Operation::Unitary2 { qubits, .. } => qubits[0].max(qubits[1]),
             Operation::PauliRotation { pauli, .. } => pauli.min_qubits().saturating_sub(1),
+            Operation::MultiControlled { .. } | Operation::ControlledSwap { .. } => {
+                self.qubits().into_iter().max().unwrap_or(0)
+            }
         }
     }
 
@@ -95,7 +134,9 @@ impl Operation {
     /// Replace the rotation angle of a parametrisable operation.
     fn set_angle(&mut self, value: f64) {
         match self {
-            Operation::Gate { gate, .. } | Operation::Controlled { gate, .. } => {
+            Operation::Gate { gate, .. }
+            | Operation::Controlled { gate, .. }
+            | Operation::MultiControlled { gate, .. } => {
                 *gate = match gate {
                     Gate::Rx(_) => Gate::Rx(value),
                     Gate::Ry(_) => Gate::Ry(value),
@@ -126,6 +167,16 @@ impl Operation {
                 target: *target,
             },
             Operation::Swap(a, b) => Operation::Swap(*a, *b),
+            Operation::MultiControlled {
+                gate,
+                controls,
+                target,
+            } => Operation::MultiControlled {
+                gate: gate.inverse(),
+                controls: controls.clone(),
+                target: *target,
+            },
+            Operation::ControlledSwap { .. } => self.clone(),
             Operation::Unitary2 { matrix, qubits } => Operation::Unitary2 {
                 matrix: adjoint(matrix),
                 qubits: *qubits,
@@ -622,6 +673,44 @@ impl Circuit {
         self.add(Operation::Gate { gate, target })
     }
 
+    /// `gate` on `target` where every qubit in `controls` is `|1⟩`.
+    ///
+    /// # Panics
+    /// If a qubit is out of range or repeated (controls included); use
+    /// [`push`](Self::push) with [`Operation::MultiControlled`] for an
+    /// error instead.
+    pub fn multi_controlled(&mut self, gate: Gate, controls: &[usize], target: usize) -> &mut Self {
+        self.add(Operation::MultiControlled {
+            gate,
+            controls: controls.to_vec(),
+            target,
+        })
+    }
+
+    /// `X` on `target` where every qubit in `controls` is `|1⟩`.
+    pub fn mcx(&mut self, controls: &[usize], target: usize) -> &mut Self {
+        self.multi_controlled(Gate::X, controls, target)
+    }
+
+    /// Toffoli: `X` on `target` where `a` and `b` are both `|1⟩`.
+    pub fn ccx(&mut self, a: usize, b: usize, target: usize) -> &mut Self {
+        self.mcx(&[a, b], target)
+    }
+
+    /// Exchange `a` and `b` where every qubit in `controls` is `|1⟩`.
+    pub fn controlled_swap(&mut self, controls: &[usize], a: usize, b: usize) -> &mut Self {
+        self.add(Operation::ControlledSwap {
+            controls: controls.to_vec(),
+            a,
+            b,
+        })
+    }
+
+    /// Fredkin: exchange `a` and `b` where `control` is `|1⟩`.
+    pub fn cswap(&mut self, control: usize, a: usize, b: usize) -> &mut Self {
+        self.controlled_swap(&[control], a, b)
+    }
+
     /// Apply a controlled single-qubit gate.
     pub fn controlled(&mut self, gate: Gate, control: usize, target: usize) -> &mut Self {
         self.add(Operation::Controlled {
@@ -891,6 +980,20 @@ fn commuting_layers(terms: &[(f64, PauliString)], n_qubits: usize) -> Vec<(f64, 
         rest = &rest[run..];
     }
     out
+}
+
+impl Circuit {
+    /// Fail if the circuit has a multi-controlled operation, for engines
+    /// that don't apply them yet.
+    pub(crate) fn check_no_multi_controlled(&self, engine: &str) -> Result<(), Error> {
+        match self.ops().iter().find(|op| op.is_multi_controlled()) {
+            Some(op) => Err(Error::InvalidArgument(format!(
+                "{engine} doesn't support multi-controlled operations yet ({op:?}); \
+                 use a statevector or density matrix"
+            ))),
+            None => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]

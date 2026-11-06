@@ -142,6 +142,13 @@ impl<T: Scalar> DenseState<T> {
         }))
     }
 
+    /// Add a qubit in `|0⟩` as the new most significant qubit: the state
+    /// becomes `|0⟩ ⊗ |ψ⟩`, keeping every existing qubit's index.
+    pub fn add_qubit(&mut self) {
+        self.amps.resize(2 * self.amps.len(), T::ZERO);
+        self.n_qubits += 1;
+    }
+
     /// Apply one operation.
     pub fn apply(&mut self, op: &Operation) -> Result<(), Error> {
         op.validate(self.n_qubits)?;

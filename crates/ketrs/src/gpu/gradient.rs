@@ -206,6 +206,7 @@ fn sweep(
     mut psi: GpuStatevector,
     lambda: GpuStatevector,
 ) -> Result<(f64, Vec<f64>), Error> {
+    circuit.check_no_multi_controlled("the GPU engine")?;
     let bound = circuit.bind(parameters)?;
     let n = bound.n_qubits();
     let amps = psi.len() as u32;

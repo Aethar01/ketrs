@@ -85,6 +85,30 @@ pub fn reference_run(circ: &Circuit) -> Vec<C64> {
                     }
                 }
             }
+            Operation::MultiControlled {
+                gate,
+                ref controls,
+                target,
+            } => {
+                let m = gate.matrix();
+                let cmask: usize = controls.iter().map(|c| 1 << c).sum();
+                for i in 0..amps.len() {
+                    if i & cmask == cmask && i & (1 << target) == 0 {
+                        let j = i | 1 << target;
+                        let (x, y) = (amps[i], amps[j]);
+                        amps[i] = m[0][0] * x + m[0][1] * y;
+                        amps[j] = m[1][0] * x + m[1][1] * y;
+                    }
+                }
+            }
+            Operation::ControlledSwap { ref controls, a, b } => {
+                let cmask: usize = controls.iter().map(|c| 1 << c).sum();
+                for i in 0..amps.len() {
+                    if i & cmask == cmask && i & (1 << a) != 0 && i & (1 << b) == 0 {
+                        amps.swap(i, i ^ (1 << a) ^ (1 << b));
+                    }
+                }
+            }
             Operation::Unitary2 { matrix, qubits } => {
                 let [q0, q1] = qubits;
                 for i in 0..amps.len() {

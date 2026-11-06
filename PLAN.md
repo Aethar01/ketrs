@@ -153,7 +153,10 @@ Added along the way (from the Schwinger project's optimisations):
 
 - Noise on statevectors by quantum trajectories (for more qubits than a
   density matrix allows); readout error; Aer noise-model import.
-- OpenQASM: export (`to_qasm`), `def` subroutines, multi-controlled gates.
+- Multi-controlled operations on the MPS and GPU engines (statevectors and
+  density matrices have them).
+- OpenQASM: export (`to_qasm`), `def` subroutines, `ctrl(n) @` and `c3x`
+  onto the native multi-controlled operations.
 
 ## Benchmarks
 

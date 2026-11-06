@@ -42,6 +42,25 @@ fn operation(n: usize) -> impl Strategy<Value = Operation> {
             target
         }),
         pair(n).prop_map(|(a, b)| Operation::Swap(a, b)),
+        // Any set of controls, including none.
+        (gate(), 0..n, prop::collection::vec(any::<bool>(), n)).prop_map(
+            |(gate, target, chosen)| Operation::MultiControlled {
+                gate,
+                controls: (0..chosen.len())
+                    .filter(|&q| chosen[q] && q != target)
+                    .collect(),
+                target,
+            }
+        ),
+        (pair(n), prop::collection::vec(any::<bool>(), n)).prop_map(|((a, b), chosen)| {
+            Operation::ControlledSwap {
+                controls: (0..chosen.len())
+                    .filter(|&q| chosen[q] && q != a && q != b)
+                    .collect(),
+                a,
+                b,
+            }
+        }),
         (gate(), gate(), pair(n)).prop_map(|(g0, g1, (q0, q1))| Operation::Unitary2 {
             matrix: kron(&g1.matrix(), &g0.matrix()),
             qubits: [q0, q1],
@@ -102,6 +121,7 @@ fn as_unitary2(op: &Operation) -> Option<Operation> {
             matrix: swap_matrix(),
             qubits: [a, b],
         }),
+        Operation::MultiControlled { .. } | Operation::ControlledSwap { .. } => None,
         Operation::Gate { gate, target } => {
             // Pair with any other qubit, acting as identity on it.
             let other = if target == 0 { 1 } else { 0 };

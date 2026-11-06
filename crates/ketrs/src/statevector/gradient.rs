@@ -63,6 +63,15 @@ impl Generator {
                 control,
                 target,
             } => single(gate, *target, 1 << control),
+            Operation::MultiControlled {
+                gate,
+                controls,
+                target,
+            } => single(
+                gate,
+                *target,
+                controls.iter().fold(0, |acc, c| acc | 1 << c),
+            ),
             Operation::PauliRotation { pauli, .. } => Generator {
                 masks: pauli.masks(),
                 controls: 0,
