@@ -94,6 +94,11 @@ Added along the way (from the Schwinger project's optimisations):
   instead of per gate (1.3× faster at 22 qubits). States of 13–15 qubits,
   too small for per-gate threading, are cut into 16 tiles that run in
   parallel (2.1× faster at 14 qubits, 1.5× for gradients).
+- **Tabulated Pauli sums**: for evolution and eigensolvers, each X-mask
+  group's coefficients are tabulated per row (up to 64 MiB), an implicit
+  sparse matrix, and rows run in parallel from 2^11 amplitudes. Ground
+  states at 14 qubits went from 4.5× slower than scipy's `eigsh` to 2.7×
+  faster.
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
@@ -104,8 +109,6 @@ Added along the way (from the Schwinger project's optimisations):
 
 ## Later
 
-- Optional cached sparse matrix for repeated `H|ψ⟩` on small states, where
-  scipy's CSR still wins.
 - Single precision (`f32`/`Complex32`) behind the same `Scalar` trait.
 - MPS: apply gates on disjoint bonds in parallel (single-threaded now; still
   1.5–2.5× faster than Aer's MPS). TDVP for long-range real-time dynamics

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f3abb306833b09fcb599a27d62ad134bb0c1de3c7ec952255c6433af991d671b # shrinks to (n, h, seed, t) = (1, PauliSum { terms: [(-1.5150265463015722, PauliString { ops: [(0, Y)] })] }, 0, -2.621488354913547)

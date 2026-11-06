@@ -70,9 +70,9 @@ On a Ryzen 5 5600X, against Qiskit Aer 0.18 in its fastest configuration
   card.
 - MPS (TEBD of an Ising chain, 50–100 qubits): 1.5–2.5× faster than Aer's
   MPS method, agreeing to `1e-10`.
-- Exact evolution and ground states: 4–6× faster than scipy's
-  `expm_multiply` and `eigsh` at 18–20 qubits; scipy's sparse matrices still
-  win on small (≤ 14 qubit) systems.
+- Exact evolution and ground states: faster than scipy's `expm_multiply`
+  and `eigsh` (with the sparse matrix built in advance) at every size from
+  12 qubits: 1.7× at 12, 2.5–2.7× at 14, 3.5–12× at 18–20.
 
 ## Example
 

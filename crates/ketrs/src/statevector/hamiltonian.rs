@@ -15,11 +15,28 @@ use std::ops::Range;
 /// Every string with X-mask `x` sends `|i⟩` to `|i ⊕ x⟩`, so terms sharing
 /// `x` form one group and `(Hψ)_j = Σₓ cₓ(j ⊕ x) ψ_{j⊕x}`, where
 /// `cₓ(i) = Σₜ cₜ iⁿʸ (-1)^|i ∧ zₜ|`. All the Z-type terms (`x = 0`) form a
-/// single diagonal, which can be tabulated once for repeated use.
+/// single diagonal. For repeated use, the diagonal and, memory permitting,
+/// every `cₓ(j ⊕ x)` can be tabulated once, so each row costs a load and a
+/// multiply per group instead of a sign sum per term: in effect a sparse
+/// matrix whose column indices are implicit.
 pub(super) struct CompiledPauliSum<T> {
     diagonal: Diagonal,
     groups: Vec<Group<T>>,
+    /// If tabulated, `table[j·G + g] = c_{x_g}(j ⊕ x_g)` for `G` groups.
+    table: Option<Vec<T>>,
 }
+
+/// Most memory spent tabulating group coefficients. Past this the state no
+/// longer fits in cache and recomputing the signs costs less than loading
+/// a table.
+const TABLE_BYTES: usize = 64 << 20;
+
+/// `H|ψ⟩` rows are expensive, so they run in parallel from this many
+/// amplitudes, much smaller than gates' `PARALLEL_THRESHOLD`...
+const ROW_PARALLEL_THRESHOLD: usize = 1 << 11;
+
+/// ...in chunks of this many rows.
+const ROW_CHUNK: usize = 1 << 8;
 
 enum Diagonal {
     /// `(z, c)` pairs, evaluated per amplitude.
@@ -114,11 +131,25 @@ impl<T: Scalar> CompiledPauliSum<T> {
         hamiltonian: &PauliSum,
         n_qubits: usize,
         imaginary: Imaginary,
-        tabulate_diagonal: bool,
+        tabulate: bool,
     ) -> Result<Self, Error> {
         let GroupedPauliSum { diagonal, groups } =
             GroupedPauliSum::new(hamiltonian, n_qubits, imaginary)?;
-        let diagonal = if tabulate_diagonal && diagonal.len() > 1 {
+        let n_groups = groups.len();
+        let table_bytes = (n_groups << n_qubits) * std::mem::size_of::<T>();
+        let table = (tabulate && n_groups > 0 && table_bytes <= TABLE_BYTES).then(|| {
+            let mut table = vec![T::ZERO; n_groups << n_qubits];
+            table
+                .par_chunks_mut(n_groups)
+                .enumerate()
+                .for_each(|(j, row)| {
+                    for (c, group) in row.iter_mut().zip(&groups) {
+                        *c = group.coefficient(j ^ group.x);
+                    }
+                });
+            table
+        });
+        let diagonal = if tabulate && diagonal.len() > 1 {
             let mut table = vec![0.0; 1 << n_qubits];
             table
                 .par_iter_mut()
@@ -128,7 +159,11 @@ impl<T: Scalar> CompiledPauliSum<T> {
         } else {
             Diagonal::Terms(diagonal)
         };
-        Ok(CompiledPauliSum { diagonal, groups })
+        Ok(CompiledPauliSum {
+            diagonal,
+            groups,
+            table,
+        })
     }
 
     /// `(Hψ)_j`.
@@ -139,9 +174,16 @@ impl<T: Scalar> CompiledPauliSum<T> {
             Diagonal::Table(table) => table[j],
         };
         let mut acc = T::from_real(d) * psi[j];
-        for group in &self.groups {
-            let i = j ^ group.x;
-            acc += group.coefficient(i) * psi[i];
+        if let Some(table) = &self.table {
+            let n = self.groups.len();
+            for (group, &c) in self.groups.iter().zip(&table[j * n..(j + 1) * n]) {
+                acc += c * psi[j ^ group.x];
+            }
+        } else {
+            for group in &self.groups {
+                let i = j ^ group.x;
+                acc += group.coefficient(i) * psi[i];
+            }
         }
         acc
     }
@@ -159,10 +201,10 @@ impl<T: Scalar> LinearOperator<T> for CompiledPauliSum<T> {
                 *o = self.row(psi, offset + k);
             }
         };
-        if out.len() >= PARALLEL_THRESHOLD {
-            out.par_chunks_mut(BLOCK)
+        if out.len() >= ROW_PARALLEL_THRESHOLD {
+            out.par_chunks_mut(ROW_CHUNK)
                 .enumerate()
-                .for_each(|(i, chunk)| fill(i * BLOCK, chunk));
+                .for_each(|(i, chunk)| fill(i * ROW_CHUNK, chunk));
         } else {
             fill(0, out);
         }
