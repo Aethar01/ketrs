@@ -600,3 +600,106 @@ fn export_round_trips_classical_control() {
     );
     assert!(bad.to_qasm().is_err());
 }
+
+#[test]
+fn break_and_continue() {
+    let source = r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit[6] q;
+        bit[6] c;
+        bit f;
+        // Static conditions on the loop variable.
+        for uint i in [0:3] {
+            if (i == 2) { break; }
+            x q[i];
+        }
+        for uint i in [2:5] {
+            if (i == 3) continue;
+            x q[i];
+        }
+        // Repeat until success, leaving by `break`.
+        while (true) {
+            reset q[5];
+            h q[5];
+            f = measure q[5];
+            if (f) { break; }
+        }
+        // `continue` skips the rest of the body until q[4] reads 1.
+        reset q[4];
+        f = measure q[4];
+        while (!f) {
+            h q[4];
+            f = measure q[4];
+            if (!f) { continue; }
+            x q[3];
+        }
+        c = measure q;
+    "#;
+    let circ = qasm::parse(source).unwrap();
+    for seed in 0..20 {
+        let mut s = Statevector::zero(6);
+        let bits = s
+            .run_trajectory(&circ, &mut StdRng::seed_from_u64(seed))
+            .unwrap();
+        // q0 and q1 from the first loop; q2 from the second, which skips
+        // q3; q3 from the last loop, which leaves q4 at 1, as the
+        // repeat-until-success loop leaves q5.
+        assert_eq!(
+            bits[..6],
+            [true, true, true, true, true, true],
+            "seed {seed}"
+        );
+    }
+    // Written out and read back, the same histories.
+    let back = round_trip(&circ);
+    let counts = |c: &Circuit| {
+        Statevector::zero(6)
+            .sample_circuit(c, 50, &mut StdRng::seed_from_u64(4))
+            .unwrap()
+    };
+    assert_eq!(counts(&back), counts(&circ));
+
+    for (source, text) in [
+        ("qubit q;\nbreak;", "inside a loop"),
+        (
+            "qubit q;\ndef f(qubit a) { break; }\nwhile (true) { f(q); }",
+            "inside a loop",
+        ),
+    ] {
+        match qasm::parse(source) {
+            Err(Error::Parse { message, .. }) => assert!(message.contains(text), "{message}"),
+            other => panic!("{source}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn breaking_loops_from_the_circuit_api() {
+    // A for loop of three passes that stops at the first measured 1.
+    let mut circ = Circuit::with_clbits(3, 3);
+    let passes = (0..3)
+        .map(|k| {
+            let mut pass = Circuit::with_clbits(3, 3);
+            pass.x(k).measure(k, k);
+            let mut stop = Circuit::with_clbits(3, 3);
+            stop.break_loop();
+            pass.if_test(ketrs::Expr::Bit(k), stop, None);
+            pass.x(k);
+            pass
+        })
+        .collect();
+    circ.for_loop(passes);
+    let bits = Statevector::zero(3)
+        .run_trajectory(&circ, &mut StdRng::seed_from_u64(0))
+        .unwrap();
+    assert_eq!(bits, [true, false, false]);
+    // Outside a loop, running fails.
+    let mut stray = Circuit::with_clbits(1, 1);
+    stray.break_loop();
+    assert!(
+        Statevector::zero(1)
+            .run_trajectory(&stray, &mut StdRng::seed_from_u64(0))
+            .is_err()
+    );
+}

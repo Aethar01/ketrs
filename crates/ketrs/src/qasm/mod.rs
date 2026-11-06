@@ -14,12 +14,14 @@
 //!   broadcasting over whole registers;
 //! - `measure` in both syntaxes, `reset`, `barrier` (ignored), `gphase`;
 //! - `if`/`else` and `while` on classical expressions of bits and
-//!   registers, and `for` loops over ranges or sets, unrolled;
+//!   registers, `for` loops over ranges or sets (unrolled, or kept as one
+//!   body per pass when they `break` or `continue`), `break` and
+//!   `continue`;
 //! - `def` subroutines taking qubits, qubit arrays and numbers, without
 //!   return values, inlined at each call.
 //!
 //! Angles may use `pi`, `π`, `tau`, `euler`, arithmetic and the usual
-//! functions. Other statements (`let`, `switch`, `break`, timing, …) are
+//! functions. Other statements (`let`, `switch`, timing, …) are
 //! errors naming the line.
 
 mod export;
@@ -272,6 +274,8 @@ enum Kind {
         body: Vec<Stmt>,
     },
     GlobalPhase(Ex),
+    Break,
+    Continue,
     Nothing,
 }
 
@@ -625,9 +629,18 @@ impl Parser {
                 let body = self.block()?;
                 Ok(Kind::Def(Subroutine { name, params, body }))
             }
+            "break" | "continue" => {
+                self.next();
+                self.expect_sym(";")?;
+                Ok(if word == "break" {
+                    Kind::Break
+                } else {
+                    Kind::Continue
+                })
+            }
             "let" | "const" | "switch" | "box" | "delay" | "defcal" | "cal" | "extern"
-            | "return" | "break" | "continue" | "output" | "int" | "uint" | "float" | "angle"
-            | "bool" | "complex" | "stretch" | "duration" => Err(error(
+            | "return" | "output" | "int" | "uint" | "float" | "angle" | "bool" | "complex"
+            | "stretch" | "duration" => Err(error(
                 self.line(),
                 format!("`{word}` statements are not supported"),
             )),
@@ -887,6 +900,8 @@ struct Scope {
     arrays: HashMap<String, Vec<usize>>,
     /// Inside a block, loop or gate body, where declarations aren't allowed.
     nested: bool,
+    /// Inside a loop body, where `break` and `continue` are allowed.
+    in_loop: bool,
 }
 
 impl Scope {
@@ -1065,10 +1080,19 @@ impl Lowering {
                     otherwise: Box::new(else_circ),
                 }))
             }
+            Kind::Break | Kind::Continue if !scope.in_loop => {
+                Err(error(line, "`break` and `continue` must be inside a loop"))
+            }
+            Kind::Break => instruction(circ.push_instruction(crate::Instruction::Break)),
+            Kind::Continue => instruction(circ.push_instruction(crate::Instruction::Continue)),
             Kind::While { condition, body } => {
                 let condition = self.condition(condition, scope, line)?;
                 let mut body_circ = self.empty();
-                self.statements(&mut body_circ, body, &scope.nested())?;
+                let inner = Scope {
+                    in_loop: true,
+                    ..scope.nested()
+                };
+                self.statements(&mut body_circ, body, &inner)?;
                 instruction(circ.push_instruction(crate::Instruction::While {
                     condition,
                     body: Box::new(body_circ),
@@ -1099,12 +1123,28 @@ impl Lowering {
                         values
                     }
                 };
-                for v in values {
-                    let mut inner = scope.nested();
+                let scope_for = |v: f64| {
+                    let mut inner = Scope {
+                        in_loop: true,
+                        ..scope.nested()
+                    };
                     inner.values.insert(var.clone(), Angle::Value(v));
-                    self.statements(circ, body, &inner)?;
+                    inner
+                };
+                if !breaks(body) {
+                    // Unrolled into the surrounding circuit.
+                    for v in values {
+                        self.statements(circ, body, &scope_for(v))?;
+                    }
+                    return Ok(());
                 }
-                Ok(())
+                let mut passes = Vec::with_capacity(values.len());
+                for v in values {
+                    let mut pass = self.empty();
+                    self.statements(&mut pass, body, &scope_for(v))?;
+                    passes.push(pass);
+                }
+                instruction(circ.push_instruction(crate::Instruction::For { passes }))
             }
             Kind::GlobalPhase(phase) => match self.angle(phase, scope, line)? {
                 Angle::Value(v) => {
@@ -1723,6 +1763,7 @@ impl Lowering {
                         .collect(),
                     arrays: HashMap::new(),
                     nested: true,
+                    in_loop: false,
                 };
                 for stmt in &def.body {
                     match &stmt.kind {
@@ -1736,6 +1777,18 @@ impl Lowering {
         }
         Ok(())
     }
+}
+
+/// Whether `body` has a `break` or `continue` for its own loop (outside
+/// any nested loop).
+fn breaks(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match &stmt.kind {
+        Kind::Break | Kind::Continue => true,
+        Kind::If {
+            then, otherwise, ..
+        } => breaks(then) || breaks(otherwise),
+        _ => false,
+    })
 }
 
 /// `U(θ, φ, λ)` as in OpenQASM.

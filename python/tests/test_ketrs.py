@@ -186,13 +186,31 @@ def test_qiskit_expression_conditions():
     assert fires(lambda c: expr.equal(expr.bit_not(c), 2))
 
 
-def test_unsupported_control_flow_is_rejected():
-    qc = QuantumCircuit(1, 1)
+def test_qiskit_break_and_continue():
+    # A for loop that stops once q0 reads 1, and a while loop that skips
+    # its last gate with continue until it succeeds.
+    qc = QuantumCircuit(4, 4)
+    with qc.for_loop(range(3)) as i:
+        qc.rx(np.pi * i, 0)
+        qc.measure(0, 3)
+        with qc.if_test((qc.clbits[3], 1)):
+            qc.break_loop()
+        qc.x(3)
+    qc.measure(3, 0)
+    counts = ketrs.Statevector(4, seed=1).sample_circuit(from_qiskit(qc), 20)
+    # Pass 0 reads 0 and flips q3; pass 1 reads 1 and stops.
+    assert counts == {"1001": 20}
+
+    qc = QuantumCircuit(2, 2)
     with qc.while_loop((qc.clbits[0], 0)):
+        qc.h(0)
         qc.measure(0, 0)
-        qc.break_loop()
-    with pytest.raises(NotImplementedError, match="break_loop"):
-        from_qiskit(qc)
+        with qc.if_test((qc.clbits[0], 0)):
+            qc.continue_loop()
+        qc.x(1)
+    qc.measure(1, 1)
+    counts = ketrs.Statevector(2, seed=2).sample_circuit(from_qiskit(qc), 50)
+    assert counts == {"11": 50}
 
 
 def test_nonlinear_parameter_is_rejected():

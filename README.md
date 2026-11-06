@@ -51,22 +51,22 @@ basis-state index, and Pauli labels have qubit 0 rightmost.
   `sample_circuit`), with readout error; `ketrs.qiskit.noise_model_from_aer`
   converts Aer noise models that treat every qubit alike.
 - Measurement, reset and classical control (`if_test` with else branches,
-  `while_loop`, conditions on bits, registers or classical expressions)
-  inside circuits, on every engine: `run_trajectory` samples one
-  history, `sample_circuit` returns counts, simulating the deterministic
-  prefix once and sampling the final state directly when all measurements
-  are terminal.
+  `while_loop`, `for_loop`, `break_loop`/`continue_loop`, conditions on
+  bits, registers or classical expressions) inside circuits, on every
+  engine: `run_trajectory` samples one history, `sample_circuit` returns
+  counts, simulating the deterministic prefix once and sampling the final
+  state directly when all measurements are terminal.
 - `ketrs.from_qasm` (Rust: `ketrs::qasm::parse`) reads OpenQASM 3 and 2:
   registers, inputs as parameters, the standard gates and `qelib1.inc`,
   `gate` definitions and `def` subroutines, `inv`/`ctrl(n)`/`negctrl(n)`/`pow`
-  modifiers, measurement, reset, `if`, `while` and `for`.
-  `Circuit.to_qasm()` writes OpenQASM 3 with standard gates only, which
-  Qiskit's `qasm3.loads` reads.
+  modifiers, measurement, reset, `if`, `while` and `for` with `break` and
+  `continue`. `Circuit.to_qasm()` writes OpenQASM 3 with standard gates
+  only, which Qiskit's `qasm3.loads` reads.
 - `ketrs.qiskit.from_qiskit` converts Qiskit circuits, including parametric
   ones, measurements, resets, `if_test`, `while_loop` and `for_loop` blocks
-  and classical expressions; controlled gates become native
-  multi-controlled ones, and other unsupported gates are expanded through
-  their Qiskit definitions.
+  with `break_loop`/`continue_loop`, and classical expressions; controlled
+  gates become native multi-controlled ones, and other unsupported gates are
+  expanded through their Qiskit definitions.
 
 ## Performance
 

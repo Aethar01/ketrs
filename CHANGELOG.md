@@ -23,8 +23,9 @@ First release.
   rotations of any weight, and gates and swaps with any number of
   controls, on every engine. `Circuit::control` controls a whole circuit.
 - Linear parameters, `bind`, and adjoint gradients for any loss.
-- Measurement, reset, `if`/`else` and `while` on classical expressions,
-  through one trajectory driver on every engine.
+- Measurement, reset, `if`/`else`, `while` and `for` on classical
+  expressions, with `break` and `continue`, through one trajectory driver
+  on every engine.
 - Trotter–Suzuki circuits of any order, with commuting terms packed into
   layers.
 
@@ -41,15 +42,16 @@ First release.
 ### Interoperability
 
 - OpenQASM 3 and 2 import (`qasm::parse`): gate definitions, `def`
-  subroutines, `inv`/`pow`/`ctrl(n)`/`negctrl(n)` modifiers, control flow.
+  subroutines, `inv`/`pow`/`ctrl(n)`/`negctrl(n)` modifiers, control flow
+  including `break` and `continue`.
 - OpenQASM 3 export (`Circuit::to_qasm`) with standard gates only.
 - Python bindings (`pip install ketrs`, module `ketrs`), with converters
   from Qiskit circuits, `SparsePauliOp`s and Aer noise models.
 
 ### Known limitations
 
-- OpenQASM `break`, `continue`, `switch` and subroutines with return
-  values are not supported.
+- OpenQASM `switch`, classical variables other than bits, and subroutines
+  with return values are not supported.
 - Aer noise models must apply the same errors on every qubit.
 - The GPU engine needs a Vulkan 1.2 driver; double precision needs
   `shaderFloat64`.

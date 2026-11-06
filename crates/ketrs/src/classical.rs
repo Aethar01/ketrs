@@ -222,6 +222,18 @@ pub enum Instruction {
         /// Run on each pass.
         body: Box<Circuit>,
     },
+    /// Run each circuit of `passes` in turn: a `for` loop, one circuit per
+    /// value of its variable. Loops are normally unrolled into plain gates;
+    /// this form is for bodies that [`Break`](Self::Break) or
+    /// [`Continue`](Self::Continue).
+    For {
+        /// The body for each pass, in order.
+        passes: Vec<Circuit>,
+    },
+    /// Leave the innermost enclosing `while` or `for` loop.
+    Break,
+    /// Go on to the innermost enclosing loop's next pass.
+    Continue,
 }
 
 /// A circuit cut at its instructions: runs of gates and the instructions

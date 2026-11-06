@@ -449,6 +449,12 @@ impl Circuit {
                 condition.validate(self.n_clbits)?;
                 self.check_block(body)?;
             }
+            Instruction::For { passes } => {
+                for body in passes {
+                    self.check_block(body)?;
+                }
+            }
+            Instruction::Break | Instruction::Continue => {}
         }
         self.instructions.push((self.ops.len(), instruction));
         Ok(self)
@@ -518,6 +524,27 @@ impl Circuit {
             condition: condition.into(),
             body: Box::new(body),
         })
+    }
+
+    /// Run each circuit of `passes` in turn, as a `for` loop whose bodies
+    /// may [`break_loop`](Self::break_loop) or
+    /// [`continue_loop`](Self::continue_loop). Each pass uses the same
+    /// qubits and classical bits as this circuit.
+    pub fn for_loop(&mut self, passes: Vec<Circuit>) -> &mut Self {
+        self.add_instruction(Instruction::For { passes })
+    }
+
+    /// Leave the innermost enclosing loop. Only valid inside a loop body
+    /// (possibly within `if_test` branches there); running it anywhere
+    /// else is an error.
+    pub fn break_loop(&mut self) -> &mut Self {
+        self.add_instruction(Instruction::Break)
+    }
+
+    /// Go on to the innermost enclosing loop's next pass (re-testing a
+    /// `while` loop's condition). Only valid inside a loop body.
+    pub fn continue_loop(&mut self) -> &mut Self {
+        self.add_instruction(Instruction::Continue)
     }
 
     /// Create a new parameter. Its index is the position of its value in
@@ -598,6 +625,12 @@ impl Circuit {
                     Instruction::While { condition, body } => Instruction::While {
                         condition: condition.clone(),
                         body: Box::new(body.bind(&values[..body.n_parameters])?),
+                    },
+                    Instruction::For { passes } => Instruction::For {
+                        passes: passes
+                            .iter()
+                            .map(|body| body.bind(&values[..body.n_parameters]))
+                            .collect::<Result<_, _>>()?,
                     },
                     other => other.clone(),
                 };

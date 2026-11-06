@@ -444,6 +444,36 @@ impl PyCircuit {
         Ok(slf)
     }
 
+    /// Run each circuit of `passes` in turn: a `for` loop whose bodies may
+    /// `break_loop` or `continue_loop` (loops without either can simply be
+    /// appended pass by pass).
+    fn for_loop<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        passes: Vec<PyRef<'_, PyCircuit>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let passes = passes.iter().map(|p| p.inner.clone()).collect();
+        slf.inner
+            .push_instruction(Instruction::For { passes })
+            .map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    /// Leave the innermost enclosing loop (valid only inside a loop body).
+    fn break_loop(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner
+            .push_instruction(Instruction::Break)
+            .map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    /// Go on to the innermost enclosing loop's next pass.
+    fn continue_loop(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner
+            .push_instruction(Instruction::Continue)
+            .map_err(to_py_err)?;
+        Ok(slf)
+    }
+
     #[getter]
     fn n_qubits(&self) -> usize {
         self.inner.n_qubits()

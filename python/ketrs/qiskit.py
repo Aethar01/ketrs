@@ -47,9 +47,10 @@ def from_qiskit(qc: QuantumCircuit) -> Circuit:
     linear in one parameter, such as ``2*θ + 1``.
 
     Measurements, resets, ``if_test`` and ``while_loop`` blocks (conditioned
-    on a bit, a register or a classical expression on them) are converted,
-    and ``for_loop`` blocks are unrolled. ``switch``, ``break_loop`` and
-    ``continue_loop`` raise ``NotImplementedError``. Instructions whose
+    on a bit, a register or a classical expression on them), ``break_loop``
+    and ``continue_loop`` are converted; ``for_loop`` blocks are unrolled,
+    or kept as one body per pass when they break or continue. ``switch``
+    raises ``NotImplementedError``. Instructions whose
     name starts with ``save_`` (Aer's ``save_statevector`` and friends) are
     skipped.
     """
@@ -114,17 +115,36 @@ def _append(circ: Circuit, op: Instruction, qubits: list[int], clbits: list[int]
     if name == "for_loop":
         # Unrolled, binding the loop parameter on each pass.
         indices, loop_parameter, body = op.params
-        phase = 0.0
-        for index in indices:
-            block = body if loop_parameter is None else body.assign_parameters({loop_parameter: index})
-            phase += _append_all(circ, block, qubits, clbits, parameters)
-        return phase
-    if name in ("break_loop", "continue_loop", "switch_case"):
+        blocks = [
+            body if loop_parameter is None else body.assign_parameters({loop_parameter: index}) for index in indices
+        ]
+        if _breaks(body):
+            circ.for_loop([_block(circ, b, qubits, clbits, parameters) for b in blocks])
+            return 0.0
+        return sum(_append_all(circ, b, qubits, clbits, parameters) for b in blocks)
+    if name == "break_loop":
+        circ.break_loop()
+        return 0.0
+    if name == "continue_loop":
+        circ.continue_loop()
+        return 0.0
+    if name == "switch_case":
         raise NotImplementedError(f"cannot convert {name!r}")
     definition = op.definition
     if definition is None:
         raise NotImplementedError(f"cannot convert {name!r}: no Qiskit definition")
     return _append_all(circ, definition, qubits, clbits, parameters)
+
+
+def _breaks(body: QuantumCircuit) -> bool:
+    """Whether a loop body breaks or continues its own loop."""
+    for inst in body.data:
+        name = inst.operation.name
+        if name in ("break_loop", "continue_loop"):
+            return True
+        if name == "if_else" and any(b is not None and _breaks(b) for b in inst.operation.params):
+            return True
+    return False
 
 
 def _append_if_else(circ: Circuit, op: Instruction, qubits: list[int], clbits: list[int], context) -> None:

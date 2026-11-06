@@ -104,6 +104,29 @@ impl Writer {
                 self.body(body, depth + 1)?;
                 self.line(depth, "}");
             }
+            Instruction::For { passes } if passes.is_empty() => {}
+            Instruction::For { passes } => {
+                // Passes differ only by the loop variable they were made
+                // from, which is gone, so each is picked by the pass index.
+                let var = format!("i{depth}");
+                self.line(
+                    depth,
+                    &format!("for uint {var} in [0:{}] {{", passes.len() - 1),
+                );
+                if passes.iter().all(|p| p == &passes[0]) {
+                    self.body(&passes[0], depth + 1)?;
+                } else {
+                    for (k, body) in passes.iter().enumerate() {
+                        let keyword = if k == 0 { "if" } else { "} else if" };
+                        self.line(depth + 1, &format!("{keyword} ({var} == {k}) {{"));
+                        self.body(body, depth + 2)?;
+                    }
+                    self.line(depth + 1, "}");
+                }
+                self.line(depth, "}");
+            }
+            Instruction::Break => self.line(depth, "break;"),
+            Instruction::Continue => self.line(depth, "continue;"),
         }
         Ok(())
     }

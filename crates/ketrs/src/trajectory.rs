@@ -59,7 +59,7 @@ pub(crate) fn run_trajectory<E: Trajectory, R: Rng>(
 ) -> Result<Vec<bool>, Error> {
     check_runnable(engine, circuit)?;
     let mut clbits = vec![false; circuit.n_clbits()];
-    follow(engine, &circuit.pieces(), &mut clbits, rng)?;
+    top_level(follow(engine, &circuit.pieces(), &mut clbits, rng)?)?;
     Ok(clbits)
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn sample_circuit<E: Trajectory, R: Rng>(
         for _ in 0..shots {
             let mut state = engine.duplicate()?;
             let mut clbits = vec![false; circuit.n_clbits()];
-            follow(&mut state, &circuit.pieces(), &mut clbits, rng)?;
+            top_level(follow(&mut state, &circuit.pieces(), &mut clbits, rng)?)?;
             *counts.entry(pack_bits(&clbits)).or_insert(0) += 1;
         }
         return Ok(counts);
@@ -115,7 +115,7 @@ pub(crate) fn sample_circuit<E: Trajectory, R: Rng>(
     for _ in 0..shots {
         let mut state = start.duplicate()?;
         let mut clbits = vec![false; circuit.n_clbits()];
-        follow(&mut state, rest, &mut clbits, rng)?;
+        top_level(follow(&mut state, rest, &mut clbits, rng)?)?;
         *counts.entry(pack_bits(&clbits)).or_insert(0) += 1;
     }
     Ok(counts)
@@ -145,12 +145,31 @@ fn check_runnable<E: Trajectory>(engine: &E, circuit: &Circuit) -> Result<(), Er
     Ok(())
 }
 
+/// How a block ended: normally, or by `break` or `continue`, which pass up
+/// through `if` branches to the innermost loop.
+#[derive(Clone, Copy, PartialEq)]
+enum Flow {
+    Normal,
+    Break,
+    Continue,
+}
+
+/// A whole circuit must not end its trajectory with a stray `break`.
+fn top_level(flow: Flow) -> Result<(), Error> {
+    match flow {
+        Flow::Normal => Ok(()),
+        _ => Err(Error::InvalidArgument(
+            "`break` or `continue` outside a loop".into(),
+        )),
+    }
+}
+
 fn follow<E: Trajectory, R: Rng>(
     engine: &mut E,
     pieces: &[Piece<'_>],
     clbits: &mut [bool],
     rng: &mut R,
-) -> Result<(), Error> {
+) -> Result<Flow, Error> {
     for piece in pieces {
         match piece {
             Piece::Gates(gates) => engine.run_gates_in(gates, rng)?,
@@ -175,7 +194,10 @@ fn follow<E: Trajectory, R: Rng>(
                 } else {
                     otherwise
                 };
-                follow(engine, &branch.pieces(), clbits, rng)?;
+                let flow = follow(engine, &branch.pieces(), clbits, rng)?;
+                if flow != Flow::Normal {
+                    return Ok(flow);
+                }
             }
             Piece::Instruction(Instruction::While { condition, body }) => {
                 let pieces = body.pieces();
@@ -186,13 +208,24 @@ fn follow<E: Trajectory, R: Rng>(
                             "a while loop ran {MAX_LOOP_PASSES} times without its condition failing"
                         )));
                     }
-                    follow(engine, &pieces, clbits, rng)?;
                     passes += 1;
+                    if follow(engine, &pieces, clbits, rng)? == Flow::Break {
+                        break;
+                    }
                 }
             }
+            Piece::Instruction(Instruction::For { passes }) => {
+                for body in passes {
+                    if follow(engine, &body.pieces(), clbits, rng)? == Flow::Break {
+                        break;
+                    }
+                }
+            }
+            Piece::Instruction(Instruction::Break) => return Ok(Flow::Break),
+            Piece::Instruction(Instruction::Continue) => return Ok(Flow::Continue),
         }
     }
-    Ok(())
+    Ok(Flow::Normal)
 }
 
 /// `(qubit, clbit)` for each measurement, if every instruction is a

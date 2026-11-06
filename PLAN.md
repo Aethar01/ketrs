@@ -148,11 +148,13 @@ Added along the way (from the Schwinger project's optimisations):
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
 - **Classical control**: `measure`, `reset`, `if_test` (else branches,
-  nesting) and `while_loop` inside circuits, conditioned on bits, registers
-  or classical expressions (logic, bitwise, comparisons); trajectories and
-  counts on statevectors, MPS of any length and the GPU through one shared
-  driver. Qiskit import of all of these, with `for_loop`s unrolled. Fusion
-  never crosses an instruction.
+  nesting), `while_loop`, and `break_loop`/`continue_loop` inside circuits,
+  conditioned on bits, registers or classical expressions (logic, bitwise,
+  comparisons); trajectories and counts on statevectors, MPS of any length
+  and the GPU through one shared driver, where `break` and `continue` pass
+  up through branches to the innermost loop. `for` loops are unrolled, or
+  kept as one body per pass when they break or continue. Qiskit and
+  OpenQASM import of all of these. Fusion never crosses an instruction.
 - **Noisy trajectories**: noise models on statevectors, one Kraus operator
   per channel per shot, for twice the qubits a density matrix allows.
   Pauli mixtures are drawn up front and run with the gates as one batch
@@ -170,8 +172,6 @@ Added along the way (from the Schwinger project's optimisations):
 
 ## Later
 
-- OpenQASM `break`/`continue`, which need loop control in the classical
-  driver.
 
 ## Benchmarks
 
