@@ -289,21 +289,35 @@ const MIN_LOW_QUBITS: usize = 4;
 /// the lowest qubits.
 const GATHER_MIN_QUBITS: usize = 20;
 
+/// States too small for per-gate parallelism are cut into `2^SPLIT_QUBITS`
+/// tiles, enough to keep every core busy...
+const SPLIT_QUBITS: usize = 4;
+
+/// ...from this many qubits; smaller states are cheaper on one thread.
+const SPLIT_MIN_QUBITS: usize = 13;
+
 impl Tile {
-    /// The tile of `k` qubits for the longest prefix of operations, given
-    /// by their qubit masks, that fit in one, and the length of that
-    /// prefix. Unused places go to the lowest remaining qubits. States of
-    /// at most `k` qubits give count 0, and states of fewer than
-    /// `GATHER_MIN_QUBITS` only the lowest `k` qubits.
+    /// The tile for the longest prefix of operations, given by their qubit
+    /// masks, that fit in one, and the length of that prefix. Unused places
+    /// go to the lowest remaining qubits.
+    ///
+    /// Large states use tiles of `cache_qubits`, sized so a tile of every
+    /// vector involved fits in cache; below `GATHER_MIN_QUBITS` these are
+    /// only ever the lowest qubits. States below `PARALLEL_THRESHOLD`
+    /// amplitudes fit in cache already, but would run every gate on one
+    /// thread, so they are cut into `2^SPLIT_QUBITS` tiles that run in
+    /// parallel. States of fewer than `SPLIT_MIN_QUBITS` give count 0.
     pub(super) fn cover(
         n_qubits: usize,
-        k: usize,
+        cache_qubits: usize,
         masks: impl IntoIterator<Item = usize>,
     ) -> (Tile, usize) {
-        if n_qubits <= k {
+        let large = 1 << n_qubits >= PARALLEL_THRESHOLD;
+        let k = cache_qubits.min(n_qubits.saturating_sub(SPLIT_QUBITS));
+        if n_qubits <= k || (!large && n_qubits < SPLIT_MIN_QUBITS) {
             return (Tile::new((1 << n_qubits) - 1, n_qubits), 0);
         }
-        let mut qubits = if n_qubits < GATHER_MIN_QUBITS {
+        let mut qubits = if large && n_qubits < GATHER_MIN_QUBITS {
             (1 << k) - 1
         } else {
             (1 << MIN_LOW_QUBITS) - 1

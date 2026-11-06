@@ -91,7 +91,9 @@ Added along the way (from the Schwinger project's optimisations):
 - **Tiles over any qubits**: from 20 qubits, runs of gates on any 14 qubits
   (plus the lowest few, for contiguous reads) are gathered into a cached
   tile and applied together, as on the GPU: one pass over memory per run
-  instead of per gate (1.3× faster at 22 qubits).
+  instead of per gate (1.3× faster at 22 qubits). States of 13–15 qubits,
+  too small for per-gate threading, are cut into 16 tiles that run in
+  parallel (2.1× faster at 14 qubits, 1.5× for gradients).
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
@@ -102,9 +104,6 @@ Added along the way (from the Schwinger project's optimisations):
 
 ## Later
 
-- Parallelism for mid-sized states (12–16 qubits): below 2^16 amplitudes
-  every gate runs on one thread. Running tiles in parallel (as from 20
-  qubits) would use every core without per-gate dispatch overhead.
 - Optional cached sparse matrix for repeated `H|ψ⟩` on small states, where
   scipy's CSR still wins.
 - Single precision (`f32`/`Complex32`) behind the same `Scalar` trait.

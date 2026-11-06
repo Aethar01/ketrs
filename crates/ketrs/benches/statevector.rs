@@ -10,7 +10,7 @@ use std::time::Duration;
 
 type Builder = fn(usize) -> Circuit;
 
-const SIZES: [usize; 4] = [10, 14, 18, 22];
+const SIZES: [usize; 6] = [10, 12, 14, 16, 18, 22];
 
 /// `depth` layers of Ry on every qubit followed by a CX ladder, roughly the
 /// shape of a hardware-efficient variational ansatz.
