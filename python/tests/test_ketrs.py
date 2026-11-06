@@ -461,6 +461,24 @@ def test_gpu_expectation_and_sampling():
         assert abs(count - 50_000 * p) < 5 * np.sqrt(50_000 * p * (1 - p)) + 1
 
 
+@gpu
+def test_gpu_gradient_matches_cpu():
+    circ = from_qiskit(efficient_su2(6, reps=2))
+    x = np.random.default_rng(7).uniform(-2, 2, circ.n_parameters)
+    h = pauli_sum_from_qiskit(ISING.tensor(SparsePauliOp("II")))
+    value, grad = ketrs.GpuStatevector(6).expectation_gradient(circ, x, h)
+    want_value, want_grad = ketrs.Statevector(6).expectation_gradient(circ, x, h)
+    assert value == pytest.approx(want_value, abs=1e-10)
+    np.testing.assert_allclose(grad, want_grad, atol=1e-10)
+
+    gpu_state = ketrs.GpuStatevector.from_circuit(circ.bind(x))
+    applied = gpu_state.apply_pauli_sum(h)
+    cpu = ketrs.Statevector.from_circuit(circ.bind(x)).apply_pauli_sum(h)
+    np.testing.assert_allclose(applied.amplitudes(), cpu.amplitudes(), atol=1e-10)
+    grad = ketrs.GpuStatevector.adjoint_gradient(circ, x, gpu_state, applied)
+    np.testing.assert_allclose(grad, want_grad, atol=1e-10)
+
+
 # --- Measurement and classical control ------------------------------------------------
 
 

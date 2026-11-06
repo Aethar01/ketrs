@@ -111,6 +111,10 @@ Added along the way (from the Schwinger project's optimisations):
   real-time dynamics with couplings of any range. Exact to 1e-14 when bonds
   are full; from product states, accuracy is lost while bonds grow (a
   subspace-expansion start would fix that).
+- **GPU gradients**: `H|ψ⟩` in one pass, and adjoint gradients with ψ and
+  λ bound as each other's partner state, so the whole backward sweep (tiled
+  inverse segments and overlaps) is a few submissions and one download.
+  2.2–2.6× faster than the CPU at 16–24 qubits, as for forward circuits.
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
@@ -121,7 +125,7 @@ Added along the way (from the Schwinger project's optimisations):
 
 ## Later
 
-- GPU: gradients and Hamiltonian evolution on the GPU; a single-precision
+- GPU: Hamiltonian evolution on the GPU; a single-precision
   option for GPUs without f64; more than 8 state buffers (beyond 30 qubits
   needs a GPU with more than 16 GB anyway).
 - Classical control on the MPS and GPU engines; Qiskit `while`/`for` loops

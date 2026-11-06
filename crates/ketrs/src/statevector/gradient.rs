@@ -22,15 +22,15 @@ use std::ops::Range;
 
 /// `G = coeff · Π_c |1⟩⟨1|_c ⊗ P`: a Pauli string restricted to basis states
 /// whose `controls` bits are all set.
-struct Generator {
-    masks: PauliMasks,
-    controls: usize,
-    coeff: f64,
+pub(crate) struct Generator {
+    pub(crate) masks: PauliMasks,
+    pub(crate) controls: usize,
+    pub(crate) coeff: f64,
 }
 
 impl Generator {
     /// The generator of a parametric operation, `U(a) = exp(-ia/2 · G)`.
-    fn of(op: &Operation) -> Generator {
+    pub(crate) fn of(op: &Operation) -> Generator {
         let pauli = |p, q| PauliString::new([(q, p)]).expect("one qubit").masks();
         let single = |gate: &Gate, target: usize, controls: usize| match gate {
             Gate::Rx(_) => Generator {

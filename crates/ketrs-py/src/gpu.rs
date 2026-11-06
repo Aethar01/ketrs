@@ -127,6 +127,54 @@ impl PyGpuStatevector {
         py.detach(|| state.expectation(&sum)).map_err(to_py_err)
     }
 
+    /// `H|ψ⟩` as a new GPU state, computed on the GPU.
+    fn apply_pauli_sum(&mut self, py: Python<'_>, hamiltonian: Observable) -> PyResult<Self> {
+        let sum = hamiltonian.into_sum()?;
+        let state = &mut self.inner;
+        let applied = py
+            .detach(|| state.apply_pauli_sum(&sum))
+            .map_err(to_py_err)?;
+        Ok(PyGpuStatevector {
+            inner: applied,
+            rng: self.rng.clone(),
+        })
+    }
+
+    /// `⟨ψ(θ)|H|ψ(θ)⟩` and its gradient by adjoint differentiation on the
+    /// GPU, where `ψ(θ)` is `circuit` bound to `parameters` applied to this
+    /// state (which is unchanged). Returns `(value, gradient)`.
+    fn expectation_gradient<'py>(
+        &self,
+        py: Python<'py>,
+        circuit: PyRef<'_, PyCircuit>,
+        parameters: Vec<f64>,
+        observable: Observable,
+    ) -> PyResult<(f64, Bound<'py, PyArray1<f64>>)> {
+        let sum = observable.into_sum()?;
+        let (state, circ) = (&self.inner, &circuit.inner);
+        let (value, gradient) = py
+            .detach(|| state.expectation_gradient(circ, &parameters, &sum))
+            .map_err(to_py_err)?;
+        Ok((value, PyArray1::from_vec(py, gradient)))
+    }
+
+    /// Gradient of a real loss of the output of `circuit` on the GPU; see
+    /// `Statevector.adjoint_gradient`.
+    #[staticmethod]
+    fn adjoint_gradient<'py>(
+        py: Python<'py>,
+        circuit: PyRef<'_, PyCircuit>,
+        parameters: Vec<f64>,
+        final_state: PyRef<'_, PyGpuStatevector>,
+        cotangent: PyRef<'_, PyGpuStatevector>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let (circ, f, c) = (&circuit.inner, &final_state.inner, &cotangent.inner);
+        let gradient = py
+            .detach(|| GpuStatevector::adjoint_gradient(circ, &parameters, f, c))
+            .map_err(to_py_err)?;
+        Ok(PyArray1::from_vec(py, gradient))
+    }
+
     /// `⟨ψ|ψ⟩`, computed on the GPU.
     fn norm_sqr(&mut self, py: Python<'_>) -> PyResult<f64> {
         let state = &mut self.inner;

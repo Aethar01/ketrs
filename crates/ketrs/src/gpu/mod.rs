@@ -17,6 +17,7 @@
 //! only partial sums and the sampled blocks.
 
 mod context;
+mod gradient;
 
 pub use context::GpuContext;
 
@@ -184,6 +185,7 @@ impl GpuStatevector {
             write_set(self.set, 0, &chunks),
             write_set(self.set, 1, &params),
             write_set(self.set, 2, &output),
+            write_set(self.set, 3, &chunks),
         ];
         // SAFETY: the set isn't in use: every submission is waited on.
         unsafe { self.ctx.device.update_descriptor_sets(&writes, &[]) };
@@ -523,33 +525,50 @@ impl GpuStatevector {
     /// Record and run `dispatches`, in the chunked variants if the state
     /// spans several buffers.
     fn submit_dispatches(&self, dispatches: &[(Kernel, Push)]) -> Result<(), Error> {
+        let with_set: Vec<_> = dispatches
+            .iter()
+            .map(|&(kernel, push)| (self.set, kernel, push))
+            .collect();
+        self.submit_with_sets(&with_set)
+    }
+
+    /// As [`submit_dispatches`](Self::submit_dispatches), each dispatch with
+    /// its own descriptor set (for states of this size and chunking).
+    fn submit_with_sets(
+        &self,
+        dispatches: &[(vk::DescriptorSet, Kernel, Push)],
+    ) -> Result<(), Error> {
         let ctx = &self.ctx;
         let chunked = self.chunked();
         ctx.submit(|cmd| {
             let d = &ctx.device;
-            // SAFETY: recording dispatches against this state's descriptor set.
+            // SAFETY: recording dispatches against live descriptor sets.
             unsafe {
-                d.cmd_bind_descriptor_sets(
-                    cmd,
-                    vk::PipelineBindPoint::COMPUTE,
-                    ctx.pipeline_layout,
-                    0,
-                    &[self.set],
-                    &[],
-                );
+                let mut bound_set = None;
                 let mut bound = None;
-                for (kernel, push) in dispatches {
-                    if bound != Some(*kernel) {
+                for &(set, kernel, push) in dispatches {
+                    if bound_set != Some(set) {
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::COMPUTE,
+                            ctx.pipeline_layout,
+                            0,
+                            &[set],
+                            &[],
+                        );
+                        bound_set = Some(set);
+                    }
+                    if bound != Some(kernel) {
                         d.cmd_bind_pipeline(
                             cmd,
                             vk::PipelineBindPoint::COMPUTE,
-                            ctx.pipeline(*kernel, chunked),
+                            ctx.pipeline(kernel, chunked),
                         );
-                        bound = Some(*kernel);
+                        bound = Some(kernel);
                     }
                     let push = Push {
                         chunk_bits: self.chunk_bits,
-                        ..*push
+                        ..push
                     };
                     ctx.push_constants(cmd, &push);
                     d.cmd_dispatch(cmd, kernel.groups(push.units), 1, 1);

@@ -20,8 +20,12 @@ pub(crate) enum Kernel {
     Expect = 4,
     /// Probability totals of blocks of amplitudes (`probs.comp`).
     Probs = 5,
+    /// `⟨λ|G|ψ⟩` against the partner state, for gradients (`overlap.comp`).
+    Overlap = 6,
+    /// `H|ψ⟩` into the partner state (`hamil.comp`).
+    Hamil = 7,
     /// A run of gates on a few qubits in shared memory (`tile.comp`).
-    Tile = 6,
+    Tile = 8,
 }
 
 impl Kernel {
@@ -31,7 +35,7 @@ impl Kernel {
     pub(crate) fn groups(self, units: u32) -> u32 {
         let groups = match self {
             Kernel::Tile | Kernel::Probs => units,
-            Kernel::Expect => units.div_ceil(WORKGROUP).min(REDUCTION_GROUPS),
+            Kernel::Expect | Kernel::Overlap => units.div_ceil(WORKGROUP).min(REDUCTION_GROUPS),
             _ => units.div_ceil(WORKGROUP),
         };
         groups.clamp(1, MAX_GROUPS)
@@ -46,13 +50,15 @@ macro_rules! spirv {
 }
 
 /// Each kernel before `Tile`, as [single-buffer, chunked] variants.
-const SHADERS: [[&[u8]; 2]; 6] = [
+const SHADERS: [[&[u8]; 2]; 8] = [
     [spirv!("pair_0"), spirv!("pair_1")],
     [spirv!("quad_0"), spirv!("quad_1")],
     [spirv!("pauli_0"), spirv!("pauli_1")],
     [spirv!("phase_0"), spirv!("phase_1")],
     [spirv!("expect_0"), spirv!("expect_1")],
     [spirv!("probs_0"), spirv!("probs_1")],
+    [spirv!("overlap_0"), spirv!("overlap_1")],
+    [spirv!("hamil_0"), spirv!("hamil_1")],
 ];
 
 /// The tile kernel for 2^bits-amplitude tiles, by bits, as [single-buffer,
@@ -308,8 +314,9 @@ impl GpuContext {
                 .map_err(gpu_err("creating command pool"))?;
 
             // 0: state chunks (single-buffer kernels use the first);
-            // 1: parameters; 2: reduction output.
-            let bindings: Vec<_> = [MAX_CHUNKS as u32, 1, 1]
+            // 1: parameters; 2: reduction output; 3: a partner state's
+            // chunks, for kernels combining two states.
+            let bindings: Vec<_> = [MAX_CHUNKS as u32, 1, 1, MAX_CHUNKS as u32]
                 .into_iter()
                 .enumerate()
                 .map(|(b, count)| {
@@ -377,7 +384,7 @@ impl GpuContext {
 
             let sizes = [vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count((MAX_CHUNKS as u32 + 2) * 1024)];
+                .descriptor_count((2 * MAX_CHUNKS as u32 + 2) * 1024)];
             self.descriptor_pool = d
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()

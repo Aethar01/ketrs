@@ -6,7 +6,7 @@
 
 pub(crate) mod eigen;
 pub(crate) mod evolve;
-mod gradient;
+pub(crate) mod gradient;
 pub(crate) mod hamiltonian;
 pub(crate) mod kernels;
 pub(crate) mod krylov;

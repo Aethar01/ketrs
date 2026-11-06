@@ -225,6 +225,108 @@ fn sampling_on_gpu_follows_born_rule() {
     }
 }
 
+#[test]
+fn pauli_sums_apply_on_gpu() {
+    let Some(ctx) = gpu() else { return };
+    for (n, chunk_bits, seed) in [(5, 5, 1), (12, 12, 2), (12, 10, 3)] {
+        let circ = random_circuit(n, 40, seed);
+        let mut gpu_state = GpuStatevector::zero_with_chunk_bits(&ctx, n, chunk_bits).unwrap();
+        gpu_state.run(&circ).unwrap();
+        let h = hamiltonian(n, seed + 20);
+        let got = gpu_state.apply_pauli_sum(&h).unwrap();
+        let want = Statevector::from_circuit(&circ)
+            .apply_pauli_sum(&h)
+            .unwrap();
+        assert_close(&got.amplitudes().unwrap(), want.amplitudes());
+    }
+    // H = 0 gives the zero vector.
+    let mut gpu_state = GpuStatevector::zero(&ctx, 3).unwrap();
+    let zero = gpu_state.apply_pauli_sum(&PauliSum::new()).unwrap();
+    assert!(zero.amplitudes().unwrap().iter().all(|a| a.norm() == 0.0));
+}
+
+/// A parametric circuit using every parametrisable gate, parameters shared
+/// through linear forms.
+fn parametric(n: usize, seed: u64) -> (Circuit, Vec<f64>) {
+    let mut rng = Lcg(seed);
+    let mut circ = Circuit::new(n);
+    let params = circ.parameters(5);
+    circ.set_global_phase(0.4);
+    for layer in 0..3 {
+        for q in 0..n {
+            let p = params[rng.below(params.len())];
+            let angle = (rng.next() * 2.0 - 1.0) * p + rng.next();
+            let b = (q + 1 + layer) % n;
+            match rng.below(9) {
+                0 => circ.rx(angle, q),
+                1 => circ.ry(angle, q),
+                2 => circ.rz(angle, q),
+                3 => circ.p(angle, q),
+                4 => circ.crx(angle, q, b),
+                5 => circ.cry(angle, b, q),
+                6 => circ.crz(angle, q, b),
+                7 => circ.rzz(angle, q, b),
+                _ => circ.ryy(angle, q, b),
+            };
+            circ.h(q).cx(q, b);
+        }
+    }
+    let values = (0..params.len()).map(|_| rng.next() * 4.0 - 2.0).collect();
+    (circ, values)
+}
+
+#[test]
+fn gradients_on_gpu_match_cpu() {
+    let Some(ctx) = gpu() else { return };
+    // 7 qubits runs gate by gate, 13 in tiles, and chunk_bits 11 splits the
+    // state over buffers.
+    for (n, chunk_bits, seed) in [(7, 7, 1), (13, 13, 2), (13, 11, 3)] {
+        let (circ, values) = parametric(n, seed);
+        let h = hamiltonian(n, seed + 30);
+        let start = GpuStatevector::zero_with_chunk_bits(&ctx, n, chunk_bits).unwrap();
+        let (value, gradient) = start.expectation_gradient(&circ, &values, &h).unwrap();
+        let (want_value, want) = Statevector::zero(n)
+            .expectation_gradient(&circ, &values, &h)
+            .unwrap();
+        assert!(
+            (value - want_value).abs() < 1e-10,
+            "{value} vs {want_value}"
+        );
+        for (g, w) in gradient.iter().zip(&want) {
+            assert!((g - w).abs() < 1e-10, "n={n}: {gradient:?} vs {want:?}");
+        }
+    }
+}
+
+#[test]
+fn adjoint_gradient_on_gpu_for_an_overlap_loss() {
+    let Some(ctx) = gpu() else { return };
+    let n = 6;
+    let (circ, values) = parametric(n, 9);
+    let target = Statevector::from_circuit(&random_circuit(n, 30, 4));
+    let psi = Statevector::from_circuit(&circ.bind(&values).unwrap());
+    // L = |⟨φ|ψ⟩|², λ = |φ⟩⟨φ|ψ⟩.
+    let overlap = target.inner(&psi).unwrap();
+    let cotangent: Vec<C64> = target.amplitudes().iter().map(|a| a * overlap).collect();
+    let want = Statevector::adjoint_gradient(
+        &circ,
+        &values,
+        &psi,
+        &Statevector::from_amplitudes(cotangent.clone()).unwrap(),
+    )
+    .unwrap();
+    let got = GpuStatevector::adjoint_gradient(
+        &circ,
+        &values,
+        &GpuStatevector::from_amplitudes(&ctx, psi.amplitudes()).unwrap(),
+        &GpuStatevector::from_amplitudes(&ctx, &cotangent).unwrap(),
+    )
+    .unwrap();
+    for (g, w) in got.iter().zip(&want) {
+        assert!((g - w).abs() < 1e-10, "{got:?} vs {want:?}");
+    }
+}
+
 /// A 28-qubit state (4 GiB, two buffers on most GPUs) without downloading
 /// it. Ignored by default for its memory; run with `--ignored`.
 #[test]

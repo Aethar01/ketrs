@@ -18,10 +18,14 @@ layout(local_size_x = 256) in;
 
 #define MAX_CHUNKS 8
 
+// Binding 3 is a second state of the same size, the "partner", for kernels
+// that combine two states (overlaps, H|ψ⟩); otherwise it repeats binding 0.
 #if CHUNKED
 layout(std430, set = 0, binding = 0) buffer State { dvec2 data[]; } chunks[MAX_CHUNKS];
+layout(std430, set = 0, binding = 3) buffer Partner { dvec2 data[]; } partner_chunks[MAX_CHUNKS];
 #else
 layout(std430, set = 0, binding = 0) buffer State { dvec2 amps[]; };
+layout(std430, set = 0, binding = 3) buffer Partner { dvec2 partner_amps[]; };
 #endif
 layout(std430, set = 0, binding = 1) readonly buffer Params { double params[]; };
 
@@ -42,12 +46,24 @@ dvec2 load_amp(uint i) {
 void store_amp(uint i, dvec2 v) {
     chunks[nonuniformEXT(i >> pc.chunk_bits)].data[i & ((1u << pc.chunk_bits) - 1u)] = v;
 }
+dvec2 load_partner(uint i) {
+    return partner_chunks[nonuniformEXT(i >> pc.chunk_bits)].data[i & ((1u << pc.chunk_bits) - 1u)];
+}
+void store_partner(uint i, dvec2 v) {
+    partner_chunks[nonuniformEXT(i >> pc.chunk_bits)].data[i & ((1u << pc.chunk_bits) - 1u)] = v;
+}
 #else
 dvec2 load_amp(uint i) {
     return amps[i];
 }
 void store_amp(uint i, dvec2 v) {
     amps[i] = v;
+}
+dvec2 load_partner(uint i) {
+    return partner_amps[i];
+}
+void store_partner(uint i, dvec2 v) {
+    partner_amps[i] = v;
 }
 #endif
 

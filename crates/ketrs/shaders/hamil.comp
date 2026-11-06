@@ -1,0 +1,31 @@
+#version 450
+// ketrs-variants: CHUNKED = 0 1
+//
+// partner = H ψ for a Pauli sum H in b groups of terms sharing an X-mask:
+// (Hψ)_j = Σ_groups c(j ⊕ x) ψ_{j⊕x}, c(i) = Σₜ coeffₜ (−1)^|i ∧ zₜ|. At
+// `offset`, each group is x and its number of terms (as doubles), then each
+// term's z (as a double) and coefficient including iⁿʸ (complex).
+// units = number of amplitudes.
+#include "common.glsl"
+
+void main() {
+    uint groups = pc.b;
+    FOR_EACH_UNIT(j) {
+        dvec2 acc = dvec2(0.0);
+        uint p = pc.offset;
+        for (uint g = 0u; g < groups; g++) {
+            uint x = uint(params[p]);
+            uint terms = uint(params[p + 1u]);
+            p += 2u;
+            uint i = j ^ x;
+            dvec2 c = dvec2(0.0);
+            for (uint t = 0u; t < terms; t++) {
+                dvec2 coeff = dvec2(params[p + 1u], params[p + 2u]);
+                c += parity(i & uint(params[p])) == 1u ? -coeff : coeff;
+                p += 3u;
+            }
+            acc += cmul(c, load_amp(i));
+        }
+        store_partner(j, acc);
+    }
+}
