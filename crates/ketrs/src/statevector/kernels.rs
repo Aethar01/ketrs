@@ -216,6 +216,69 @@ impl<T: Scalar> Prepared<T> {
         }
     }
 
+    /// The operation as phase factors, if it is diagonal on at most two
+    /// qubits: `(mask, f)` multiplies every amplitude whose index has all
+    /// bits of `mask` set by `f`. Factors of `diag(d₀, d₁)` other than `d₀ = 1`
+    /// are taken relative to `d₀`, which may round by an ulp.
+    fn phase_terms(&self) -> Option<Vec<(usize, T)>> {
+        let mut terms = Vec::with_capacity(4);
+        let mut push = |mask: usize, f: T| {
+            if f != T::ONE {
+                terms.push((mask, f));
+            }
+        };
+        match *self {
+            Prepared::Scale(f) => push(0, f),
+            Prepared::Pair {
+                op: PairOp::Diagonal(d0, d1),
+                target,
+            } => {
+                push(0, d0);
+                push(1 << target, ratio(d1, d0));
+            }
+            Prepared::Controlled {
+                op: PairOp::Diagonal(d0, d1),
+                control,
+                target,
+            } => {
+                push(1 << control, d0);
+                push(1 << control | 1 << target, ratio(d1, d0));
+            }
+            Prepared::Quad {
+                op: QuadOp::Diagonal(d),
+                q0,
+                q1,
+            } => quad_terms(d, q0, q1)
+                .into_iter()
+                .for_each(|(m, f)| push(m, f)),
+            Prepared::Pauli {
+                masks,
+                op: RotationOp::Diagonal { plus, minus },
+            } => {
+                let z = masks.z;
+                match z.count_ones() {
+                    0 => push(0, plus),
+                    1 => {
+                        push(0, plus);
+                        push(z, ratio(minus, plus));
+                    }
+                    2 => {
+                        let (a, b) = (
+                            z.trailing_zeros() as usize,
+                            usize::BITS as usize - 1 - z.leading_zeros() as usize,
+                        );
+                        quad_terms([plus, minus, minus, plus], a, b)
+                            .into_iter()
+                            .for_each(|(m, f)| push(m, f));
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+        Some(terms)
+    }
+
     /// The same operation on `tile`'s amplitudes. The tile must include
     /// the [active](Self::active_mask) qubits; controls and phases on the
     /// others are settled tile by tile from the tile's base index.
@@ -428,6 +491,28 @@ impl<T: Scalar> Prepared<T> {
     }
 }
 
+/// `a / b`, exactly `a` when `b = 1`.
+fn ratio<T: Scalar>(a: T, b: T) -> T {
+    if b == T::ONE {
+        a
+    } else {
+        a * T::from_complex(b.to_complex().inv()).expect("the inverse of a representable phase")
+    }
+}
+
+/// `diag(d)` on `q0, q1` (basis index `2·b(q1) + b(q0)`) as phase terms
+/// (see [`Prepared::phase_terms`]): `d₀`, then `d₁/d₀` and `d₂/d₀` on each
+/// qubit, then what remains where both are set.
+fn quad_terms<T: Scalar>(d: [T; 4], q0: usize, q1: usize) -> [(usize, T); 4] {
+    let (a, b) = (ratio(d[1], d[0]), ratio(d[2], d[0]));
+    [
+        (0, d[0]),
+        (1 << q0, a),
+        (1 << q1, b),
+        (1 << q0 | 1 << q1, ratio(ratio(d[3], d[0]), a * b)),
+    ]
+}
+
 /// `op` on `target` where every bit of `controls` is set, with the
 /// cheapest kernel for the number of controls.
 fn with_controls<T>(op: PairOp<T>, controls: usize, target: usize) -> Prepared<T> {
@@ -446,30 +531,28 @@ fn with_controls<T>(op: PairOp<T>, controls: usize, target: usize) -> Prepared<T
     }
 }
 
-/// An operation localised to a tile (see [`Prepared::localize`]): applied
-/// only to tiles whose base index has every bit of `controls` set, as the
-/// variant chosen by the base's bits in `select` (in order) or the parity
-/// of its bits in `parity`. At most one of those is nonzero, and a variant
-/// of `None` leaves the tile as it is.
-pub(super) struct Local<T> {
+/// One of several variants of something, chosen tile by tile from the
+/// tile's base index: none unless the base has every bit of `controls`
+/// set, otherwise the variant chosen by the base's bits in `select` (in
+/// order) or the parity of its bits in `parity`. At most one of those is
+/// nonzero, and a variant of `None` leaves the tile as it is.
+pub(super) struct Selected<V> {
     controls: usize,
     select: usize,
     parity: usize,
-    variants: Vec<Option<Prepared<T>>>,
+    variants: Vec<Option<V>>,
 }
 
-impl<T: Scalar> Local<T> {
-    fn fixed(op: Prepared<T>) -> Self {
-        Local {
-            controls: 0,
-            select: 0,
-            parity: 0,
-            variants: vec![Some(op)],
-        }
+/// An operation localised to a tile (see [`Prepared::localize`]).
+pub(super) type Local<T> = Selected<Prepared<T>>;
+
+impl<V> Selected<V> {
+    fn fixed(op: V) -> Self {
+        Self::select(0, vec![Some(op)])
     }
 
-    fn select(select: usize, variants: Vec<Option<Prepared<T>>>) -> Self {
-        Local {
+    fn select(select: usize, variants: Vec<Option<V>>) -> Self {
+        Selected {
             controls: 0,
             select,
             parity: 0,
@@ -477,8 +560,8 @@ impl<T: Scalar> Local<T> {
         }
     }
 
-    fn parity(parity: usize, variants: Vec<Option<Prepared<T>>>) -> Self {
-        Local {
+    fn parity(parity: usize, variants: Vec<Option<V>>) -> Self {
+        Selected {
             controls: 0,
             select: 0,
             parity,
@@ -486,15 +569,47 @@ impl<T: Scalar> Local<T> {
         }
     }
 
-    /// Apply to the tile `amps` whose first amplitude has index `base`.
-    pub(super) fn apply(&self, base: usize, amps: &mut [T]) {
+    /// The variant for the tile starting at `base`.
+    #[inline]
+    fn pick(&self, base: usize) -> Option<&V> {
         if base & self.controls != self.controls {
-            return;
+            return None;
         }
         let index = extract(base, self.select) | ((base & self.parity).count_ones() & 1) as usize;
-        if let Some(op) = &self.variants[index] {
+        self.variants[index].as_ref()
+    }
+
+    /// The same choice between `f` of each variant, or `None` if `f` fails
+    /// for any.
+    fn try_map<W>(&self, f: impl Fn(&V) -> Option<W>) -> Option<Selected<W>> {
+        let variants = self
+            .variants
+            .iter()
+            .map(|v| v.as_ref().map(&f).map_or(Some(None), |w| w.map(Some)))
+            .collect::<Option<_>>()?;
+        Some(Selected {
+            controls: self.controls,
+            select: self.select,
+            parity: self.parity,
+            variants,
+        })
+    }
+}
+
+impl<T: Scalar> Local<T> {
+    /// Apply to the tile `amps` whose first amplitude has index `base`.
+    #[inline]
+    pub(super) fn apply(&self, base: usize, amps: &mut [T]) {
+        if let Some(op) = self.pick(base) {
             op.apply(amps);
         }
+    }
+
+    /// The `(active, qubits)` masks of every variant together.
+    fn masks(&self) -> (usize, usize) {
+        self.variants.iter().flatten().fold((0, 0), |(a, q), op| {
+            (a | op.active_mask(), q | op.qubit_mask())
+        })
     }
 }
 
@@ -623,9 +738,10 @@ pub(super) fn run<T: Scalar>(amps: &mut [T], ops: &[Prepared<T>]) {
                 .iter()
                 .map(|&t| ops[pending[t]].localize(&tile))
                 .collect();
+            let plan = plan_in_tile(local);
             tile.for_each([amps], |base, [block]| {
-                for op in &local {
-                    op.apply(base, block);
+                for group in &plan {
+                    group.apply(base, block);
                 }
             });
             let mut is_taken = vec![false; window];
@@ -639,6 +755,136 @@ pub(super) fn run<T: Scalar>(amps: &mut [T], ops: &[Prepared<T>]) {
             ops[first].apply(amps);
             pending.remove(0);
         }
+    }
+}
+
+/// Runs of at least this many diagonal operations on at most two qubits
+/// each are applied together in one sweep over a tile.
+const MIN_PHASE_RUN: usize = 3;
+
+/// Part of a batch, in a tile: one operation, or a run of diagonal ones
+/// as phase terms (see [`Prepared::phase_terms`]).
+enum Group<T> {
+    One(Local<T>),
+    Phases(Vec<Selected<Vec<(usize, T)>>>),
+}
+
+impl<T: Scalar> Group<T> {
+    /// Apply to the tile `amps` whose first amplitude has index `base`.
+    fn apply(&self, base: usize, amps: &mut [T]) {
+        match self {
+            Group::One(op) => op.apply(base, amps),
+            Group::Phases(ops) => {
+                let terms: Vec<_> = ops
+                    .iter()
+                    .filter_map(|op| op.pick(base))
+                    .flatten()
+                    .copied()
+                    .collect();
+                apply_phases(amps, &terms);
+            }
+        }
+    }
+}
+
+/// Group a batch localised to a tile into runs of diagonal operations,
+/// taking them ahead of operations they commute with.
+fn plan_in_tile<T: Scalar>(ops: Vec<Local<T>>) -> Vec<Group<T>> {
+    let masks: Vec<_> = ops.iter().map(Local::masks).collect();
+    let phases: Vec<_> = ops
+        .iter()
+        .map(|op| op.try_map(Prepared::phase_terms))
+        .collect();
+    let mut ops: Vec<_> = ops.into_iter().map(Some).collect();
+    let mut phases: Vec<_> = phases.into_iter().map(Some).collect();
+    let mut pending: Vec<usize> = (0..ops.len()).collect();
+    let mut plan = Vec::new();
+    while let Some(&first) = pending.first() {
+        // A diagonal operation commutes with everything it passes over that
+        // is diagonal on the qubits they share.
+        let mut passed_active = 0;
+        let mut run = Vec::new();
+        for &i in &pending {
+            let (active, touched) = masks[i];
+            let diagonal = matches!(phases[i], Some(Some(_)));
+            if diagonal && touched & passed_active == 0 {
+                run.push(i);
+            } else {
+                passed_active |= active;
+            }
+        }
+        if run.len() >= MIN_PHASE_RUN {
+            let run = run
+                .iter()
+                .map(|&i| {
+                    ops[i] = None;
+                    phases[i].take().flatten().expect("planned once")
+                })
+                .collect();
+            plan.push(Group::Phases(run));
+            pending.retain(|&i| ops[i].is_some());
+        } else {
+            plan.push(Group::One(ops[first].take().expect("planned once")));
+            pending.remove(0);
+        }
+    }
+    plan
+}
+
+/// Low qubits in each row of [`apply_phases`].
+const PHASE_ROW_QUBITS: usize = 7;
+
+/// Multiply `amps` by phase terms (see [`Prepared::phase_terms`]) on at
+/// most two qubits each, in one sweep. Each row of `2^PHASE_ROW_QUBITS`
+/// amplitudes (fixed high bits) gets a table of factors, built by doubling
+/// from one factor per low bit, with terms on the row's set high bits
+/// folded into those.
+fn apply_phases<T: Scalar>(amps: &mut [T], terms: &[(usize, T)]) {
+    let r = PHASE_ROW_QUBITS.min(amps.len().trailing_zeros() as usize);
+    let low = (1 << r) - 1;
+    let mut scale = T::ONE;
+    let mut single = [T::ONE; PHASE_ROW_QUBITS];
+    // Terms on two low bits, on high bits only, and on a low and a high bit.
+    let (mut lows, mut highs, mut cross) = (Vec::new(), Vec::new(), Vec::new());
+    for &(mask, f) in terms {
+        match (mask & low, mask & !low) {
+            (0, 0) => scale *= f,
+            (l, 0) if l.count_ones() == 1 => single[l.trailing_zeros() as usize] *= f,
+            (_, 0) => lows.push((mask, f)),
+            (0, _) => highs.push((mask, f)),
+            (l, h) => cross.push((l.trailing_zeros() as usize, h, f)),
+        }
+    }
+    let low_table: Vec<T> = (0..1 << r)
+        .map(|i| {
+            lows.iter()
+                .filter(|&&(m, _)| i & m == m)
+                .fold(T::ONE, |acc, &(_, f)| acc * f)
+        })
+        .collect();
+    let mut table = vec![T::ONE; 1 << r];
+    for (row, chunk) in amps.chunks_exact_mut(1 << r).enumerate() {
+        let high = row << r;
+        let mut factors = single;
+        for &(bit, mask, f) in &cross {
+            if high & mask == mask {
+                factors[bit] *= f;
+            }
+        }
+        table[0] = highs
+            .iter()
+            .filter(|&&(m, _)| high & m == m)
+            .fold(scale, |acc, &(_, f)| acc * f);
+        for (bit, &f) in factors[..r].iter().enumerate() {
+            let (done, next) = table.split_at_mut(1 << bit);
+            for (n, &d) in next[..1 << bit].iter_mut().zip(done.iter()) {
+                *n = if f == T::ONE { d } else { d * f };
+            }
+        }
+        if !lows.is_empty() {
+            T::mul_slices(&mut table, &low_table);
+        }
+        T::mul_slices(chunk, &table);
     }
 }
 

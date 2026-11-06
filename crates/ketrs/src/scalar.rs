@@ -82,6 +82,12 @@ pub trait Scalar:
         s.iter_mut().for_each(|a| *a *= f);
     }
 
+    /// Multiply `s` elementwise by `factors`, of the same length.
+    #[inline]
+    fn mul_slices(s: &mut [Self], factors: &[Self]) {
+        s.iter_mut().zip(factors).for_each(|(a, &f)| *a *= f);
+    }
+
     /// Multiply `s` elementwise by `pattern` repeated, for diagonal gates
     /// on low qubits. `s.len()` is a multiple of `pattern.len()`.
     #[inline]
@@ -211,6 +217,17 @@ impl Scalar for C64 {
             return;
         }
         s.iter_mut().for_each(|a| *a *= f);
+    }
+
+    #[inline]
+    fn mul_slices(s: &mut [Self], factors: &[Self]) {
+        #[cfg(target_arch = "x86_64")]
+        if simd::avx2_fma() {
+            // SAFETY: the CPU supports AVX2 and FMA.
+            unsafe { simd::mul_slices_avx2(s, factors) };
+            return;
+        }
+        s.iter_mut().zip(factors).for_each(|(a, &f)| *a *= f);
     }
 
     #[inline]
@@ -455,6 +472,31 @@ mod simd {
             k += 2;
         }
         for a in &mut s[k..] {
+            *a *= f;
+        }
+    }
+
+    /// [`Scalar::mul_slices`](super::Scalar::mul_slices) for complex
+    /// doubles.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2 and FMA.
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn mul_slices_avx2(s: &mut [C64], factors: &[C64]) {
+        let n = s.len().min(factors.len());
+        let (ptr, f_ptr) = (s.as_mut_ptr().cast::<f64>(), factors.as_ptr().cast::<f64>());
+        let mut k = 0;
+        while k + 2 <= n {
+            // SAFETY: k + 2 ≤ n for both slices.
+            unsafe {
+                let f = _mm256_loadu_pd(f_ptr.add(2 * k));
+                let (re, im) = (_mm256_movedup_pd(f), _mm256_permute_pd::<0b1111>(f));
+                let x = _mm256_loadu_pd(ptr.add(2 * k));
+                _mm256_storeu_pd(ptr.add(2 * k), cmul(re, im, x));
+            }
+            k += 2;
+        }
+        for (a, &f) in s[k..n].iter_mut().zip(&factors[k..n]) {
             *a *= f;
         }
     }
