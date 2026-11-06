@@ -312,37 +312,34 @@ impl GpuStatevector {
         }
     }
 
-    /// Amplitudes from this state's storage format.
-    fn decode(&self, bytes: &[u8]) -> Vec<C64> {
+    /// The first `n` complex values in `buffer`, in this state's format.
+    /// Doubles are copied straight into place.
+    fn read_values(&self, buffer: &Buffer, n: usize) -> Result<Vec<C64>, Error> {
         match self.precision {
-            GpuPrecision::Double => bytes
-                .as_chunks::<16>()
-                .0
-                .iter()
-                .map(|b| {
-                    let (re, im) = b.split_at(8);
-                    let f = |b: &[u8]| f64::from_ne_bytes(b.try_into().expect("8 bytes"));
-                    C64::new(f(re), f(im))
-                })
-                .collect(),
-            GpuPrecision::Single => bytes
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .map(|b| {
-                    let (re, im) = b.split_at(4);
-                    let f = |b: &[u8]| f32::from_ne_bytes(b.try_into().expect("4 bytes")) as f64;
-                    C64::new(f(re), f(im))
-                })
-                .collect(),
+            GpuPrecision::Double => {
+                let mut out = vec![C64::new(0.0, 0.0); n];
+                buffer.read(bytes_of_mut(&mut out))?;
+                Ok(out)
+            }
+            GpuPrecision::Single => {
+                let mut raw = vec![0f32; 2 * n];
+                // SAFETY: f32 has no padding and every bit pattern is valid.
+                let bytes =
+                    unsafe { std::slice::from_raw_parts_mut(raw.as_mut_ptr().cast::<u8>(), 8 * n) };
+                buffer.read(bytes)?;
+                Ok(raw
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&[re, im]| C64::new(re as f64, im as f64))
+                    .collect())
+            }
         }
     }
 
     /// The first `n` complex values of the output buffer.
     fn read_output(&self, n: usize) -> Result<Vec<C64>, Error> {
-        let mut bytes = vec![0u8; n * self.amplitude_bytes() as usize];
-        self.output.read(&mut bytes)?;
-        Ok(self.decode(&bytes))
+        self.read_values(&self.output, n)
     }
 
     /// Set the state to basis state `index`.
@@ -423,9 +420,7 @@ impl GpuStatevector {
                 dst += count as u64 * bytes;
             }
         })?;
-        let mut out = vec![0u8; total * bytes as usize];
-        staging.read(&mut out)?;
-        Ok(self.decode(&out))
+        self.read_values(&staging, total)
     }
 
     /// Download the amplitudes.
@@ -1104,6 +1099,13 @@ fn write_set(
 fn bytes_of(values: &[C64]) -> &[u8] {
     // SAFETY: Complex<f64> is repr(C) as two f64s, with no padding.
     unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
+}
+
+fn bytes_of_mut(values: &mut [C64]) -> &mut [u8] {
+    // SAFETY: as for `bytes_of`; every bit pattern is a valid f64.
+    unsafe {
+        std::slice::from_raw_parts_mut(values.as_mut_ptr().cast(), std::mem::size_of_val(values))
+    }
 }
 
 fn bytes_of_f64(values: &[f64]) -> &[u8] {
