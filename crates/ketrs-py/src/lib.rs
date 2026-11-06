@@ -79,6 +79,7 @@ macro_rules! by_dtype {
     };
 }
 
+mod density;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod mps;
@@ -1308,6 +1309,7 @@ fn _ketrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySectorBasis>()?;
     m.add_class::<PySectorStatevector>()?;
     mps::register(m)?;
+    density::register(m)?;
     #[cfg(feature = "gpu")]
     gpu::register(m)?;
     #[cfg(not(feature = "gpu"))]

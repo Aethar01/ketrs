@@ -124,6 +124,11 @@ Added along the way (from the Schwinger project's optimisations):
   integer arithmetic, so 31-bit masks stay exact); `complex64` is 2.8–5.8×
   faster than `complex128` on a consumer card. States span up to sixteen
   buffers, so 31 qubits on any device.
+- **Density matrices and noise**: ρ as a 2n-qubit vector, so gates run on
+  the statevector kernels (U on rows, U* on columns); channels as sparse
+  superoperators, and each noisy gate fused with its noise into one, all
+  through the tiled kernels. Matches Aer's density-matrix method to 1e-10;
+  2.9–4.2× faster noiseless and 1.3–1.6× with noise at 8–13 qubits.
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
@@ -136,7 +141,9 @@ Added along the way (from the Schwinger project's optimisations):
 
 ## Later
 
-- Density matrices and noise, SIMD kernels, OpenQASM 3 parser.
+- Noise on statevectors by quantum trajectories (for more qubits than a
+  density matrix allows); readout error; Aer noise-model import. SIMD
+  kernels, OpenQASM 3 parser.
 
 ## Benchmarks
 

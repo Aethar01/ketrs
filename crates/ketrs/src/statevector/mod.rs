@@ -36,6 +36,18 @@ pub struct DenseState<T: Scalar> {
     amps: Vec<T>,
 }
 
+/// A step for [`DenseState::apply_steps`].
+pub(crate) enum Step {
+    /// A gate.
+    Gate(Box<Operation>),
+    /// Any `2^m × 2^m` row-major matrix on `qubits`, basis bit `k` for
+    /// `qubits[k]`.
+    Matrix {
+        qubits: Vec<usize>,
+        matrix: Vec<C64>,
+    },
+}
+
 /// A statevector with complex amplitudes; runs any circuit.
 pub type Statevector = DenseState<C64>;
 
@@ -173,6 +185,28 @@ impl<T: Scalar> DenseState<T> {
         if phase != T::ONE {
             self.amps.par_iter_mut().for_each(|a| *a *= phase);
         }
+        Ok(())
+    }
+
+    /// Apply `steps` in order, gates and arbitrary matrices alike, through
+    /// the tiled kernels (so runs of them on few qubits share passes over
+    /// memory).
+    pub(crate) fn apply_steps(&mut self, steps: &[Step]) -> Result<(), Error> {
+        let prepared = steps
+            .iter()
+            .map(|step| match step {
+                Step::Gate(op) => Prepared::new(op),
+                Step::Matrix { qubits, matrix } => {
+                    let matrix = matrix
+                        .iter()
+                        .map(|&c| T::from_complex(c))
+                        .collect::<Option<Vec<T>>>()
+                        .ok_or_else(|| Error::NotReal("matrix has complex entries".into()))?;
+                    Ok(Prepared::dense(qubits, &matrix))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        kernels::run(&mut self.amps, &prepared);
         Ok(())
     }
 

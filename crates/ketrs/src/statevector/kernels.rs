@@ -55,9 +55,34 @@ pub(super) enum Prepared<T> {
         masks: PauliMasks,
         op: RotationOp<T>,
     },
+    /// Any `2^m × 2^m` matrix on `qubits`, basis bit `k` for `qubits[k]`,
+    /// kept as each row's nonzero entries.
+    Dense {
+        qubits: Vec<usize>,
+        rows: Vec<Vec<(usize, T)>>,
+    },
 }
 
 impl<T: Scalar> Prepared<T> {
+    /// A dense row-major `matrix` on `qubits` (see [`apply_dense`]).
+    pub(super) fn dense(qubits: &[usize], matrix: &[T]) -> Self {
+        let dim = 1 << qubits.len();
+        assert_eq!(matrix.len(), dim * dim);
+        // Superoperators of common channels are mostly zeros.
+        let rows = (0..dim)
+            .map(|r| {
+                (0..dim)
+                    .filter(|&c| matrix[r * dim + c] != T::ZERO)
+                    .map(|c| (c, matrix[r * dim + c]))
+                    .collect()
+            })
+            .collect();
+        Prepared::Dense {
+            qubits: qubits.to_vec(),
+            rows,
+        }
+    }
+
     /// Fails with [`Error::NotReal`] if `T` can't represent the operation.
     pub(super) fn new(op: &Operation) -> Result<Self, Error> {
         let not_real = || {
@@ -105,6 +130,7 @@ impl<T: Scalar> Prepared<T> {
             Prepared::Swap(a, b) => 1 << a | 1 << b,
             Prepared::Quad { q0, q1, .. } => 1 << q0 | 1 << q1,
             Prepared::Pauli { masks, .. } => masks.x | masks.z,
+            Prepared::Dense { ref qubits, .. } => qubits.iter().fold(0, |acc, q| acc | 1 << q),
         }
     }
 
@@ -124,6 +150,7 @@ impl<T: Scalar> Prepared<T> {
                 masks.x = tile.local(masks.x);
                 masks.z = tile.local(masks.z);
             }
+            Prepared::Dense { qubits, .. } => qubits.iter_mut().for_each(|x| *x = q(*x)),
         }
         local
     }
@@ -142,6 +169,7 @@ impl<T: Scalar> Prepared<T> {
             Prepared::Swap(a, b) => apply_swap(amps, *a, *b),
             Prepared::Quad { op, q0, q1 } => apply_quad(amps, op, *q0, *q1),
             Prepared::Pauli { masks, op, .. } => apply_pauli_rotation(amps, *masks, op),
+            Prepared::Dense { qubits, rows } => apply_dense(amps, qubits, rows),
         }
     }
 }
@@ -442,11 +470,72 @@ impl Tile {
     }
 }
 
+/// Apply a matrix, given by each row's nonzero entries, to `qubits` (`m`
+/// of them, distinct), whose basis index has bit `k` for `qubits[k]`. Any
+/// matrix, unitary or not: density matrices use it for superoperators.
+fn apply_dense<T: Scalar>(amps: &mut [T], qubits: &[usize], rows: &[Vec<(usize, T)>]) {
+    let m = qubits.len();
+    let dim = 1 << m;
+    let mask = qubits.iter().fold(0, |acc, &q| acc | 1 << q);
+    // The unchecked accesses below rely on this.
+    assert!(
+        mask < amps.len() && mask.count_ones() as usize == m,
+        "distinct qubits within the state"
+    );
+    let outside = (amps.len() - 1) & !mask;
+    // Offsets of each local basis state from a group's base index.
+    let offsets: Vec<usize> = (0..dim)
+        .map(|k| {
+            qubits
+                .iter()
+                .enumerate()
+                .filter(|&(b, _)| k >> b & 1 == 1)
+                .fold(0, |acc, (_, &q)| acc | 1 << q)
+        })
+        .collect();
+    let groups = amps.len() >> m;
+    let pointer = SharedMut(amps.as_mut_ptr());
+    let run = |range: std::ops::Range<usize>| {
+        let amps = pointer.get();
+        let mut buffer = vec![T::ZERO; dim];
+        for g in range {
+            let base = deposit(g, outside);
+            // SAFETY: groups are disjoint (their bases differ outside the
+            // qubits, their offsets only on them), each handled by one task,
+            // and every index is below the length.
+            unsafe {
+                for (b, &o) in buffer.iter_mut().zip(&offsets) {
+                    *b = *amps.add(base + o);
+                }
+                for (row, &o) in rows.iter().zip(&offsets) {
+                    *amps.add(base + o) = row.iter().map(|&(c, a)| a * buffer[c]).sum();
+                }
+            }
+        }
+    };
+    let chunk = (BLOCK >> m).max(1);
+    if amps.len() >= PARALLEL_THRESHOLD {
+        (0..groups.div_ceil(chunk))
+            .into_par_iter()
+            .for_each(|c| run(c * chunk..((c + 1) * chunk).min(groups)));
+    } else {
+        run(0..groups);
+    }
+}
+
 /// A pointer shared between tasks writing disjoint parts of its target.
 struct SharedMut<T>(*mut T);
 
-// SAFETY: only used by `Tile::map_reduce`, whose tasks touch disjoint
-// elements.
+impl<T> SharedMut<T> {
+    /// The pointer; closures must call this rather than read the field, so
+    /// they capture the (shareable) wrapper.
+    fn get(&self) -> *mut T {
+        self.0
+    }
+}
+
+// SAFETY: only used by `Tile::map_reduce` and `apply_dense`, whose tasks
+// touch disjoint elements.
 unsafe impl<T: Send> Sync for SharedMut<T> {}
 unsafe impl<T: Send> Send for SharedMut<T> {}
 

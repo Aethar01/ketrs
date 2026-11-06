@@ -477,6 +477,57 @@ def test_dmrg_ground_state_matches_numpy():
     assert mps.expectation(pauli_sum_from_qiskit(op)) == pytest.approx(energy, abs=1e-8)
 
 
+# --- Density matrices and noise ------------------------------------------------------
+
+
+def test_density_matrix_matches_qiskit_kraus_evolution():
+    from qiskit.quantum_info import DensityMatrix as QiskitDensityMatrix, Kraus
+
+    qc = random_circuit(3, depth=6, seed=4)
+    rho = ketrs.DensityMatrix(3)
+    rho.run(from_qiskit(qc))
+    want = QiskitDensityMatrix(qc)
+    np.testing.assert_allclose(rho.to_matrix(), want.data, atol=1e-10)
+
+    channel = ketrs.Channel.amplitude_damping(0.3)
+    rho.apply_channel(channel, [1])
+    want = want.evolve(Kraus(channel.kraus()), qargs=[1])
+    two = ketrs.Channel.depolarizing(0.2, 2)
+    rho.apply_channel(two, [2, 0])
+    want = want.evolve(Kraus(two.kraus()), qargs=[2, 0])
+    np.testing.assert_allclose(rho.to_matrix(), want.data, atol=1e-10)
+    assert rho.purity() == pytest.approx(want.purity().real, abs=1e-10)
+    h = pauli_sum_from_qiskit(SparsePauliOp.from_list([("XYZ", 0.4), ("ZIZ", -1.0)]))
+    assert rho.expectation(h) == pytest.approx(
+        want.expectation_value(SparsePauliOp.from_list([("XYZ", 0.4), ("ZIZ", -1.0)])).real, abs=1e-10
+    )
+
+
+def test_noisy_circuits_match_aer():
+    from qiskit_aer import AerSimulator
+    from qiskit_aer.noise import NoiseModel as AerNoiseModel, depolarizing_error
+
+    qc = QuantumCircuit(3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.ry(0.4, 2)
+    qc.cx(1, 2)
+    aer_noise = AerNoiseModel()
+    aer_noise.add_all_qubit_quantum_error(depolarizing_error(0.02, 1), ["h", "ry"])
+    aer_noise.add_all_qubit_quantum_error(depolarizing_error(0.05, 2), ["cx"])
+    aer_qc = qc.copy()
+    aer_qc.save_density_matrix()
+    sim = AerSimulator(method="density_matrix", noise_model=aer_noise)
+    want = sim.run(aer_qc).result().data()["density_matrix"]
+
+    noise = ketrs.NoiseModel(
+        one_qubit=ketrs.Channel.depolarizing(0.02), two_qubit=ketrs.Channel.depolarizing(0.05, 2)
+    )
+    rho = ketrs.DensityMatrix(3)
+    rho.run_noisy(from_qiskit(qc), noise)
+    np.testing.assert_allclose(rho.to_matrix(), np.asarray(want), atol=1e-10)
+
+
 # --- GPU -----------------------------------------------------------------------------
 
 gpu = pytest.mark.skipif(ketrs.gpu_device() is None, reason="no Vulkan GPU")

@@ -17,6 +17,7 @@
 
 pub mod circuit;
 pub mod classical;
+pub mod density;
 mod error;
 mod fusion;
 pub mod gate;
@@ -33,6 +34,7 @@ mod trajectory;
 
 pub use circuit::{Circuit, Operation};
 pub use classical::{BinaryOp, Condition, Expr, Instruction};
+pub use density::{Channel, DensityMatrix, NoiseModel};
 pub use error::Error;
 pub use gate::Gate;
 #[cfg(feature = "gpu")]

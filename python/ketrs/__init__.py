@@ -10,8 +10,11 @@ array([0.5, 0. , 0. , 0.5])
 """
 
 from ketrs._ketrs import (
+    Channel,
     Circuit,
+    DensityMatrix,
     MPS,
+    NoiseModel,
     Eigenstate,
     Parameter,
     PauliSum,
@@ -26,8 +29,11 @@ from ketrs._ketrs import (
 )
 
 __all__ = [
+    "Channel",
     "Circuit",
+    "DensityMatrix",
     "MPS",
+    "NoiseModel",
     "Eigenstate",
     "Parameter",
     "PauliSum",
