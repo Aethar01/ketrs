@@ -1,6 +1,6 @@
 //! Measurement, reset and classical control inside circuits.
 
-use ketrs::{Circuit, Condition, Error, Instruction, RealStatevector, Statevector};
+use ketrs::{BinaryOp, Circuit, Condition, Error, Expr, Instruction, RealStatevector, Statevector};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use std::collections::BTreeMap;
@@ -307,9 +307,117 @@ fn instructions_are_validated() {
             condition: Condition {
                 clbits: vec![0],
                 value: 1
-            },
+            }
+            .into(),
             then: Box::new(wrong_width.clone()),
             otherwise: Box::new(wrong_width),
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn while_loops_repeat_until_success() {
+    // Flip a coin into bit 0 until it reads 1: every shot ends with 1, and
+    // qubit 1 counts nothing but marks that the loop ran at least once.
+    let mut circ = Circuit::with_clbits(2, 2);
+    circ.h(0).measure(0, 0);
+    let mut body = Circuit::with_clbits(2, 2);
+    body.reset(0).h(0).measure(0, 0).x(1);
+    circ.while_loop(Expr::Not(Box::new(Expr::Bit(0))), body);
+    circ.measure(1, 1);
+    let shots = 4_000;
+    let counts = Statevector::zero(2)
+        .sample_circuit(&circ, shots, &mut rng(20))
+        .unwrap();
+    assert!(counts.keys().all(|bits| bits & 1 == 1));
+    // Each pass flips qubit 1, so it reads 1 after an odd number of
+    // passes. k passes happen with probability 2^-(k+1), so
+    // P(odd) = 1/4 + 1/16 + … = 1/3.
+    let odd: usize = counts
+        .iter()
+        .filter(|(b, _)| *b >> 1 & 1 == 1)
+        .map(|(_, c)| c)
+        .sum();
+    assert_binomial(odd, shots, 1.0 / 3.0);
+}
+
+#[test]
+fn runaway_loops_are_errors() {
+    let mut circ = Circuit::with_clbits(1, 1);
+    circ.while_loop(
+        Expr::Not(Box::new(Expr::Bit(0))),
+        Circuit::with_clbits(1, 1),
+    );
+    assert!(matches!(
+        Statevector::zero(1).run_trajectory(&circ, &mut rng(21)),
+        Err(Error::NotConverged(_))
+    ));
+}
+
+#[test]
+fn expression_conditions() {
+    // Bits 0..3 read 1, 0, 1 (register value 0b101 = 5).
+    let mut prep = Circuit::with_clbits(4, 3);
+    prep.x(0).x(2).measure(0, 0).measure(1, 1).measure(2, 2);
+    let reg = || Expr::Register(vec![0, 1, 2]);
+    let bin = Expr::binary;
+    let cases = [
+        (bin(BinaryOp::And, Expr::Bit(0), Expr::Bit(2)), true),
+        (bin(BinaryOp::And, Expr::Bit(0), Expr::Bit(1)), false),
+        (bin(BinaryOp::Or, Expr::Bit(1), Expr::Bit(2)), true),
+        (Expr::Not(Box::new(Expr::Bit(1))), true),
+        (bin(BinaryOp::Less, reg(), Expr::Value(6)), true),
+        (bin(BinaryOp::GreaterEqual, reg(), Expr::Value(6)), false),
+        (
+            bin(
+                BinaryOp::Equal,
+                bin(BinaryOp::BitXor, reg(), Expr::Value(0b011)),
+                Expr::Value(0b110),
+            ),
+            true,
+        ),
+        (
+            bin(
+                BinaryOp::Equal,
+                Expr::BitNot {
+                    value: Box::new(reg()),
+                    width: 3,
+                },
+                Expr::Value(0b010),
+            ),
+            true,
+        ),
+        (bin(BinaryOp::BitAnd, reg(), Expr::Value(0b010)), false),
+        (bin(BinaryOp::NotEqual, reg(), Expr::Value(5)), false),
+    ];
+    for (k, (condition, want)) in cases.into_iter().enumerate() {
+        let mut circ = prep.clone();
+        let mut then = Circuit::with_clbits(4, 3);
+        then.x(3);
+        circ.if_test(condition, then, None);
+        let mut state = Statevector::zero(4);
+        state.run_trajectory(&circ, &mut rng(22)).unwrap();
+        let p = state.probability_one(3).unwrap();
+        assert_eq!(p > 0.5, want, "case {k}");
+    }
+}
+
+#[test]
+fn expressions_are_validated() {
+    let mut circ = Circuit::with_clbits(1, 2);
+    assert!(
+        circ.push_instruction(Instruction::While {
+            condition: Expr::Bit(2),
+            body: Box::new(Circuit::with_clbits(1, 2)),
+        })
+        .is_err()
+    );
+    assert!(
+        circ.push_instruction(Instruction::IfElse {
+            condition: Expr::Register((0..65).map(|_| 0).collect()),
+            then: Box::new(Circuit::with_clbits(1, 2)),
+            otherwise: Box::new(Circuit::with_clbits(1, 2)),
         })
         .is_err()
     );

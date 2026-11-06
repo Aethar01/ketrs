@@ -86,7 +86,7 @@ mod sector;
 
 use ketrs::SectorState;
 use ketrs::statevector::EigenOptions;
-use ketrs::{Angle, Condition, Instruction, Parameter};
+use ketrs::{Angle, BinaryOp, Condition, Expr, Instruction, Parameter};
 use ketrs::{
     Circuit, Complex32, Complex64 as C64, DenseState, Error, Gate, Operation, Pauli, PauliString,
     PauliSum, RealStatevector, RealStatevector32, Scalar, Statevector, Statevector32,
@@ -94,7 +94,7 @@ use ketrs::{
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use sector::Kind as SectorKind;
@@ -195,6 +195,51 @@ impl Clbits {
             Clbits::Many(cs) => cs,
         }
     }
+}
+
+/// A classical expression from nested tuples (see `Circuit.if_expr`).
+fn parse_expr(obj: &Bound<'_, PyAny>) -> PyResult<Expr> {
+    let bad = || {
+        PyValueError::new_err(format!(
+            "expected an expression tuple such as ('bit', 0) or ('and', a, b), got {obj}"
+        ))
+    };
+    let tuple = obj.cast::<PyTuple>().map_err(|_| bad())?;
+    let tag: String = tuple.get_item(0).map_err(|_| bad())?.extract()?;
+    let arg = |k: usize| tuple.get_item(k).map_err(|_| bad());
+    let sub = |k: usize| arg(k).and_then(|e| parse_expr(&e)).map(Box::new);
+    Ok(match (tag.as_str(), tuple.len()) {
+        ("bit", 2) => Expr::Bit(arg(1)?.extract()?),
+        ("register", 2) => Expr::Register(arg(1)?.extract()?),
+        ("value", 2) => Expr::Value(arg(1)?.extract()?),
+        ("not", 2) => Expr::Not(sub(1)?),
+        ("bit_not", 3) => Expr::BitNot {
+            value: sub(1)?,
+            width: arg(2)?.extract()?,
+        },
+        (op, 3) => {
+            let op = match op {
+                "and" => BinaryOp::And,
+                "or" => BinaryOp::Or,
+                "bit_and" => BinaryOp::BitAnd,
+                "bit_or" => BinaryOp::BitOr,
+                "bit_xor" => BinaryOp::BitXor,
+                "==" => BinaryOp::Equal,
+                "!=" => BinaryOp::NotEqual,
+                "<" => BinaryOp::Less,
+                "<=" => BinaryOp::LessEqual,
+                ">" => BinaryOp::Greater,
+                ">=" => BinaryOp::GreaterEqual,
+                _ => return Err(bad()),
+            };
+            Expr::Binary {
+                op,
+                left: sub(1)?,
+                right: sub(2)?,
+            }
+        }
+        _ => return Err(bad()),
+    })
 }
 
 /// A rotation angle argument: a number or a `Parameter`.
@@ -347,9 +392,52 @@ impl PyCircuit {
         };
         slf.inner
             .push_instruction(Instruction::IfElse {
-                condition,
+                condition: condition.into(),
                 then: Box::new(then.inner.clone()),
                 otherwise: Box::new(otherwise),
+            })
+            .map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    /// Run `then` if the classical expression `condition` is nonzero, else
+    /// `otherwise`. Expressions are nested tuples: `("bit", c)`,
+    /// `("register", [c0, c1, …])` (least significant first),
+    /// `("value", v)`, `("not", e)`, `("bit_not", e, width)`, and
+    /// `(op, a, b)` for op in `and or bit_and bit_or bit_xor == != < <= > >=`.
+    #[pyo3(signature = (condition, then, otherwise=None))]
+    fn if_expr<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        condition: &Bound<'_, PyAny>,
+        then: PyRef<'_, PyCircuit>,
+        otherwise: Option<PyRef<'_, PyCircuit>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let otherwise = match otherwise {
+            Some(c) => c.inner.clone(),
+            None => Circuit::with_clbits(slf.inner.n_qubits(), slf.inner.n_clbits()),
+        };
+        slf.inner
+            .push_instruction(Instruction::IfElse {
+                condition: parse_expr(condition)?,
+                then: Box::new(then.inner.clone()),
+                otherwise: Box::new(otherwise),
+            })
+            .map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    /// Run `body` while the classical expression `condition` (see
+    /// `if_expr`) is nonzero, testing before each pass. Runs that loop a
+    /// million times raise.
+    fn while_loop<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        condition: &Bound<'_, PyAny>,
+        body: PyRef<'_, PyCircuit>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner
+            .push_instruction(Instruction::While {
+                condition: parse_expr(condition)?,
+                body: Box::new(body.inner.clone()),
             })
             .map_err(to_py_err)?;
         Ok(slf)

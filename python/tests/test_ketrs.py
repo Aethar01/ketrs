@@ -79,12 +79,69 @@ def test_seeded_sampling_is_reproducible():
     np.testing.assert_array_equal(a, b)
 
 
-def test_loops_are_rejected():
+def test_qiskit_while_loop_repeats_until_success():
+    qc = QuantumCircuit(1, 1)
+    qc.h(0)
+    qc.measure(0, 0)
+    with qc.while_loop((qc.clbits[0], 0)):
+        qc.reset(0)
+        qc.h(0)
+        qc.measure(0, 0)
+    counts = ketrs.Statevector(1, seed=4).sample_circuit(from_qiskit(qc), 500)
+    assert counts == {"1": 500}
+
+
+def test_qiskit_for_loop_is_unrolled():
+    from qiskit.circuit import Parameter
+
+    qc = QuantumCircuit(2)
+    i = Parameter("i")
+    with qc.for_loop(range(3), i):
+        qc.rx(0.3 * i, 0)
+        qc.cx(0, 1)
+    unrolled = QuantumCircuit(2)
+    for k in range(3):
+        unrolled.rx(0.3 * k, 0)
+        unrolled.cx(0, 1)
+    np.testing.assert_allclose(
+        ketrs.Statevector.from_circuit(from_qiskit(qc)).amplitudes(),
+        QiskitStatevector(unrolled).data,
+        atol=1e-12,
+    )
+
+
+def test_qiskit_expression_conditions():
+    from qiskit import ClassicalRegister, QuantumRegister
+    from qiskit.circuit.classical import expr
+
+    q, c = QuantumRegister(4), ClassicalRegister(3, "c")
+
+    def fires(condition) -> bool:
+        qc = QuantumCircuit(q, c)
+        qc.x(0)
+        qc.x(2)
+        qc.measure(range(3), range(3))  # c = 0b101
+        with qc.if_test(condition(c)):
+            qc.x(3)
+        state = ketrs.Statevector(4, seed=1)
+        state.run(from_qiskit(qc))
+        return state.probability_one(3) > 0.5
+
+    assert fires(lambda c: expr.logic_and(c[0], c[2]))
+    assert not fires(lambda c: expr.logic_and(c[0], c[1]))
+    assert fires(lambda c: expr.logic_not(c[1]))
+    assert fires(lambda c: expr.less(c, 6))
+    assert not fires(lambda c: expr.greater_equal(c, 6))
+    assert fires(lambda c: expr.equal(expr.bit_xor(c, 3), 6))
+    assert fires(lambda c: expr.equal(expr.bit_not(c), 2))
+
+
+def test_unsupported_control_flow_is_rejected():
     qc = QuantumCircuit(1, 1)
     with qc.while_loop((qc.clbits[0], 0)):
-        qc.x(0)
         qc.measure(0, 0)
-    with pytest.raises(NotImplementedError, match="while_loop"):
+        qc.break_loop()
+    with pytest.raises(NotImplementedError, match="break_loop"):
         from_qiskit(qc)
 
 

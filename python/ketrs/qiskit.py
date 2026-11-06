@@ -42,9 +42,10 @@ def from_qiskit(qc: QuantumCircuit) -> Circuit:
     ``qc.assign_parameters(values)``. Gate angles may be any expression
     linear in one parameter, such as ``2*θ + 1``.
 
-    Measurements, resets and ``if_test`` blocks (conditioned on a bit or a
-    register) are converted; other control flow (loops, ``switch``,
-    expression conditions) raises ``NotImplementedError``. Instructions whose
+    Measurements, resets, ``if_test`` and ``while_loop`` blocks (conditioned
+    on a bit, a register or a classical expression on them) are converted,
+    and ``for_loop`` blocks are unrolled. ``switch``, ``break_loop`` and
+    ``continue_loop`` raise ``NotImplementedError``. Instructions whose
     name starts with ``save_`` (Aer's ``save_statevector`` and friends) are
     skipped.
     """
@@ -100,6 +101,20 @@ def _append(circ: Circuit, op: Instruction, qubits: list[int], clbits: list[int]
     if name == "if_else":
         _append_if_else(circ, op, qubits, clbits, context)
         return 0.0
+    if name == "while_loop":
+        condition = _condition(op.condition, context)
+        circ.while_loop(condition, _block(circ, op.params[0], qubits, clbits, parameters))
+        return 0.0
+    if name == "for_loop":
+        # Unrolled, binding the loop parameter on each pass.
+        indices, loop_parameter, body = op.params
+        phase = 0.0
+        for index in indices:
+            block = body if loop_parameter is None else body.assign_parameters({loop_parameter: index})
+            phase += _append_all(circ, block, qubits, clbits, parameters)
+        return phase
+    if name in ("break_loop", "continue_loop", "switch_case"):
+        raise NotImplementedError(f"cannot convert {name!r}")
     definition = op.definition
     if definition is None:
         raise NotImplementedError(f"cannot convert {name!r}: no Qiskit definition")
@@ -110,29 +125,70 @@ def _append_if_else(circ: Circuit, op: Instruction, qubits: list[int], clbits: l
     """An ``if_test`` block. Its branches use only the qubits and classical
     bits of the instruction; its condition names bits of the enclosing
     circuit."""
-    from qiskit.circuit import Clbit, ClassicalRegister
-
-    qc, clbit_map, parameters = context
-    condition = op.condition
-    if not isinstance(condition, tuple):
-        raise NotImplementedError("if_test conditions must be a bit or a register, not an expression")
-    target, value = condition
-    if isinstance(target, Clbit):
-        bits = [clbit_map[qc.find_bit(target).index]]
-    elif isinstance(target, ClassicalRegister):
-        bits = [clbit_map[qc.find_bit(b).index] for b in target]
-    else:
-        raise NotImplementedError(f"unsupported if_test condition {condition!r}")
-
-    def branch(body: QuantumCircuit | None) -> Circuit | None:
-        if body is None:
-            return None
-        out = Circuit(circ.n_qubits, circ.n_clbits)
-        out.global_phase += _append_all(out, body, qubits, clbits, parameters)
-        return out
-
+    _, _, parameters = context
     true_body, false_body = op.params
-    circ.if_test(bits, int(value), branch(true_body), branch(false_body))
+    then = _block(circ, true_body, qubits, clbits, parameters)
+    otherwise = None if false_body is None else _block(circ, false_body, qubits, clbits, parameters)
+    circ.if_expr(_condition(op.condition, context), then, otherwise)
+
+
+def _block(circ: Circuit, body: QuantumCircuit, qubits: list[int], clbits: list[int], parameters) -> Circuit:
+    """A control-flow block as a circuit on all of ``circ``'s bits."""
+    out = Circuit(circ.n_qubits, circ.n_clbits)
+    out.global_phase += _append_all(out, body, qubits, clbits, parameters)
+    return out
+
+
+def _condition(condition, context) -> tuple:
+    """A Qiskit condition (a ``(bit or register, value)`` pair or a
+    classical expression) as a ketrs expression tuple."""
+    from qiskit.circuit import Clbit, ClassicalRegister
+    from qiskit.circuit.classical import expr
+
+    qc, clbit_map, _ = context
+
+    def bits(target):
+        if isinstance(target, Clbit):
+            return ("bit", clbit_map[qc.find_bit(target).index])
+        if isinstance(target, ClassicalRegister):
+            return ("register", [clbit_map[qc.find_bit(b).index] for b in target])
+        raise NotImplementedError(f"unsupported classical variable {target!r}")
+
+    unary = {expr.Unary.Op.LOGIC_NOT: "not"}
+    binary = {
+        expr.Binary.Op.LOGIC_AND: "and",
+        expr.Binary.Op.LOGIC_OR: "or",
+        expr.Binary.Op.BIT_AND: "bit_and",
+        expr.Binary.Op.BIT_OR: "bit_or",
+        expr.Binary.Op.BIT_XOR: "bit_xor",
+        expr.Binary.Op.EQUAL: "==",
+        expr.Binary.Op.NOT_EQUAL: "!=",
+        expr.Binary.Op.LESS: "<",
+        expr.Binary.Op.LESS_EQUAL: "<=",
+        expr.Binary.Op.GREATER: ">",
+        expr.Binary.Op.GREATER_EQUAL: ">=",
+    }
+
+    def convert(e):
+        if isinstance(e, expr.Var):
+            return bits(e.var)
+        if isinstance(e, expr.Value):
+            return ("value", int(e.value))
+        if isinstance(e, expr.Cast):
+            # Bool ↔ unsigned integer casts keep the value (nonzero is true).
+            return convert(e.operand)
+        if isinstance(e, expr.Unary) and e.op == expr.Unary.Op.BIT_NOT:
+            return ("bit_not", convert(e.operand), e.type.width)
+        if isinstance(e, expr.Unary) and e.op in unary:
+            return (unary[e.op], convert(e.operand))
+        if isinstance(e, expr.Binary) and e.op in binary:
+            return (binary[e.op], convert(e.left), convert(e.right))
+        raise NotImplementedError(f"unsupported classical expression {e!r}")
+
+    if isinstance(condition, tuple):
+        target, value = condition
+        return ("==", bits(target), ("value", int(value)))
+    return convert(condition)
 
 
 def pauli_sum_from_qiskit(

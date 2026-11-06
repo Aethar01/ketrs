@@ -127,15 +127,15 @@ Added along the way (from the Schwinger project's optimisations):
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
-- **Classical control**: `measure`, `reset` and `if_test` (else branches,
-  register conditions, nesting) inside circuits; trajectories and counts on
-  every engine (statevector, sector-free MPS of any length, GPU) through one
-  shared driver; Qiskit import of all three. Fusion never crosses an
-  instruction.
+- **Classical control**: `measure`, `reset`, `if_test` (else branches,
+  nesting) and `while_loop` inside circuits, conditioned on bits, registers
+  or classical expressions (logic, bitwise, comparisons); trajectories and
+  counts on statevectors, MPS of any length and the GPU through one shared
+  driver. Qiskit import of all of these, with `for_loop`s unrolled. Fusion
+  never crosses an instruction.
 
 ## Later
 
-- Qiskit `while`/`for` loops and expression conditions.
 - Density matrices and noise, SIMD kernels, OpenQASM 3 parser.
 
 ## Benchmarks

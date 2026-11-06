@@ -32,7 +32,7 @@ pub mod statevector;
 mod trajectory;
 
 pub use circuit::{Circuit, Operation};
-pub use classical::{Condition, Instruction};
+pub use classical::{BinaryOp, Condition, Expr, Instruction};
 pub use error::Error;
 pub use gate::Gate;
 #[cfg(feature = "gpu")]

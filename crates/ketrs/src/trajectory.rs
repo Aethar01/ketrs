@@ -14,6 +14,10 @@ use crate::gate::Gate;
 use rand::Rng;
 use std::collections::BTreeMap;
 
+/// Passes of one `while` loop after which a trajectory gives up, rather
+/// than hang on a condition that never fails.
+const MAX_LOOP_PASSES: usize = 1_000_000;
+
 /// What an engine needs to follow a circuit's random history.
 pub(crate) trait Trajectory: Sized {
     fn n_qubits(&self) -> usize;
@@ -145,6 +149,19 @@ fn follow<E: Trajectory, R: Rng>(
                     otherwise
                 };
                 follow(engine, &branch.pieces(), clbits, rng)?;
+            }
+            Piece::Instruction(Instruction::While { condition, body }) => {
+                let pieces = body.pieces();
+                let mut passes = 0;
+                while condition.holds(clbits) {
+                    if passes == MAX_LOOP_PASSES {
+                        return Err(Error::NotConverged(format!(
+                            "a while loop ran {MAX_LOOP_PASSES} times without its condition failing"
+                        )));
+                    }
+                    follow(engine, &pieces, clbits, rng)?;
+                    passes += 1;
+                }
             }
         }
     }

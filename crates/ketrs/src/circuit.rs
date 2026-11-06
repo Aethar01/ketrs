@@ -1,6 +1,6 @@
 //! Backend-independent circuit representation.
 
-use crate::classical::{Condition, Instruction};
+use crate::classical::{Expr, Instruction};
 use crate::error::Error;
 use crate::gate::{Gate, Matrix2, Matrix4, adjoint};
 use crate::observable::{Pauli, PauliString, PauliSum};
@@ -283,26 +283,29 @@ impl Circuit {
                 then,
                 otherwise,
             } => {
-                if condition.clbits.len() > 64 {
-                    return Err(Error::InvalidArgument(
-                        "conditions read at most 64 bits".into(),
-                    ));
-                }
-                for &c in &condition.clbits {
-                    clbit_ok(c)?;
-                }
+                condition.validate(self.n_clbits)?;
                 for body in [then, otherwise] {
-                    if body.n_qubits != self.n_qubits || body.n_clbits > self.n_clbits {
-                        return Err(Error::InvalidArgument(
-                            "a branch must have the circuit's qubits and at most its classical bits"
-                                .into(),
-                        ));
-                    }
+                    self.check_block(body)?;
                 }
+            }
+            Instruction::While { condition, body } => {
+                condition.validate(self.n_clbits)?;
+                self.check_block(body)?;
             }
         }
         self.instructions.push((self.ops.len(), instruction));
         Ok(self)
+    }
+
+    /// A branch or loop body must have this circuit's qubits and at most its
+    /// classical bits.
+    fn check_block(&self, body: &Circuit) -> Result<(), Error> {
+        if body.n_qubits != self.n_qubits || body.n_clbits > self.n_clbits {
+            return Err(Error::InvalidArgument(
+                "a block must have the circuit's qubits and at most its classical bits".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn add_instruction(&mut self, instruction: Instruction) -> &mut Self {
@@ -332,20 +335,31 @@ impl Circuit {
         self.add_instruction(Instruction::Reset { qubit })
     }
 
-    /// Run `then` if `condition` holds, else `otherwise` (or nothing). The
-    /// branches use the same qubits and classical bits as this circuit.
+    /// Run `then` if `condition` (a [`Condition`](crate::Condition) or
+    /// any [`Expr`]) holds, else `otherwise` (or nothing). The branches use
+    /// the same qubits and classical bits as this circuit.
     pub fn if_test(
         &mut self,
-        condition: Condition,
+        condition: impl Into<Expr>,
         then: Circuit,
         otherwise: Option<Circuit>,
     ) -> &mut Self {
         let otherwise =
             otherwise.unwrap_or_else(|| Circuit::with_clbits(self.n_qubits, self.n_clbits));
         self.add_instruction(Instruction::IfElse {
-            condition,
+            condition: condition.into(),
             then: Box::new(then),
             otherwise: Box::new(otherwise),
+        })
+    }
+
+    /// Run `body` while `condition` holds. The body uses the same qubits and
+    /// classical bits as this circuit, and normally measures into the bits
+    /// the condition reads.
+    pub fn while_loop(&mut self, condition: impl Into<Expr>, body: Circuit) -> &mut Self {
+        self.add_instruction(Instruction::While {
+            condition: condition.into(),
+            body: Box::new(body),
         })
     }
 
@@ -423,6 +437,10 @@ impl Circuit {
                         condition: condition.clone(),
                         then: Box::new(then.bind(&values[..then.n_parameters])?),
                         otherwise: Box::new(otherwise.bind(&values[..otherwise.n_parameters])?),
+                    },
+                    Instruction::While { condition, body } => Instruction::While {
+                        condition: condition.clone(),
+                        body: Box::new(body.bind(&values[..body.n_parameters])?),
                     },
                     other => other.clone(),
                 };

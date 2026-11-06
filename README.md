@@ -44,13 +44,15 @@ basis-state index, and Pauli labels have qubit 0 rightmost.
   an energy and its full gradient cost 2.3–3.5 energy evaluations (4-layer
   ansatz, 14–22 qubits), however many parameters there are.
 - Sampling and mid-circuit measurement on states.
-- Measurement, reset and classical control (`if_test`, with else branches
-  and register conditions) inside circuits: `run_trajectory` samples one
+- Measurement, reset and classical control (`if_test` with else branches,
+  `while_loop`, conditions on bits, registers or classical expressions)
+  inside circuits, on every engine: `run_trajectory` samples one
   history, `sample_circuit` returns counts, simulating the deterministic
   prefix once and sampling the final state directly when all measurements
   are terminal.
 - `ketrs.qiskit.from_qiskit` converts Qiskit circuits, including parametric
-  ones, measurements, resets and `if_test` blocks; unsupported gates are
+  ones, measurements, resets, `if_test`, `while_loop` and `for_loop` blocks
+  and classical expressions; unsupported gates are
   expanded through their Qiskit definitions.
 
 ## Performance
