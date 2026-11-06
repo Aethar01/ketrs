@@ -78,5 +78,5 @@ def _transpile(qc):
 if __name__ == "__main__":
     print("| qubits | steps | χ cap | χ used | ketrs trunc. error | ketrs | Aer MPS | speedup | ⟨Z⟩ diff |")
     print("|---|---|---|---|---|---|---|---|---|")
-    for n, steps, bond in [(50, 10, 32), (100, 10, 32), (50, 20, 64), (100, 20, 64)]:
+    for n, steps, bond in [(50, 10, 32), (100, 10, 32), (50, 20, 64), (100, 20, 64), (100, 40, 128)]:
         run(n, steps, bond)

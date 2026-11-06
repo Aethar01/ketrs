@@ -68,8 +68,11 @@ On a Ryzen 5 5600X, against Qiskit Aer 0.18 in its fastest configuration
   tile rather than per gate. Expectation values on the GPU are 14–15×
   faster than downloading the state; 29 qubits (8 GiB) runs on a 16 GB
   card.
-- MPS (TEBD of an Ising chain, 50–100 qubits): 1.5–2.5× faster than Aer's
-  MPS method, agreeing to `1e-10`.
+- MPS (TEBD of an Ising chain, 50–100 qubits): 9–16× faster than Aer's
+  MPS method at bond dimension ≤ 64 and 34× at 128 (2.2 s against 76 s),
+  with errors against the exact result at the truncation level for both.
+  Commuting Trotter terms are packed into layers and disjoint bonds are
+  updated in parallel.
 - Exact evolution and ground states: faster than scipy's `expm_multiply`
   and `eigsh` (with the sparse matrix built in advance) at every size from
   12 qubits: 1.7× at 12, 2.5–2.7× at 14, 3.5–12× at 18–20.

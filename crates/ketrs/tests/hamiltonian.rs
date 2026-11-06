@@ -385,3 +385,71 @@ fn real_statevector_rejects_complex_gates_without_changing_state() {
         Err(Error::NotReal(_))
     ));
 }
+
+#[test]
+fn pauli_strings_commute_on_an_even_number_of_differences() {
+    let s = |label| PauliString::from_label(label).unwrap();
+    assert!(s("XX").commutes_with(&s("ZZ")));
+    assert!(s("XY").commutes_with(&s("YX")));
+    assert!(!s("IX").commutes_with(&s("IZ")));
+    assert!(!s("XZI").commutes_with(&s("ZZY")));
+    assert!(s("XIZ").commutes_with(&s("IYI")));
+}
+
+/// Trotter steps rearrange runs of commuting terms into layers on disjoint
+/// qubits, which must leave the circuit's unitary exactly as written.
+#[test]
+fn trotter_layers_commuting_terms_exactly() {
+    let n = 6;
+    let mut h = PauliSum::new();
+    for q in 0..n - 1 {
+        h.add(
+            0.3 + 0.1 * q as f64,
+            PauliString::new([(q, Pauli::Z), (q + 1, Pauli::Z)]).unwrap(),
+        );
+    }
+    h.add(0.4, PauliString::from_label("IIXXII").unwrap());
+    for q in 0..n {
+        h.add(-0.7, PauliString::new([(q, Pauli::X)]).unwrap());
+    }
+    h.add(0.2, PauliString::from_label("YZIIIX").unwrap());
+    // X₂ commutes with nothing before it on qubit 2 but would fit the
+    // first layer; it must stay after Z₁Z₂.
+    let tricky =
+        PauliSum::from_list([("IIZZ", 0.5), ("IZZI", 0.6), ("IXII", -0.4), ("ZZII", 0.3)]).unwrap();
+    for (h, n) in [(h, n), (tricky, 4)] {
+        trotter_matches_terms_in_order(&h, n);
+    }
+}
+
+fn trotter_matches_terms_in_order(h: &PauliSum, n: usize) {
+    let psi = random_state(n, 9);
+    for order in [1, 2] {
+        let mut layered = Circuit::new(n);
+        layered.pauli_evolution(h, 0.8, 3, order).unwrap();
+        // The same formula, term by term in the order given.
+        let mut naive = Circuit::new(n);
+        let dt = 0.8 / 3.0;
+        for _ in 0..3 {
+            let terms = h.terms();
+            if order == 1 {
+                for (c, p) in terms {
+                    naive.pauli_rotation(2.0 * c * dt, p.clone());
+                }
+            } else {
+                let (last, rest) = terms.split_last().unwrap();
+                for (c, p) in rest {
+                    naive.pauli_rotation(c * dt, p.clone());
+                }
+                naive.pauli_rotation(2.0 * last.0 * dt, last.1.clone());
+                for (c, p) in rest.iter().rev() {
+                    naive.pauli_rotation(c * dt, p.clone());
+                }
+            }
+        }
+        let (mut a, mut b) = (psi.clone(), psi.clone());
+        a.run(&layered).unwrap();
+        b.run(&naive).unwrap();
+        assert_state_eq(&a, b.amplitudes());
+    }
+}

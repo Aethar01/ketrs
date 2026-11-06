@@ -66,6 +66,29 @@ impl PauliString {
         Self::new(ops)
     }
 
+    /// Whether the two strings commute: they anticommute exactly when
+    /// they differ (both non-identity) on an odd number of qubits.
+    pub fn commutes_with(&self, other: &PauliString) -> bool {
+        let (mut a, mut b) = (self.ops.iter().peekable(), other.ops.iter().peekable());
+        let mut differ = 0;
+        while let (Some(&&(qa, pa)), Some(&&(qb, pb))) = (a.peek(), b.peek()) {
+            match qa.cmp(&qb) {
+                std::cmp::Ordering::Less => {
+                    a.next();
+                }
+                std::cmp::Ordering::Greater => {
+                    b.next();
+                }
+                std::cmp::Ordering::Equal => {
+                    differ += (pa != pb) as usize;
+                    a.next();
+                    b.next();
+                }
+            }
+        }
+        differ % 2 == 0
+    }
+
     /// The non-identity factors, sorted by qubit.
     pub fn ops(&self) -> &[(usize, Pauli)] {
         &self.ops

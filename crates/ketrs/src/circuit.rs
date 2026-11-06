@@ -750,8 +750,14 @@ impl Circuit {
     /// Order 1 is Lie–Trotter, applying each term in turn; order 2 is the
     /// symmetric Strang splitting; higher even orders use Suzuki's recursion
     /// `S₂ₖ(t) = S₂ₖ₋₂(pt)² S₂ₖ₋₂((1−4p)t) S₂ₖ₋₂(pt)²`,
-    /// `p = 1/(4 − 4^{1/(2k−1)})`. Terms are applied in the order given, so
-    /// commuting groups can be arranged by the caller.
+    /// `p = 1/(4 − 4^{1/(2k−1)})`.
+    ///
+    /// Terms are applied in the order given, except that each run of
+    /// consecutive, mutually commuting terms is rearranged into layers on
+    /// disjoint qubits: a chain `Z₀Z₁, Z₁Z₂, Z₂Z₃, …` becomes the even
+    /// bonds, then the odd ones. That leaves every step's unitary exactly
+    /// unchanged, but lets engines apply each layer at once (the MPS engine
+    /// runs disjoint bonds in parallel) instead of as a staircase.
     pub fn pauli_evolution(
         &mut self,
         hamiltonian: &PauliSum,
@@ -779,9 +785,10 @@ impl Circuit {
                 }
             }
         }
+        let terms = commuting_layers(hamiltonian.terms(), self.n_qubits);
         let dt = time / steps as f64;
         for _ in 0..steps {
-            self.product_formula(hamiltonian.terms(), dt, order);
+            self.product_formula(&terms, dt, order);
         }
         Ok(self)
     }
@@ -822,6 +829,50 @@ impl Circuit {
             qubits: [q0, q1],
         })
     }
+}
+
+/// A Hamiltonian term `(coefficient, string)`.
+type Term = (f64, PauliString);
+
+/// `terms` with each run of consecutive, mutually commuting terms
+/// rearranged into layers of terms on disjoint qubits, each term in the
+/// first layer it fits. Products over a run are unchanged exactly.
+fn commuting_layers(terms: &[(f64, PauliString)], n_qubits: usize) -> Vec<(f64, PauliString)> {
+    let mut out = Vec::with_capacity(terms.len());
+    let mut rest = terms;
+    while !rest.is_empty() {
+        let mut run = 1;
+        while run < rest.len()
+            && rest[..run]
+                .iter()
+                .all(|(_, p)| p.commutes_with(&rest[run].1))
+        {
+            run += 1;
+        }
+        // Each layer's used qubits and terms.
+        let mut layers: Vec<(Vec<bool>, Vec<&Term>)> = Vec::new();
+        for term in &rest[..run] {
+            let fits = |used: &[bool]| term.1.qubits().all(|q| !used[q]);
+            let layer = match layers.iter().position(|(used, _)| fits(used)) {
+                Some(layer) => layer,
+                None => {
+                    layers.push((vec![false; n_qubits], Vec::new()));
+                    layers.len() - 1
+                }
+            };
+            for q in term.1.qubits() {
+                layers[layer].0[q] = true;
+            }
+            layers[layer].1.push(term);
+        }
+        out.extend(
+            layers
+                .into_iter()
+                .flat_map(|(_, terms)| terms.into_iter().cloned()),
+        );
+        rest = &rest[run..];
+    }
+    out
 }
 
 #[cfg(test)]

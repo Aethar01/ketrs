@@ -14,9 +14,11 @@
 //! discarded weight is below `cutoff`. Gates on distant qubits are routed
 //! with swaps, and Pauli rotations on more than two qubits are decomposed
 //! exactly. Running a Trotter circuit is therefore TEBD; circuits are fused
-//! first, so each neighbouring pair costs one SVD per layer.
+//! first, so each neighbouring pair costs one SVD per layer, and gates on
+//! disjoint bonds run in parallel, in Hastings' form of TEBD.
 
 mod dmrg;
+mod layers;
 mod linalg;
 mod mpo;
 
@@ -26,7 +28,6 @@ pub use dmrg::{DmrgOptions, DmrgResult};
 
 use crate::circuit::{Circuit, Operation};
 use crate::error::Error;
-use crate::fusion::local_matrix;
 use crate::gate::Gate;
 use crate::observable::{Pauli, PauliString, PauliSum};
 use faer::{Mat, MatRef};
@@ -234,9 +235,11 @@ impl Mps {
                 circuit.n_parameters()
             )));
         }
+        let mut steps = Vec::new();
         for op in circuit.fused().ops() {
-            self.apply_unchecked(op);
+            layers::steps(op, &mut steps);
         }
+        self.run_layers(&steps);
         if circuit.global_phase() != 0.0 {
             let phase = C64::cis(circuit.global_phase());
             self.tensors[self.center]
@@ -255,21 +258,12 @@ impl Mps {
     }
 
     fn apply_unchecked(&mut self, op: &Operation) {
-        match local_matrix(op) {
-            Some((qubits, m)) if qubits.len() == 1 => {
-                self.apply_1q(qubits[0], [[m[0][0], m[0][1]], [m[1][0], m[1][1]]]);
-            }
-            Some((qubits, m)) => {
-                let m: [[C64; 4]; 4] = std::array::from_fn(|r| std::array::from_fn(|c| m[r][c]));
-                self.apply_2q(qubits[0], qubits[1], &m);
-            }
-            None => {
-                let Operation::PauliRotation { pauli, theta } = op else {
-                    unreachable!("operations on more than two qubits are Pauli rotations")
-                };
-                for part in decompose_pauli_rotation(pauli, *theta) {
-                    self.apply_unchecked(&part);
-                }
+        let mut steps = Vec::new();
+        layers::steps(op, &mut steps);
+        for step in steps {
+            match step {
+                layers::Step::Site(q, m) => self.apply_1q(q, m),
+                layers::Step::Bond(i, m) => self.apply_adjacent(i, &m),
             }
         }
     }
@@ -289,56 +283,16 @@ impl Mps {
         }
     }
 
-    /// Apply a 4×4 matrix whose index has bit 0 for qubit `a` and bit 1 for
-    /// qubit `b`, routing with swaps if they aren't neighbours.
-    fn apply_2q(&mut self, a: usize, b: usize, m: &[[C64; 4]; 4]) {
-        // Put the lower qubit on bit 0.
-        let (lo, hi, m) = if a < b {
-            (a, b, *m)
-        } else {
-            const P: [usize; 4] = [0, 2, 1, 3];
-            (
-                b,
-                a,
-                std::array::from_fn(|r| std::array::from_fn(|c| m[P[r]][P[c]])),
-            )
-        };
-        let swap = swap_matrix();
-        // Bring qubit `hi` next to `lo`, apply, and move it back.
-        for s in (lo + 1..hi).rev() {
-            self.apply_adjacent(s, &swap);
-        }
-        self.apply_adjacent(lo, &m);
-        for s in lo + 1..hi {
-            self.apply_adjacent(s, &swap);
-        }
-    }
-
     /// Apply `m` (bit 0 = site `i`, bit 1 = site `i+1`) to neighbouring sites
     /// by contraction and truncated SVD. Leaves the centre at `i + 1`.
     fn apply_adjacent(&mut self, i: usize, m: &[[C64; 4]; 4]) {
         self.move_center(i);
-        let (left, right) = (self.tensors[i].left, self.tensors[i + 1].right);
+        let right = self.tensors[i + 1].right;
         let theta = matmul(
             self.tensors[i].as_left_matrix(),
             self.tensors[i + 1].as_right_matrix(),
         );
-        // theta[(l, p), (q, r)] → Σ m[p'+2q'][p+2q] theta[(l, p), (q, r)].
-        let gated = Mat::<C64>::from_fn(left * 2, 2 * right, |row, col| {
-            let (l, p_out) = (row / 2, row % 2);
-            let (q_out, r) = (col / right, col % right);
-            let out = p_out + 2 * q_out;
-            let mut acc = ZERO;
-            for p in 0..2 {
-                for q in 0..2 {
-                    let g = m[out][p + 2 * q];
-                    if g != ZERO {
-                        acc += g * theta[(2 * l + p, q * right + r)];
-                    }
-                }
-            }
-            acc
-        });
+        let gated = layers::apply_bond_matrix(&theta, m, right);
         self.split(i, gated.as_ref(), Absorb::Right);
     }
 

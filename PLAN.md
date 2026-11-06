@@ -102,6 +102,11 @@ Added along the way (from the Schwinger project's optimisations):
   sparse matrix, and rows run in parallel from 2^11 amplitudes. Ground
   states at 14 qubits went from 4.5× slower than scipy's `eigsh` to 2.7×
   faster.
+- **Parallel TEBD**: `Mps::run` schedules gates as early as their sites
+  allow and updates each layer's disjoint bonds in parallel, in Hastings'
+  form (right-orthonormal tensors plus bond singular values, no inverses).
+  Trotter circuits pack runs of commuting terms into layers on disjoint
+  qubits, exactly. MPS TEBD went from 1.5–2.5× to 9–34× faster than Aer.
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
@@ -112,9 +117,8 @@ Added along the way (from the Schwinger project's optimisations):
 
 ## Later
 
-- MPS: apply gates on disjoint bonds in parallel (single-threaded now; still
-  1.5–2.5× faster than Aer's MPS). TDVP for long-range real-time dynamics
-  (TEBD routes long-range gates with swaps).
+- MPS: TDVP for long-range real-time dynamics (TEBD routes long-range gates
+  with swaps).
 - GPU: gradients and Hamiltonian evolution on the GPU; a single-precision
   option for GPUs without f64; more than 8 state buffers (beyond 30 qubits
   needs a GPU with more than 16 GB anyway).
