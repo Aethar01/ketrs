@@ -10,8 +10,11 @@
 //! `tests/common` keeps a plain index-loop version these are checked against.
 //!
 //! Large states don't fit in cache, so each gate streams the whole state
-//! through memory. [`run`] reduces that by applying runs of gates on low
-//! qubits block by block, keeping each block in cache.
+//! through memory. [`run`] reduces that by applying batches of gates tile
+//! by tile (see [`Tile`]), keeping each tile in cache. A tile need only
+//! include the qubits a gate mixes: controls and diagonal factors on other
+//! qubits are fixed within each tile. Batches take gates out of order
+//! where they commute, so one pass can cover many layers of a circuit.
 
 use crate::circuit::Operation;
 use crate::error::Error;
@@ -31,6 +34,14 @@ pub(super) const CACHE_BLOCK_QUBITS: usize = 14;
 
 /// Amplitudes handed to each parallel task.
 pub(super) const BLOCK: usize = 1 << 12;
+
+/// Gates on qubits below this have runs too short to hand to the kernels
+/// one at a time, so they go to strided kernels that walk whole blocks.
+const LOW_QUBITS: usize = 3;
+
+/// Diagonal gates whose qubits are all below this are applied as one
+/// repeating pattern of `2^PATTERN_QUBITS` factors at most.
+const PATTERN_QUBITS: usize = 4;
 
 /// An operation ready to apply to amplitudes of type `T`.
 #[derive(Clone)]
@@ -73,6 +84,9 @@ pub(super) enum Prepared<T> {
         qubits: Vec<usize>,
         rows: Vec<Vec<(usize, T)>>,
     },
+    /// Multiply every amplitude by a factor: what a diagonal gate on
+    /// qubits outside a tile does within it.
+    Scale(T),
 }
 
 /// The bit mask of `qubits`.
@@ -166,39 +180,286 @@ impl<T: Scalar> Prepared<T> {
             Prepared::Quad { q0, q1, .. } => 1 << q0 | 1 << q1,
             Prepared::Pauli { masks, .. } => masks.x | masks.z,
             Prepared::Dense { ref qubits, .. } => qubits.iter().fold(0, |acc, q| acc | 1 << q),
+            Prepared::Scale(_) => 0,
         }
     }
 
-    /// The same operation on `tile`'s amplitudes, whose qubits must
-    /// include all of this one's.
-    pub(super) fn localize(&self, tile: &Tile) -> Self {
-        let q = |qubit: usize| tile.local(1 << qubit).trailing_zeros() as usize;
-        let mut local = self.clone();
-        match &mut local {
-            Prepared::Pair { target, .. } => *target = q(*target),
-            Prepared::Controlled {
-                control, target, ..
-            } => (*control, *target) = (q(*control), q(*target)),
-            Prepared::Swap(a, b) => (*a, *b) = (q(*a), q(*b)),
-            Prepared::MultiControlled {
-                controls, target, ..
-            } => (*controls, *target) = (tile.local(*controls), q(*target)),
-            Prepared::ControlledSwap { controls, a, b } => {
-                (*controls, *a, *b) = (tile.local(*controls), q(*a), q(*b))
+    /// The qubits the operation acts on as more than a control or a phase:
+    /// those on which it doesn't commute with `Z`. A tile must include
+    /// these; the rest are fixed within each tile (see [`localize`]).
+    ///
+    /// [`localize`]: Self::localize
+    pub(super) fn active_mask(&self) -> usize {
+        let diagonal = |op: &PairOp<T>| matches!(op, PairOp::Diagonal(..));
+        match *self {
+            Prepared::Pair { ref op, target }
+            | Prepared::Controlled { ref op, target, .. }
+            | Prepared::MultiControlled { ref op, target, .. } => {
+                if diagonal(op) {
+                    0
+                } else {
+                    1 << target
+                }
             }
-            Prepared::Quad { q0, q1, .. } => (*q0, *q1) = (q(*q0), q(*q1)),
-            Prepared::Pauli { masks, .. } => {
-                masks.x = tile.local(masks.x);
-                masks.z = tile.local(masks.z);
+            Prepared::Swap(a, b) | Prepared::ControlledSwap { a, b, .. } => 1 << a | 1 << b,
+            Prepared::Quad {
+                op: QuadOp::Diagonal(_),
+                ..
+            } => 0,
+            Prepared::Pauli { masks, ref op } => match op {
+                RotationOp::Diagonal { .. } => 0,
+                RotationOp::Pairing { .. } => masks.x,
+            },
+            Prepared::Quad { .. } | Prepared::Dense { .. } | Prepared::Scale(_) => {
+                self.qubit_mask()
             }
-            Prepared::Dense { qubits, .. } => qubits.iter_mut().for_each(|x| *x = q(*x)),
         }
-        local
+    }
+
+    /// The operation as phase factors, if it is diagonal on at most two
+    /// qubits: `(mask, f)` multiplies every amplitude whose index has all
+    /// bits of `mask` set by `f`. Factors of `diag(d₀, d₁)` other than `d₀ = 1`
+    /// are taken relative to `d₀`, which may round by an ulp.
+    fn phase_terms(&self) -> Option<Vec<(usize, T)>> {
+        let mut terms = Vec::with_capacity(4);
+        let mut push = |mask: usize, f: T| {
+            if f != T::ONE {
+                terms.push((mask, f));
+            }
+        };
+        match *self {
+            Prepared::Scale(f) => push(0, f),
+            Prepared::Pair {
+                op: PairOp::Diagonal(d0, d1),
+                target,
+            } => {
+                push(0, d0);
+                push(1 << target, ratio(d1, d0));
+            }
+            Prepared::Controlled {
+                op: PairOp::Diagonal(d0, d1),
+                control,
+                target,
+            } => {
+                push(1 << control, d0);
+                push(1 << control | 1 << target, ratio(d1, d0));
+            }
+            Prepared::Quad {
+                op: QuadOp::Diagonal(d),
+                q0,
+                q1,
+            } => quad_terms(d, q0, q1)
+                .into_iter()
+                .for_each(|(m, f)| push(m, f)),
+            Prepared::Pauli {
+                masks,
+                op: RotationOp::Diagonal { plus, minus },
+            } => {
+                let z = masks.z;
+                match z.count_ones() {
+                    0 => push(0, plus),
+                    1 => {
+                        push(0, plus);
+                        push(z, ratio(minus, plus));
+                    }
+                    2 => {
+                        let (a, b) = (
+                            z.trailing_zeros() as usize,
+                            usize::BITS as usize - 1 - z.leading_zeros() as usize,
+                        );
+                        quad_terms([plus, minus, minus, plus], a, b)
+                            .into_iter()
+                            .for_each(|(m, f)| push(m, f));
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+        Some(terms)
+    }
+
+    /// The same operation on `tile`'s amplitudes. The tile must include
+    /// the [active](Self::active_mask) qubits; controls and phases on the
+    /// others are settled tile by tile from the tile's base index.
+    pub(super) fn localize(&self, tile: &Tile) -> Local<T> {
+        let inside = |qubit: usize| tile.qubits() >> qubit & 1 == 1;
+        let q = |qubit: usize| tile.local(1 << qubit).trailing_zeros() as usize;
+        let local = |mask: usize| tile.local(mask & tile.qubits());
+        let outside = |mask: usize| mask & !tile.qubits();
+        let scale = |d: T| (d != T::ONE).then_some(Prepared::Scale(d));
+        // A diagonal gate whose target is outside: select its factor by
+        // the target, applied where the local `controls` are all set.
+        let by_target = |target: usize, d0: T, d1: T, controls: usize| {
+            let factor = |d: T| match controls {
+                0 => scale(d),
+                _ => {
+                    let c = usize::BITS as usize - 1 - controls.leading_zeros() as usize;
+                    (d != T::ONE).then(|| {
+                        with_controls(PairOp::Diagonal(T::ONE, d), controls & !(1 << c), c)
+                    })
+                }
+            };
+            Local::select(1 << target, vec![factor(d0), factor(d1)])
+        };
+        match *self {
+            Prepared::Pair { ref op, target } if inside(target) => Local::fixed(Prepared::Pair {
+                op: op.clone(),
+                target: q(target),
+            }),
+            Prepared::Pair { ref op, target } => {
+                let PairOp::Diagonal(d0, d1) = *op else {
+                    unreachable!("active qubits are inside the tile")
+                };
+                Local::select(1 << target, vec![scale(d0), scale(d1)])
+            }
+            Prepared::Controlled {
+                ref op,
+                control,
+                target,
+            } => {
+                let controls = local(1 << control);
+                let mut l = if inside(target) {
+                    Local::fixed(with_controls(op.clone(), controls, q(target)))
+                } else {
+                    let PairOp::Diagonal(d0, d1) = *op else {
+                        unreachable!("active qubits are inside the tile")
+                    };
+                    by_target(target, d0, d1, controls)
+                };
+                l.controls = outside(1 << control);
+                l
+            }
+            Prepared::MultiControlled {
+                ref op,
+                controls,
+                target,
+            } => {
+                let mut l = if inside(target) {
+                    Local::fixed(with_controls(op.clone(), local(controls), q(target)))
+                } else {
+                    let PairOp::Diagonal(d0, d1) = *op else {
+                        unreachable!("active qubits are inside the tile")
+                    };
+                    by_target(target, d0, d1, local(controls))
+                };
+                l.controls = outside(controls);
+                l
+            }
+            Prepared::Swap(a, b) => Local::fixed(Prepared::Swap(q(a), q(b))),
+            Prepared::ControlledSwap { controls, a, b } => {
+                let (a, b) = (q(a), q(b));
+                let mut l = Local::fixed(match local(controls) {
+                    0 => Prepared::Swap(a, b),
+                    controls => Prepared::ControlledSwap { controls, a, b },
+                });
+                l.controls = outside(controls);
+                l
+            }
+            Prepared::Quad {
+                op: QuadOp::Diagonal(d),
+                q0,
+                q1,
+            } => match (inside(q0), inside(q1)) {
+                (true, true) => Local::fixed(Prepared::Quad {
+                    op: QuadOp::Diagonal(d),
+                    q0: q(q0),
+                    q1: q(q1),
+                }),
+                (true, false) => Local::select(
+                    1 << q1,
+                    (0..2)
+                        .map(|b| {
+                            let op = PairOp::Diagonal(d[2 * b], d[2 * b + 1]);
+                            (!op.is_identity()).then_some(Prepared::Pair { op, target: q(q0) })
+                        })
+                        .collect(),
+                ),
+                (false, true) => Local::select(
+                    1 << q0,
+                    (0..2)
+                        .map(|b| {
+                            let op = PairOp::Diagonal(d[b], d[2 + b]);
+                            (!op.is_identity()).then_some(Prepared::Pair { op, target: q(q1) })
+                        })
+                        .collect(),
+                ),
+                (false, false) => Local::select(
+                    1 << q0 | 1 << q1,
+                    // Selector bit 0 is the lower of the two qubits.
+                    (0..4)
+                        .map(|i| {
+                            let (lower, upper) = (i & 1, i >> 1);
+                            let (b0, b1) = if q0 < q1 {
+                                (lower, upper)
+                            } else {
+                                (upper, lower)
+                            };
+                            scale(d[2 * b1 + b0])
+                        })
+                        .collect(),
+                ),
+            },
+            Prepared::Pauli { masks, ref op } => {
+                let local_masks = PauliMasks {
+                    x: local(masks.x),
+                    z: local(masks.z),
+                    n_y: masks.n_y,
+                };
+                // An odd number of Z factors outside the tile flips the
+                // sign of P within it.
+                let (even, odd) = match *op {
+                    RotationOp::Diagonal { plus, minus } if local_masks.z == 0 => {
+                        return Local::parity(outside(masks.z), vec![scale(plus), scale(minus)]);
+                    }
+                    RotationOp::Diagonal { plus, minus } => (
+                        RotationOp::Diagonal { plus, minus },
+                        RotationOp::Diagonal {
+                            plus: minus,
+                            minus: plus,
+                        },
+                    ),
+                    RotationOp::Pairing { cos, factor } => (
+                        RotationOp::Pairing { cos, factor },
+                        RotationOp::Pairing {
+                            cos,
+                            factor: -factor,
+                        },
+                    ),
+                };
+                let pauli = |op| {
+                    Some(Prepared::Pauli {
+                        masks: local_masks,
+                        op,
+                    })
+                };
+                Local::parity(outside(masks.z), vec![pauli(even), pauli(odd)])
+            }
+            Prepared::Quad { .. } | Prepared::Dense { .. } | Prepared::Scale(_) => {
+                let mut local = self.clone();
+                match &mut local {
+                    Prepared::Quad { q0, q1, .. } => (*q0, *q1) = (q(*q0), q(*q1)),
+                    Prepared::Dense { qubits, .. } => qubits.iter_mut().for_each(|x| *x = q(*x)),
+                    _ => {}
+                }
+                Local::fixed(local)
+            }
+        }
     }
 
     /// Apply to `amps`; qubits must be valid for its length.
     pub(super) fn apply(&self, amps: &mut [T]) {
         match self {
+            Prepared::Pair { op, target } if *target < LOW_QUBITS => {
+                let stride = 1 << target;
+                if let PairOp::Diagonal(d0, d1) = *op {
+                    let p = pattern(stride, d0, d1);
+                    for_each_block(amps, |block| T::scale_pattern(block, &p))
+                } else {
+                    let m = op.matrix();
+                    for_each_block(amps, |block| T::apply_pair_strided(&m, block, stride))
+                }
+            }
             Prepared::Pair { op, target } => {
                 for_each_pair(amps, *target, 1, |_, lo, hi| op.apply(lo, hi))
             }
@@ -225,7 +486,130 @@ impl<T: Scalar> Prepared<T> {
             Prepared::Quad { op, q0, q1 } => apply_quad(amps, op, *q0, *q1),
             Prepared::Pauli { masks, op, .. } => apply_pauli_rotation(amps, *masks, op),
             Prepared::Dense { qubits, rows } => apply_dense(amps, qubits, rows),
+            Prepared::Scale(f) => for_each_block(amps, |block| T::scale_slice(block, *f)),
         }
+    }
+}
+
+/// `a / b`, exactly `a` when `b = 1`.
+fn ratio<T: Scalar>(a: T, b: T) -> T {
+    if b == T::ONE {
+        a
+    } else {
+        a * T::from_complex(b.to_complex().inv()).expect("the inverse of a representable phase")
+    }
+}
+
+/// `diag(d)` on `q0, q1` (basis index `2·b(q1) + b(q0)`) as phase terms
+/// (see [`Prepared::phase_terms`]): `d₀`, then `d₁/d₀` and `d₂/d₀` on each
+/// qubit, then what remains where both are set.
+fn quad_terms<T: Scalar>(d: [T; 4], q0: usize, q1: usize) -> [(usize, T); 4] {
+    let (a, b) = (ratio(d[1], d[0]), ratio(d[2], d[0]));
+    [
+        (0, d[0]),
+        (1 << q0, a),
+        (1 << q1, b),
+        (1 << q0 | 1 << q1, ratio(ratio(d[3], d[0]), a * b)),
+    ]
+}
+
+/// `op` on `target` where every bit of `controls` is set, with the
+/// cheapest kernel for the number of controls.
+fn with_controls<T>(op: PairOp<T>, controls: usize, target: usize) -> Prepared<T> {
+    match controls.count_ones() {
+        0 => Prepared::Pair { op, target },
+        1 => Prepared::Controlled {
+            op,
+            control: controls.trailing_zeros() as usize,
+            target,
+        },
+        _ => Prepared::MultiControlled {
+            op,
+            controls,
+            target,
+        },
+    }
+}
+
+/// One of several variants of something, chosen tile by tile from the
+/// tile's base index: none unless the base has every bit of `controls`
+/// set, otherwise the variant chosen by the base's bits in `select` (in
+/// order) or the parity of its bits in `parity`. At most one of those is
+/// nonzero, and a variant of `None` leaves the tile as it is.
+pub(super) struct Selected<V> {
+    controls: usize,
+    select: usize,
+    parity: usize,
+    variants: Vec<Option<V>>,
+}
+
+/// An operation localised to a tile (see [`Prepared::localize`]).
+pub(super) type Local<T> = Selected<Prepared<T>>;
+
+impl<V> Selected<V> {
+    fn fixed(op: V) -> Self {
+        Self::select(0, vec![Some(op)])
+    }
+
+    fn select(select: usize, variants: Vec<Option<V>>) -> Self {
+        Selected {
+            controls: 0,
+            select,
+            parity: 0,
+            variants,
+        }
+    }
+
+    fn parity(parity: usize, variants: Vec<Option<V>>) -> Self {
+        Selected {
+            controls: 0,
+            select: 0,
+            parity,
+            variants,
+        }
+    }
+
+    /// The variant for the tile starting at `base`.
+    #[inline]
+    fn pick(&self, base: usize) -> Option<&V> {
+        if base & self.controls != self.controls {
+            return None;
+        }
+        let index = extract(base, self.select) | ((base & self.parity).count_ones() & 1) as usize;
+        self.variants[index].as_ref()
+    }
+
+    /// The same choice between `f` of each variant, or `None` if `f` fails
+    /// for any.
+    fn try_map<W>(&self, f: impl Fn(&V) -> Option<W>) -> Option<Selected<W>> {
+        let variants = self
+            .variants
+            .iter()
+            .map(|v| v.as_ref().map(&f).map_or(Some(None), |w| w.map(Some)))
+            .collect::<Option<_>>()?;
+        Some(Selected {
+            controls: self.controls,
+            select: self.select,
+            parity: self.parity,
+            variants,
+        })
+    }
+}
+
+impl<T: Scalar> Local<T> {
+    /// Apply to the tile `amps` whose first amplitude has index `base`.
+    #[inline]
+    pub(super) fn apply(&self, base: usize, amps: &mut [T]) {
+        if let Some(op) = self.pick(base) {
+            op.apply(amps);
+        }
+    }
+
+    /// The `(active, qubits)` masks of every variant together.
+    fn masks(&self) -> (usize, usize) {
+        self.variants.iter().flatten().fold((0, 0), |(a, q), op| {
+            (a | op.active_mask(), q | op.qubit_mask())
+        })
     }
 }
 
@@ -251,6 +635,19 @@ impl<T: Scalar> PairOp<T> {
         } else {
             PairOp::General(m)
         })
+    }
+
+    /// The matrix.
+    fn matrix(&self) -> [[T; 2]; 2] {
+        match *self {
+            PairOp::General(m) => m,
+            PairOp::Diagonal(d0, d1) => [[d0, T::ZERO], [T::ZERO, d1]],
+            PairOp::Flip => [[T::ZERO, T::ONE], [T::ONE, T::ZERO]],
+        }
+    }
+
+    fn is_identity(&self) -> bool {
+        matches!(*self, PairOp::Diagonal(d0, d1) if d0 == T::ONE && d1 == T::ONE)
     }
 
     #[inline]
@@ -314,29 +711,180 @@ impl<T: Scalar> RotationOp<T> {
     }
 }
 
-/// Apply every operation in order.
+/// How many pending operations [`run`] looks through for ones that can
+/// join a tile ahead of others they commute with.
+const LOOKAHEAD: usize = 1024;
+
+/// Apply every operation, in order up to reordering operations that
+/// commute.
 pub(super) fn run<T: Scalar>(amps: &mut [T], ops: &[Prepared<T>]) {
     let n_qubits = amps.len().trailing_zeros() as usize;
-    let mut rest = ops;
-    while let Some(first) = rest.first() {
-        let (tile, count) = Tile::cover(
-            n_qubits,
-            CACHE_BLOCK_QUBITS,
-            rest.iter().map(Prepared::qubit_mask),
-        );
-        if count >= 2 {
-            let (batch, tail) = rest.split_at(count);
-            let local: Vec<_> = batch.iter().map(|op| op.localize(&tile)).collect();
-            tile.for_each([amps], |_, [block]| {
-                for op in &local {
-                    op.apply(block);
+    let masks: Vec<_> = ops
+        .iter()
+        .map(|op| (op.active_mask(), op.qubit_mask()))
+        .collect();
+    let mut pending: Vec<usize> = (0..ops.len()).collect();
+    while let Some(&first) = pending.first() {
+        let window = pending.len().min(LOOKAHEAD);
+        let candidates = pending[..window].iter().map(|&i| masks[i]);
+        let Some((tile, taken)) = Tile::cover(n_qubits, CACHE_BLOCK_QUBITS, candidates, true)
+        else {
+            // Too small to tile: every operation on the whole state.
+            pending.iter().for_each(|&i| ops[i].apply(amps));
+            return;
+        };
+        if taken.len() >= 2 {
+            let local: Vec<_> = taken
+                .iter()
+                .map(|&t| ops[pending[t]].localize(&tile))
+                .collect();
+            let plan = plan_in_tile(local);
+            tile.for_each([amps], |base, [block]| {
+                for group in &plan {
+                    group.apply(base, block);
                 }
             });
-            rest = tail;
+            let mut is_taken = vec![false; window];
+            taken.iter().for_each(|&t| is_taken[t] = true);
+            let kept: Vec<_> = (0..window)
+                .filter(|&j| !is_taken[j])
+                .map(|j| pending[j])
+                .collect();
+            pending.splice(0..window, kept);
         } else {
-            first.apply(amps);
-            rest = &rest[1..];
+            ops[first].apply(amps);
+            pending.remove(0);
         }
+    }
+}
+
+/// Runs of at least this many diagonal operations on at most two qubits
+/// each are applied together in one sweep over a tile.
+const MIN_PHASE_RUN: usize = 3;
+
+/// Part of a batch, in a tile: one operation, or a run of diagonal ones
+/// as phase terms (see [`Prepared::phase_terms`]).
+enum Group<T> {
+    One(Local<T>),
+    Phases(Vec<Selected<Vec<(usize, T)>>>),
+}
+
+impl<T: Scalar> Group<T> {
+    /// Apply to the tile `amps` whose first amplitude has index `base`.
+    fn apply(&self, base: usize, amps: &mut [T]) {
+        match self {
+            Group::One(op) => op.apply(base, amps),
+            Group::Phases(ops) => {
+                let terms: Vec<_> = ops
+                    .iter()
+                    .filter_map(|op| op.pick(base))
+                    .flatten()
+                    .copied()
+                    .collect();
+                apply_phases(amps, &terms);
+            }
+        }
+    }
+}
+
+/// Group a batch localised to a tile into runs of diagonal operations,
+/// taking them ahead of operations they commute with.
+fn plan_in_tile<T: Scalar>(ops: Vec<Local<T>>) -> Vec<Group<T>> {
+    let masks: Vec<_> = ops.iter().map(Local::masks).collect();
+    let phases: Vec<_> = ops
+        .iter()
+        .map(|op| op.try_map(Prepared::phase_terms))
+        .collect();
+    let mut ops: Vec<_> = ops.into_iter().map(Some).collect();
+    let mut phases: Vec<_> = phases.into_iter().map(Some).collect();
+    let mut pending: Vec<usize> = (0..ops.len()).collect();
+    let mut plan = Vec::new();
+    while let Some(&first) = pending.first() {
+        // A diagonal operation commutes with everything it passes over that
+        // is diagonal on the qubits they share.
+        let mut passed_active = 0;
+        let mut run = Vec::new();
+        for &i in &pending {
+            let (active, touched) = masks[i];
+            let diagonal = matches!(phases[i], Some(Some(_)));
+            if diagonal && touched & passed_active == 0 {
+                run.push(i);
+            } else {
+                passed_active |= active;
+            }
+        }
+        if run.len() >= MIN_PHASE_RUN {
+            let run = run
+                .iter()
+                .map(|&i| {
+                    ops[i] = None;
+                    phases[i].take().flatten().expect("planned once")
+                })
+                .collect();
+            plan.push(Group::Phases(run));
+            pending.retain(|&i| ops[i].is_some());
+        } else {
+            plan.push(Group::One(ops[first].take().expect("planned once")));
+            pending.remove(0);
+        }
+    }
+    plan
+}
+
+/// Low qubits in each row of [`apply_phases`].
+const PHASE_ROW_QUBITS: usize = 7;
+
+/// Multiply `amps` by phase terms (see [`Prepared::phase_terms`]) on at
+/// most two qubits each, in one sweep. Each row of `2^PHASE_ROW_QUBITS`
+/// amplitudes (fixed high bits) gets a table of factors, built by doubling
+/// from one factor per low bit, with terms on the row's set high bits
+/// folded into those.
+fn apply_phases<T: Scalar>(amps: &mut [T], terms: &[(usize, T)]) {
+    let r = PHASE_ROW_QUBITS.min(amps.len().trailing_zeros() as usize);
+    let low = (1 << r) - 1;
+    let mut scale = T::ONE;
+    let mut single = [T::ONE; PHASE_ROW_QUBITS];
+    // Terms on two low bits, on high bits only, and on a low and a high bit.
+    let (mut lows, mut highs, mut cross) = (Vec::new(), Vec::new(), Vec::new());
+    for &(mask, f) in terms {
+        match (mask & low, mask & !low) {
+            (0, 0) => scale *= f,
+            (l, 0) if l.count_ones() == 1 => single[l.trailing_zeros() as usize] *= f,
+            (_, 0) => lows.push((mask, f)),
+            (0, _) => highs.push((mask, f)),
+            (l, h) => cross.push((l.trailing_zeros() as usize, h, f)),
+        }
+    }
+    let low_table: Vec<T> = (0..1 << r)
+        .map(|i| {
+            lows.iter()
+                .filter(|&&(m, _)| i & m == m)
+                .fold(T::ONE, |acc, &(_, f)| acc * f)
+        })
+        .collect();
+    let mut table = vec![T::ONE; 1 << r];
+    for (row, chunk) in amps.chunks_exact_mut(1 << r).enumerate() {
+        let high = row << r;
+        let mut factors = single;
+        for &(bit, mask, f) in &cross {
+            if high & mask == mask {
+                factors[bit] *= f;
+            }
+        }
+        table[0] = highs
+            .iter()
+            .filter(|&&(m, _)| high & m == m)
+            .fold(scale, |acc, &(_, f)| acc * f);
+        for (bit, &f) in factors[..r].iter().enumerate() {
+            let (done, next) = table.split_at_mut(1 << bit);
+            for (n, &d) in next[..1 << bit].iter_mut().zip(done.iter()) {
+                *n = if f == T::ONE { d } else { d * f };
+            }
+        }
+        if !lows.is_empty() {
+            T::mul_slices(&mut table, &low_table);
+        }
+        T::mul_slices(chunk, &table);
     }
 }
 
@@ -364,7 +912,7 @@ const MIN_LOW_QUBITS: usize = 4;
 /// Below this many qubits the state mostly fits in the last-level cache,
 /// where gathering tiles costs more than it saves, so tiles are only ever
 /// the lowest qubits.
-const GATHER_MIN_QUBITS: usize = 20;
+pub(super) const GATHER_MIN_QUBITS: usize = 20;
 
 /// States too small for per-gate parallelism are cut into `2^SPLIT_QUBITS`
 /// tiles, enough to keep every core busy...
@@ -374,45 +922,63 @@ const SPLIT_QUBITS: usize = 4;
 const SPLIT_MIN_QUBITS: usize = 13;
 
 impl Tile {
-    /// The tile for the longest prefix of operations, given by their qubit
-    /// masks, that fit in one, and the length of that prefix. Unused places
-    /// go to the lowest remaining qubits.
+    /// A tile for operations given by their `(active, qubits)` masks (see
+    /// [`Prepared::active_mask`]), and the indices of those it takes, in
+    /// order: the tile must include each one's active qubits. Without
+    /// `reorder` they are the longest prefix that fits; with it, later
+    /// operations join too if they commute with every one passed over.
+    /// Unused places go to the lowest remaining qubits.
     ///
     /// Large states use tiles of `cache_qubits`, sized so a tile of every
     /// vector involved fits in cache; below `GATHER_MIN_QUBITS` these are
     /// only ever the lowest qubits. States below `PARALLEL_THRESHOLD`
     /// amplitudes fit in cache already, but would run every gate on one
     /// thread, so they are cut into `2^SPLIT_QUBITS` tiles that run in
-    /// parallel. States of fewer than `SPLIT_MIN_QUBITS` give count 0.
+    /// parallel. States of fewer than `SPLIT_MIN_QUBITS` give `None`.
     pub(super) fn cover(
         n_qubits: usize,
         cache_qubits: usize,
-        masks: impl IntoIterator<Item = usize>,
-    ) -> (Tile, usize) {
+        ops: impl IntoIterator<Item = (usize, usize)>,
+        reorder: bool,
+    ) -> Option<(Tile, Vec<usize>)> {
         let large = 1 << n_qubits >= PARALLEL_THRESHOLD;
         let k = cache_qubits.min(n_qubits.saturating_sub(SPLIT_QUBITS));
         if n_qubits <= k || (!large && n_qubits < SPLIT_MIN_QUBITS) {
-            return (Tile::new((1 << n_qubits) - 1, n_qubits), 0);
+            return None;
         }
+        let all = (1 << n_qubits) - 1;
         let mut qubits = if large && n_qubits < GATHER_MIN_QUBITS {
             (1 << k) - 1
         } else {
             (1 << MIN_LOW_QUBITS) - 1
         };
-        let mut count = 0;
-        for mask in masks {
-            if (qubits | mask).count_ones() as usize > k {
+        let mut taken = Vec::new();
+        // The masks of every operation passed over: a later one may only
+        // move ahead of them if each qubit it shares with them is one both
+        // act on diagonally.
+        let (mut passed_active, mut passed_qubits) = (0, 0);
+        for (i, (active, touched)) in ops.into_iter().enumerate() {
+            let commutes = active & passed_qubits == 0 && touched & passed_active == 0;
+            if commutes && (qubits | active).count_ones() as usize <= k {
+                qubits |= active;
+                taken.push(i);
+                continue;
+            }
+            if !reorder {
                 break;
             }
-            qubits |= mask;
-            count += 1;
+            passed_active |= active;
+            passed_qubits |= touched;
+            if passed_active == all {
+                break;
+            }
         }
         let mut fill = 0;
         while (qubits.count_ones() as usize) < k {
             qubits |= 1 << fill;
             fill += 1;
         }
-        (Tile::new(qubits, n_qubits), count)
+        Some((Tile::new(qubits, n_qubits), taken))
     }
 
     fn new(qubits: usize, n_qubits: usize) -> Tile {
@@ -748,10 +1314,103 @@ where
     });
 }
 
+/// Call `f(block)` on blocks of at most `BLOCK` amplitudes covering the
+/// state, in parallel if it is large.
+fn for_each_block<T: Scalar>(amps: &mut [T], f: impl Fn(&mut [T]) + Sync) {
+    if amps.len() >= PARALLEL_THRESHOLD {
+        amps.par_chunks_mut(BLOCK).for_each(&f);
+    } else {
+        amps.chunks_mut(BLOCK).for_each(f);
+    }
+}
+
+/// `half` copies of `a` then `half` of `b`: the factors of a diagonal
+/// gate on the qubit with stride `half`.
+fn pattern<T: Scalar>(half: usize, a: T, b: T) -> Vec<T> {
+    [a, b]
+        .iter()
+        .flat_map(|&x| std::iter::repeat_n(x, half))
+        .collect()
+}
+
+/// Multiply by `pattern` repeated, unless it is all ones.
+fn scale_by<T: Scalar>(s: &mut [T], pattern: &[T]) {
+    if pattern.iter().any(|&f| f != T::ONE) {
+        T::scale_pattern(s, pattern);
+    }
+}
+
+/// `m` with its middle basis states (`01` and `10`) swapped: the same
+/// operation with its two qubits exchanged.
+fn swap_middle<T: Copy>(m: &[[T; 4]; 4]) -> [[T; 4]; 4] {
+    let p = [0, 2, 1, 3];
+    std::array::from_fn(|r| std::array::from_fn(|c| m[p[r]][p[c]]))
+}
+
+/// A diagonal two-qubit gate, factors `d[2·b(high) + b(low)]`, with
+/// `low < LOW_QUBITS`.
+fn scale_quad_low<T: Scalar>(amps: &mut [T], d: [T; 4], low: usize, high: usize) {
+    if high < PATTERN_QUBITS {
+        // Both qubits low: one short pattern covers every block.
+        let p: Vec<T> = (0..2 << high)
+            .map(|i| d[2 * (i >> high & 1) + (i >> low & 1)])
+            .collect();
+        return for_each_block(amps, |block| scale_by(block, &p));
+    }
+    let half = 1 << low;
+    let (p0, p1) = (pattern(half, d[0], d[1]), pattern(half, d[2], d[3]));
+    for_each_pair(amps, high, 2 * half, |_, lo, hi| {
+        scale_by(lo, &p0);
+        scale_by(hi, &p1);
+    });
+}
+
+/// Swap `lo[i]` and `hi[j]` for every `i` with bit `low` equal to
+/// `lo_bit` and `j = i` with that bit set to `hi_bit`. Lengths are
+/// multiples of `2^(low+1)`.
+fn swap_low<T>(lo: &mut [T], hi: &mut [T], low: usize, lo_bit: bool, hi_bit: bool) {
+    let half = 1 << low;
+    let (a, b) = (if lo_bit { half } else { 0 }, if hi_bit { half } else { 0 });
+    for (l, h) in lo
+        .chunks_exact_mut(2 * half)
+        .zip(hi.chunks_exact_mut(2 * half))
+    {
+        for i in 0..half {
+            std::mem::swap(&mut l[a + i], &mut h[b + i]);
+        }
+    }
+}
+
 /// Apply `op` to `target` where `control` is set.
 fn apply_controlled<T: Scalar>(amps: &mut [T], op: &PairOp<T>, control: usize, target: usize) {
     let (low, high) = (control.min(target), control.max(target));
     let control_is_high = control > target;
+    if low < LOW_QUBITS {
+        let stride = 1 << target;
+        match *op {
+            PairOp::Diagonal(d0, d1) => {
+                let d = if control_is_high {
+                    [T::ONE, T::ONE, d0, d1]
+                } else {
+                    [T::ONE, d0, T::ONE, d1]
+                };
+                return scale_quad_low(amps, d, low, high);
+            }
+            PairOp::Flip if !control_is_high => {
+                return for_each_pair(amps, high, 2 << low, |_, lo, hi| {
+                    swap_low(lo, hi, low, true, true)
+                });
+            }
+            _ if control_is_high => {
+                let m = op.matrix();
+                return for_each_pair(amps, control, 2 * stride, |_, _, hi| {
+                    T::apply_pair_strided(&m, hi, stride)
+                });
+            }
+            // A general gate under a low control is rare: use the kernels below.
+            _ => {}
+        }
+    }
     for_each_quad(amps, low, high, |_, s01, s10, s11| {
         if control_is_high {
             op.apply(s10, s11);
@@ -763,12 +1422,35 @@ fn apply_controlled<T: Scalar>(amps: &mut [T], op: &PairOp<T>, control: usize, t
 
 fn apply_swap<T: Scalar>(amps: &mut [T], a: usize, b: usize) {
     let (low, high) = (a.min(b), a.max(b));
+    if low < LOW_QUBITS {
+        return for_each_pair(amps, high, 2 << low, |_, lo, hi| {
+            swap_low(lo, hi, low, true, false)
+        });
+    }
     for_each_quad(amps, low, high, |_, s01, s10, _| s01.swap_with_slice(s10));
 }
 
 fn apply_quad<T: Scalar>(amps: &mut [T], op: &QuadOp<T>, q0: usize, q1: usize) {
     let (low, high) = (q0.min(q1), q0.max(q1));
     let q0_is_low = q0 < q1;
+    if low < LOW_QUBITS {
+        let half = 1 << low;
+        match op {
+            QuadOp::Diagonal(d) => {
+                let mut d = *d;
+                if !q0_is_low {
+                    d.swap(1, 2);
+                }
+                return scale_quad_low(amps, d, low, high);
+            }
+            QuadOp::General(m) => {
+                let m = if q0_is_low { *m } else { swap_middle(m) };
+                return for_each_pair(amps, high, 2 * half, |_, lo, hi| {
+                    T::apply_quad_strided(&m, lo, hi, half)
+                });
+            }
+        }
+    }
     match op {
         QuadOp::Diagonal(d) => {
             let mut d = *d;

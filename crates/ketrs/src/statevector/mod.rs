@@ -22,11 +22,19 @@ use crate::scalar::Scalar;
 use kernels::Prepared;
 use num_complex::Complex64 as C64;
 use rayon::prelude::*;
+use std::borrow::Cow;
 
 /// Circuits are partly fused (see [`Circuit::fused_where`]) before running
 /// on states at least this large. Below it the state fits in cache and the
 /// specialised kernels beat fused generic matrices.
 const FUSION_MIN_QUBITS: usize = 16;
+
+/// Whether to fuse circuits on `n_qubits`. From `GATHER_MIN_QUBITS`, tiles
+/// take gates on any few qubits, so fusing saves no passes over memory,
+/// and it hides diagonal gates, which tiles take on any qubits.
+fn fuses(n_qubits: usize) -> bool {
+    (FUSION_MIN_QUBITS..kernels::GATHER_MIN_QUBITS).contains(&n_qubits)
+}
 
 /// A pure state on `n` qubits, stored as `2ⁿ` amplitudes of type `T`.
 ///
@@ -181,7 +189,8 @@ impl<T: Scalar> DenseState<T> {
         })?;
         // Circuit operations are validated on insertion, so only the width
         // needed checking.
-        let prepared = if self.n_qubits >= FUSION_MIN_QUBITS {
+        let circuit = relabel_swaps(circuit);
+        let prepared = if fuses(self.n_qubits) {
             // Gates on low qubits are already cheap through cache blocking,
             // so only fuse gates that need a full pass over memory.
             let fused = circuit.fused_where(|op| op.max_qubit() >= kernels::CACHE_BLOCK_QUBITS);
@@ -237,6 +246,49 @@ impl<T: Scalar> DenseState<T> {
         }
         Ok(())
     }
+}
+
+/// `circuit` with each swap made by relabelling the qubits of everything
+/// after it, followed by the swaps that put the qubits back: at most one
+/// per qubit, never more than the circuit had, and they join batches of
+/// other gates wherever they fit. The global phase is left out. Circuits
+/// without swaps are borrowed as they are.
+fn relabel_swaps(circuit: &Circuit) -> Cow<'_, Circuit> {
+    if !circuit
+        .ops()
+        .iter()
+        .any(|op| matches!(op, Operation::Swap(..)))
+    {
+        return Cow::Borrowed(circuit);
+    }
+    let n = circuit.n_qubits();
+    // Logical qubit q is held in physical qubit at[q]; holder is inverse.
+    let mut at: Vec<usize> = (0..n).collect();
+    let mut holder = at.clone();
+    let mut out = Circuit::new(n);
+    let push = |out: &mut Circuit, op: Operation| {
+        out.push(op).expect("a permutation of valid qubits");
+    };
+    for op in circuit.ops() {
+        match *op {
+            Operation::Swap(a, b) => {
+                at.swap(a, b);
+                (holder[at[a]], holder[at[b]]) = (a, b);
+            }
+            _ => push(&mut out, op.remapped(&at)),
+        }
+    }
+    for p in 0..n {
+        let q = holder[p];
+        if q != p {
+            // Move logical p into physical p, and q to where p was.
+            let from = at[p];
+            push(&mut out, Operation::Swap(p, from));
+            (at[q], holder[from]) = (from, q);
+            (at[p], holder[p]) = (p, p);
+        }
+    }
+    Cow::Owned(out)
 }
 
 fn prepare<T: Scalar>(ops: &[Operation]) -> Result<Vec<Prepared<T>>, Error> {
