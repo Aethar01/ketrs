@@ -152,13 +152,15 @@ Added along the way (from the Schwinger project's optimisations):
   controls, applied directly on statevectors and density matrices; the GPU
   pair kernel takes the control mask, and MPS decomposes them exactly
   (Barenco's `V² = U` recursion) into one- and two-qubit gates.
+  `Circuit::control` controls a whole circuit (Pauli rotations by their
+  central `Rz`, the global phase as a controlled phase), which OpenQASM's
+  `ctrl(n) @`/`negctrl(n) @` and Qiskit's controlled gates map onto.
 
 ## Later
 
 - Noise on statevectors by quantum trajectories (for more qubits than a
   density matrix allows); readout error; Aer noise-model import.
-- OpenQASM: export (`to_qasm`), `def` subroutines, `ctrl(n) @` and `c3x`
-  onto the native multi-controlled operations.
+- OpenQASM: export (`to_qasm`), `def` subroutines.
 
 ## Benchmarks
 

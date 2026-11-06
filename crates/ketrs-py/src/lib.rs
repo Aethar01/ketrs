@@ -508,6 +508,14 @@ impl PyCircuit {
         }
     }
 
+    /// This circuit applied only where every one of `controls` (qubits it
+    /// doesn't act on) is `|1⟩`. Parameters carry over.
+    fn control(&self, controls: Vec<usize>) -> PyResult<Self> {
+        Ok(PyCircuit {
+            inner: self.inner.control(&controls).map_err(to_py_err)?,
+        })
+    }
+
     /// Append every operation of `other`, which must have the same width.
     fn extend<'py>(
         mut slf: PyRefMut<'py, Self>,

@@ -100,6 +100,34 @@ impl Operation {
         )
     }
 
+    /// The operation in its plainest form: multi-controlled ones with at
+    /// most one control (or swaps with none) as the ordinary operation.
+    pub(crate) fn simplified(self) -> Operation {
+        match self {
+            Operation::MultiControlled {
+                gate,
+                controls,
+                target,
+            } => match controls[..] {
+                [] => Operation::Gate { gate, target },
+                [control] => Operation::Controlled {
+                    gate,
+                    control,
+                    target,
+                },
+                _ => Operation::MultiControlled {
+                    gate,
+                    controls,
+                    target,
+                },
+            },
+            Operation::ControlledSwap { controls, a, b } if controls.is_empty() => {
+                Operation::Swap(a, b)
+            }
+            op => op,
+        }
+    }
+
     /// A controlled swap as `CX(b, a)`, `X` on `b` controlled by `controls`
     /// and `a`, then `CX(b, a)` again.
     pub(crate) fn controlled_swap_parts(controls: &[usize], a: usize, b: usize) -> [Operation; 3] {
@@ -680,6 +708,137 @@ impl Circuit {
         }
     }
 
+    /// This circuit applied only where every one of `controls` is `|1⟩`,
+    /// as in Qiskit's `QuantumCircuit.control` but on qubits of the same
+    /// register. Gates and swaps gain the controls; Pauli rotations keep
+    /// their basis changes and CX ladders and control only the central
+    /// `Rz`; the global phase becomes a controlled phase. Parameters carry
+    /// over.
+    ///
+    /// Fails for circuits with measurements or classical control, controls
+    /// the circuit acts on or out of range, and arbitrary two-qubit
+    /// unitaries.
+    pub fn control(&self, controls: &[usize]) -> Result<Circuit, Error> {
+        self.check_unitary()?;
+        for (i, &c) in controls.iter().enumerate() {
+            if c >= self.n_qubits {
+                return Err(Error::QubitOutOfRange {
+                    qubit: c,
+                    n_qubits: self.n_qubits,
+                });
+            }
+            if controls[..i].contains(&c) {
+                return Err(Error::DuplicateQubit(c));
+            }
+        }
+        let Some((&last, rest)) = controls.split_last() else {
+            return Ok(self.clone());
+        };
+        let mut out = Circuit::with_clbits(self.n_qubits, self.n_clbits);
+        out.n_parameters = self.n_parameters;
+        let with =
+            |extra: &[usize]| -> Vec<usize> { controls.iter().chain(extra).copied().collect() };
+        // A phase on |1…1⟩ of the controls.
+        let phase = |angle: f64| Operation::MultiControlled {
+            gate: Gate::Phase(angle),
+            controls: rest.to_vec(),
+            target: last,
+        };
+        // Where each operation's angle ends up, and its factor there.
+        let mut angle_at = Vec::with_capacity(self.ops.len());
+        for op in &self.ops {
+            if let Some(&q) = op.qubits().iter().find(|q| controls.contains(q)) {
+                return Err(Error::DuplicateQubit(q));
+            }
+            let controlled =
+                |gate: &Gate, extra: &[usize], target: usize| Operation::MultiControlled {
+                    gate: *gate,
+                    controls: with(extra),
+                    target,
+                };
+            angle_at.push((out.ops.len(), 1.0));
+            match op {
+                Operation::Gate { gate, target } => out.ops.push(controlled(gate, &[], *target)),
+                Operation::Controlled {
+                    gate,
+                    control,
+                    target,
+                } => out.ops.push(controlled(gate, &[*control], *target)),
+                Operation::MultiControlled {
+                    gate,
+                    controls: inner,
+                    target,
+                } => out.ops.push(controlled(gate, inner, *target)),
+                Operation::Swap(a, b) => out.ops.push(Operation::ControlledSwap {
+                    controls: with(&[]),
+                    a: *a,
+                    b: *b,
+                }),
+                Operation::ControlledSwap {
+                    controls: inner,
+                    a,
+                    b,
+                } => out.ops.push(Operation::ControlledSwap {
+                    controls: with(inner),
+                    a: *a,
+                    b: *b,
+                }),
+                Operation::PauliRotation { pauli, theta } if pauli.ops().is_empty() => {
+                    // exp(-iθ/2), a global phase, becomes P(-θ/2).
+                    angle_at.last_mut().expect("pushed above").1 = -0.5;
+                    out.ops.push(phase(-theta / 2.0));
+                }
+                Operation::PauliRotation { pauli, theta } => {
+                    let parts = decompose_pauli_rotation(pauli, *theta);
+                    let centre = parts
+                        .iter()
+                        .position(|p| {
+                            matches!(
+                                p,
+                                Operation::Gate {
+                                    gate: Gate::Rz(_),
+                                    ..
+                                }
+                            )
+                        })
+                        .expect("decomposition has an Rz");
+                    angle_at.last_mut().expect("pushed above").0 = out.ops.len() + centre;
+                    for (k, part) in parts.into_iter().enumerate() {
+                        out.ops.push(match part {
+                            Operation::Gate { gate, target } if k == centre => {
+                                controlled(&gate, &[], target)
+                            }
+                            other => other,
+                        });
+                    }
+                }
+                Operation::Unitary2 { .. } => {
+                    return Err(Error::InvalidArgument(
+                        "can't control an arbitrary two-qubit unitary".into(),
+                    ));
+                }
+            }
+        }
+        out.bindings = self
+            .bindings
+            .iter()
+            .map(|b| {
+                let (op, factor) = angle_at[b.op];
+                Binding {
+                    op,
+                    parameter: b.parameter,
+                    scale: factor * b.scale,
+                    offset: factor * b.offset,
+                }
+            })
+            .collect();
+        if self.global_phase != 0.0 {
+            out.ops.push(phase(self.global_phase));
+        }
+        out.ops = out.ops.into_iter().map(Operation::simplified).collect();
+        Ok(out)
+    }
+
     fn add(&mut self, op: Operation) -> &mut Self {
         if let Err(e) = op.validate(self.n_qubits) {
             panic!("invalid operation {op:?}: {e}");
@@ -1013,6 +1172,46 @@ impl Circuit {
             qubits: [q0, q1],
         })
     }
+}
+
+/// `exp(-iθ/2 · P)` as basis changes, a CX parity ladder and one `Rz`:
+/// `P = V Z…Z V†` with `V = H` for X and `V = S H` for Y.
+pub(crate) fn decompose_pauli_rotation(pauli: &PauliString, theta: f64) -> Vec<Operation> {
+    let ops = pauli.ops();
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for &(q, p) in ops {
+        let gate = |gate| Operation::Gate { gate, target: q };
+        match p {
+            Pauli::X => {
+                before.push(gate(Gate::H));
+                after.push(gate(Gate::H));
+            }
+            Pauli::Y => {
+                before.extend([gate(Gate::Sdg), gate(Gate::H)]);
+                after.extend([gate(Gate::H), gate(Gate::S)]);
+            }
+            Pauli::Z | Pauli::I => {}
+        }
+    }
+    let ladder: Vec<Operation> = ops
+        .windows(2)
+        .map(|w| Operation::Controlled {
+            gate: Gate::X,
+            control: w[0].0,
+            target: w[1].0,
+        })
+        .collect();
+    let last = ops.last().expect("weight above two").0;
+    let mut out = before;
+    out.extend(ladder.iter().cloned());
+    out.push(Operation::Gate {
+        gate: Gate::Rz(theta),
+        target: last,
+    });
+    out.extend(ladder.into_iter().rev());
+    out.extend(after);
+    out
 }
 
 /// A square root of a 2×2 unitary: by Cayley–Hamilton,

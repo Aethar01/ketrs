@@ -12,8 +12,8 @@
 //! canonical with the centre at site 0, so leaving the form is free.
 
 use super::linalg::{matmul, thin_svd};
-use super::{Mps, Tensor, ZERO, decompose_pauli_rotation, swap_matrix};
-use crate::circuit::Operation;
+use super::{Mps, Tensor, ZERO, swap_matrix};
+use crate::circuit::{Operation, decompose_pauli_rotation};
 use crate::fusion::local_matrix;
 use faer::Mat;
 use num_complex::Complex64 as C64;

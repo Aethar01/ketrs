@@ -110,6 +110,24 @@ def test_multi_controlled_gates_match_qiskit():
     got = ketrs.Statevector.from_circuit(built).amplitudes()
     assert np.allclose(got, QiskitStatevector(ref).data, atol=1e-12)
 
+    # Controlling a whole circuit, like QuantumCircuit.control.
+    body = QuantumCircuit(3)
+    body.h(0)
+    body.rzz(0.4, 0, 1)
+    body.cx(1, 2)
+    body.global_phase = 0.3
+    wide = QuantumCircuit(4)
+    wide.h(range(4))
+    wide.append(body.control(1, annotated=False), [3, 0, 1, 2])
+    lifted = QuantumCircuit(4)
+    lifted.compose(body, [0, 1, 2], inplace=True)
+    prep = ketrs.Circuit(4)
+    for q in range(4):
+        prep.h(q)
+    prep.extend(from_qiskit(lifted).control([3]))
+    got = ketrs.Statevector.from_circuit(prep).amplitudes()
+    assert np.allclose(got, QiskitStatevector(wide).data, atol=1e-12)
+
 
 def test_qiskit_while_loop_repeats_until_success():
     qc = QuantumCircuit(1, 1)
@@ -533,6 +551,23 @@ def test_qasm2_from_qiskit_round_trips():
         np.testing.assert_allclose(
             ketrs.Statevector.from_circuit(circ).amplitudes(), QiskitStatevector(qc).data, atol=1e-10
         )
+    # qelib1's gates on three or more qubits, phases included.
+    from qiskit.circuit.library import C3SXGate, C3XGate, C4XGate, RC3XGate, RCCXGate
+
+    qc = QuantumCircuit(5)
+    for q in range(5):
+        qc.ry(0.3 + 0.4 * q, q)
+        qc.p(0.2 * q, q)
+    qc.append(RCCXGate(), [0, 3, 1])
+    qc.append(RC3XGate(), [4, 2, 0, 1])
+    qc.append(C3XGate(), [1, 2, 3, 4])
+    qc.append(C3SXGate(), [3, 0, 4, 2])
+    qc.append(C4XGate(), [2, 4, 1, 0, 3])
+    qc.cswap(4, 0, 2)
+    circ = ketrs.from_qasm(qasm2.dumps(qc))
+    np.testing.assert_allclose(
+        ketrs.Statevector.from_circuit(circ).amplitudes(), QiskitStatevector(qc).data, atol=1e-10
+    )
 
 
 def test_qasm3_parameters_and_control_flow():

@@ -6,11 +6,11 @@
 //!   OpenQASM 2's `qreg`/`creg`, laid out in declaration order;
 //! - `input float[64] θ;` or `input angle θ;`: circuit parameters, in
 //!   declaration order, usable in gate angles linear in one of them;
-//! - every gate of `stdgates.inc` and OpenQASM 2's `qelib1.inc` up to two
-//!   controls (`ccx`, `cswap`; not `c3x` and the like), gates
-//!   defined with `gate`, the modifiers `inv @`, `ctrl @` (one control on a
-//!   one-qubit gate) and `pow(k) @` for integer `k`, and broadcasting over
-//!   whole registers;
+//! - every gate of `stdgates.inc` and OpenQASM 2's `qelib1.inc`, gates
+//!   defined with `gate`, the modifiers `inv @`, `pow(k) @` for integer
+//!   `k`, and `ctrl(n) @` and `negctrl(n) @` on any gate (onto the native
+//!   multi-controlled operations; see [`Circuit::control`]), and
+//!   broadcasting over whole registers;
 //! - `measure` in both syntaxes, `reset`, `barrier` (ignored), `gphase`;
 //! - `if`/`else` and `while` on classical expressions of bits and
 //!   registers, and `for` loops over ranges or sets, unrolled.
@@ -209,7 +209,11 @@ struct Operand {
 #[derive(Clone, Debug)]
 enum Modifier {
     Inv,
-    Ctrl(usize),
+    /// `ctrl(n) @`, or `negctrl(n) @` (controlled on `|0⟩`) when `negative`.
+    Ctrl {
+        n: usize,
+        negative: bool,
+    },
     Pow(Ex),
 }
 
@@ -615,20 +619,25 @@ impl Parser {
                 self.next();
                 self.next();
                 modifiers.push(Modifier::Inv);
-            } else if self.is_word("ctrl") && matches!(self.peek_at(1), Tok::Sym("@" | "(")) {
+            } else if (self.is_word("ctrl") || self.is_word("negctrl"))
+                && matches!(self.peek_at(1), Tok::Sym("@" | "("))
+            {
+                let negative = self.is_word("negctrl");
                 self.next();
                 let n = if self.eat_sym("(") {
                     let n = self.expr()?;
                     self.expect_sym(")")?;
                     match n {
                         Ex::Num(v) if v >= 1.0 && v.fract() == 0.0 => v as usize,
-                        _ => return Err(error(self.line(), "ctrl takes a positive integer")),
+                        _ => {
+                            return Err(error(self.line(), "controls take a positive integer"));
+                        }
                     }
                 } else {
                     1
                 };
                 self.expect_sym("@")?;
-                modifiers.push(Modifier::Ctrl(n));
+                modifiers.push(Modifier::Ctrl { n, negative });
             } else if self.is_word("pow") && matches!(self.peek_at(1), Tok::Sym("(")) {
                 self.next();
                 self.next();
@@ -636,8 +645,6 @@ impl Parser {
                 self.expect_sym(")")?;
                 self.expect_sym("@")?;
                 modifiers.push(Modifier::Pow(k));
-            } else if self.is_word("negctrl") {
-                return Err(error(self.line(), "negctrl is not supported"));
             } else {
                 break;
             }
@@ -1257,37 +1264,28 @@ impl Lowering {
                     circ.extend(&step).map_err(|e| error(line, e.to_string()))?;
                 }
             }
-            Modifier::Ctrl(n) => {
-                if *n != 1 || !rest.is_empty() || qubits.len() != 2 {
+            Modifier::Ctrl { n, negative } => {
+                if qubits.len() <= *n {
                     return Err(error(
                         line,
-                        "only `ctrl @` with one control on a one-qubit gate is supported",
+                        format!("`{name}` needs qubits besides its controls"),
                     ));
                 }
-                let (control, target) = (qubits[0], qubits[1]);
-                let controlled = match (name, args) {
-                    ("rx", [a]) => Some(("crx", *a)),
-                    ("ry", [a]) => Some(("cry", *a)),
-                    ("rz", [a]) => Some(("crz", *a)),
-                    ("p" | "phase" | "u1", [a]) => Some(("cp", *a)),
-                    _ => None,
-                };
-                if let Some((controlled, angle)) = controlled {
-                    return self.base_gate(circ, controlled, &[angle], &[control, target], line);
+                let (controls, targets) = qubits.split_at(*n);
+                let mut inner = self.empty();
+                self.call(&mut inner, name, rest, args, targets, scope, line)?;
+                let controlled = inner
+                    .control(controls)
+                    .map_err(|e| error(line, format!("can't control `{name}`: {e}")))?;
+                let mut flips = self.empty();
+                if *negative {
+                    for &c in controls {
+                        flips.x(c);
+                    }
                 }
-                let mut inner = Circuit::new(1);
-                inner.parameters(self.n_parameters);
-                self.base_gate(&mut inner, name, args, &[0], line)?;
-                let [op] = inner.ops() else {
-                    return Err(error(line, format!("can't control `{name}`")));
-                };
-                let crate::circuit::Operation::Gate { gate, .. } = op else {
-                    return Err(error(line, format!("can't control `{name}`")));
-                };
-                // A one-qubit gate's global phase becomes a relative phase.
-                let phase = C64::cis(inner.global_phase());
-                let m = gate.matrix().map(|row| row.map(|x| x * phase));
-                circ.controlled(Gate::Unitary(m), control, target);
+                for part in [&flips, &controlled, &flips] {
+                    circ.extend(part).map_err(|e| error(line, e.to_string()))?;
+                }
             }
         }
         Ok(())
@@ -1465,13 +1463,49 @@ impl Lowering {
             }
             "ccx" | "toffoli" => {
                 arity(0, 3)?;
-                toffoli(circ, q[0], q[1], q[2]);
+                circ.ccx(q[0], q[1], q[2]);
+            }
+            "c3x" | "c4x" => {
+                let n = if name == "c3x" { 4 } else { 5 };
+                arity(0, n)?;
+                circ.mcx(&q[..n - 1], q[n - 1]);
+            }
+            "c3sqrtx" => {
+                arity(0, 4)?;
+                let (a, b) = (C64::new(0.5, 0.5), C64::new(0.5, -0.5));
+                circ.multi_controlled(Gate::Unitary([[a, b], [b, a]]), &q[..3], q[3]);
+            }
+            "rccx" => {
+                // Toffoli up to a relative phase, as in qelib1.inc.
+                arity(0, 3)?;
+                let (a, b, c) = (q[0], q[1], q[2]);
+                circ.h(c)
+                    .t(c)
+                    .cx(b, c)
+                    .tdg(c)
+                    .cx(a, c)
+                    .t(c)
+                    .cx(b, c)
+                    .tdg(c)
+                    .h(c);
+            }
+            "rc3x" => {
+                arity(0, 4)?;
+                let (a, b, c, d) = (q[0], q[1], q[2], q[3]);
+                circ.h(d).t(d).cx(c, d).tdg(d).h(d);
+                circ.cx(a, d)
+                    .t(d)
+                    .cx(b, d)
+                    .tdg(d)
+                    .cx(a, d)
+                    .t(d)
+                    .cx(b, d)
+                    .tdg(d);
+                circ.h(d).t(d).cx(c, d).tdg(d).h(d);
             }
             "cswap" | "fredkin" => {
                 arity(0, 3)?;
-                circ.cx(q[2], q[1]);
-                toffoli(circ, q[0], q[1], q[2]);
-                circ.cx(q[2], q[1]);
+                circ.cswap(q[0], q[1], q[2]);
             }
             _ => {
                 let def = self
@@ -1524,17 +1558,4 @@ fn u_matrix(theta: f64, phi: f64, lambda: f64) -> [[C64; 2]; 2] {
         [C64::new(c, 0.0), -C64::cis(lambda) * s],
         [C64::cis(phi) * s, C64::cis(phi + lambda) * c],
     ]
-}
-
-/// The Toffoli gate in Clifford+T.
-fn toffoli(circ: &mut Circuit, a: usize, b: usize, c: usize) {
-    circ.h(c)
-        .cx(b, c)
-        .tdg(c)
-        .cx(a, c)
-        .t(c)
-        .cx(b, c)
-        .tdg(c)
-        .cx(a, c);
-    circ.t(b).t(c).h(c).cx(a, b).t(a).tdg(b).cx(a, b);
 }
