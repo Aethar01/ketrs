@@ -20,10 +20,10 @@ use rayon::prelude::*;
 use std::ops::ControlFlow;
 
 /// Lanczos vectors per step.
-const KRYLOV_DIM: usize = 40;
+pub(crate) const KRYLOV_DIM: usize = 40;
 /// Allowed error per step, relative to `‖ψ‖`, in double precision; single
 /// precision allows a few times its epsilon instead.
-const STEP_TOLERANCE: f64 = 1e-13;
+pub(crate) const STEP_TOLERANCE: f64 = 1e-13;
 /// Keep the Krylov basis when it fits in this many bytes; otherwise replay.
 const BASIS_MEMORY: usize = 2 << 30;
 
@@ -156,7 +156,7 @@ pub(crate) fn apply_phase<T: ComplexScalar>(amps: &mut [T], phi: f64) {
 /// `exp(-iTt) e₁` for the symmetric tridiagonal `T` with diagonal `a` and
 /// off-diagonal `b`, by a Taylor series in substeps of norm at most 1, so
 /// the terms shrink from the start and nothing cancels.
-fn tridiagonal_exp(a: &[f64], b: &[f64], t: f64) -> Vec<C64> {
+pub(crate) fn tridiagonal_exp(a: &[f64], b: &[f64], t: f64) -> Vec<C64> {
     let m = a.len();
     let off = |i: usize| if i < b.len() { b[i] } else { 0.0 };
     let bound = (0..m)

@@ -24,8 +24,10 @@ pub(crate) enum Kernel {
     Overlap = 6,
     /// `H|ψ⟩` into the partner state (`hamil.comp`).
     Hamil = 7,
+    /// partner += a·ψ (`axpy.comp`).
+    Axpy = 8,
     /// A run of gates on a few qubits in shared memory (`tile.comp`).
-    Tile = 8,
+    Tile = 9,
 }
 
 impl Kernel {
@@ -50,7 +52,7 @@ macro_rules! spirv {
 }
 
 /// Each kernel before `Tile`, as [single-buffer, chunked] variants.
-const SHADERS: [[&[u8]; 2]; 8] = [
+const SHADERS: [[&[u8]; 2]; 9] = [
     [spirv!("pair_0"), spirv!("pair_1")],
     [spirv!("quad_0"), spirv!("quad_1")],
     [spirv!("pauli_0"), spirv!("pauli_1")],
@@ -59,6 +61,7 @@ const SHADERS: [[&[u8]; 2]; 8] = [
     [spirv!("probs_0"), spirv!("probs_1")],
     [spirv!("overlap_0"), spirv!("overlap_1")],
     [spirv!("hamil_0"), spirv!("hamil_1")],
+    [spirv!("axpy_0"), spirv!("axpy_1")],
 ];
 
 /// The tile kernel for 2^bits-amplitude tiles, by bits, as [single-buffer,

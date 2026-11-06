@@ -17,6 +17,7 @@
 //! only partial sums and the sampled blocks.
 
 mod context;
+mod evolve;
 mod gradient;
 
 pub use context::GpuContext;

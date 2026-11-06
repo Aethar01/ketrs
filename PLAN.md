@@ -115,6 +115,10 @@ Added along the way (from the Schwinger project's optimisations):
   λ bound as each other's partner state, so the whole backward sweep (tiled
   inverse segments and overlaps) is a few submissions and one download.
   2.2–2.6× faster than the CPU at 16–24 qubits, as for forward circuits.
+- **GPU evolution**: Krylov `exp(-iHt)` with four statevectors on the GPU:
+  one pass of the recurrence downloading only α and β, then a replay from
+  the stored coefficients with no downloads. 2.8–6.5× faster than the CPU
+  at 18–24 qubits.
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
@@ -125,7 +129,7 @@ Added along the way (from the Schwinger project's optimisations):
 
 ## Later
 
-- GPU: Hamiltonian evolution on the GPU; a single-precision
+- GPU: a single-precision
   option for GPUs without f64; more than 8 state buffers (beyond 30 qubits
   needs a GPU with more than 16 GB anyway).
 - Classical control on the MPS and GPU engines; Qiskit `while`/`for` loops

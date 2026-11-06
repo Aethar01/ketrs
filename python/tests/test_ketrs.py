@@ -479,6 +479,17 @@ def test_gpu_gradient_matches_cpu():
     np.testing.assert_allclose(grad, want_grad, atol=1e-10)
 
 
+@gpu
+def test_gpu_evolution_matches_cpu():
+    psi0 = QiskitStatevector(random_circuit(6, depth=5, seed=8)).data
+    h = pauli_sum_from_qiskit(ISING.tensor(SparsePauliOp("II")))
+    gpu_state = ketrs.GpuStatevector.from_amplitudes(psi0)
+    gpu_state.evolve(h, 2.0)
+    cpu = ketrs.Statevector.from_amplitudes(psi0)
+    cpu.evolve(h, 2.0)
+    np.testing.assert_allclose(gpu_state.amplitudes(), cpu.amplitudes(), atol=1e-10)
+
+
 # --- Measurement and classical control ------------------------------------------------
 
 

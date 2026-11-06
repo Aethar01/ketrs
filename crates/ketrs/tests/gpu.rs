@@ -327,6 +327,24 @@ fn adjoint_gradient_on_gpu_for_an_overlap_loss() {
     }
 }
 
+#[test]
+fn evolution_on_gpu_matches_cpu() {
+    let Some(ctx) = gpu() else { return };
+    // Long enough for several Krylov steps; 12 qubits with chunk_bits 10
+    // splits the state over buffers.
+    for (n, chunk_bits, seed, time) in [(6, 6, 1, 0.3), (12, 12, 2, 4.0), (12, 10, 3, 2.5)] {
+        let circ = random_circuit(n, 40, seed);
+        let mut gpu_state = GpuStatevector::zero_with_chunk_bits(&ctx, n, chunk_bits).unwrap();
+        gpu_state.run(&circ).unwrap();
+        let h = hamiltonian(n, seed + 40);
+        gpu_state.evolve(&h, time).unwrap();
+        let mut cpu = Statevector::from_circuit(&circ);
+        cpu.evolve(&h, time).unwrap();
+        assert_close(&gpu_state.amplitudes().unwrap(), cpu.amplitudes());
+        assert!((gpu_state.norm_sqr().unwrap() - 1.0).abs() < 1e-10);
+    }
+}
+
 /// A 28-qubit state (4 GiB, two buffers on most GPUs) without downloading
 /// it. Ignored by default for its memory; run with `--ignored`.
 #[test]

@@ -127,6 +127,14 @@ impl PyGpuStatevector {
         py.detach(|| state.expectation(&sum)).map_err(to_py_err)
     }
 
+    /// Evolve by exp(-iHt) exactly (Krylov time-stepping) on the GPU,
+    /// needing room for three more statevectors.
+    fn evolve(&mut self, py: Python<'_>, hamiltonian: Observable, time: f64) -> PyResult<()> {
+        let sum = hamiltonian.into_sum()?;
+        let state = &mut self.inner;
+        py.detach(|| state.evolve(&sum, time)).map_err(to_py_err)
+    }
+
     /// `H|ψ⟩` as a new GPU state, computed on the GPU.
     fn apply_pauli_sum(&mut self, py: Python<'_>, hamiltonian: Observable) -> PyResult<Self> {
         let sum = hamiltonian.into_sum()?;

@@ -8,7 +8,7 @@
 //! overlaps all go into a few submissions, and every overlap's partial sums
 //! come back in a single download at the end.
 
-use super::context::{Kernel, Push};
+use super::context::{GpuContext, Kernel, MAX_CHUNKS, Push};
 use super::{AMPLITUDE_BYTES, BATCH_UNITS, GpuOp, GpuStatevector, Plan, bytes_of_mut, write_set};
 use crate::circuit::Circuit;
 use crate::error::Error;
@@ -48,39 +48,11 @@ impl GpuStatevector {
 
     /// `out = H|ψ⟩`.
     fn apply_pauli_sum_into(&mut self, hamiltonian: &PauliSum, out: &Self) -> Result<(), Error> {
-        let grouped = GroupedPauliSum::<C64>::new(hamiltonian, self.n_qubits, Imaginary::Reject)?;
-        let mut params = Vec::new();
-        let mut n_groups = 0;
-        if !grouped.diagonal.is_empty() {
-            params.extend([0.0, grouped.diagonal.len() as f64]);
-            for &(z, c) in &grouped.diagonal {
-                params.extend([z as f64, c, 0.0]);
-            }
-            n_groups += 1;
-        }
-        for g in &grouped.groups {
-            params.extend([g.x as f64, g.terms.len() as f64]);
-            for &(z, c) in &g.terms {
-                params.extend([z as f64, c.re, c.im]);
-            }
-            n_groups += 1;
-        }
-        if n_groups == 0 {
-            // H = 0: one empty group writes zeros.
-            params.extend([0.0, 0.0]);
-            n_groups = 1;
-        }
+        let (params, n_groups) = hamil_params(hamiltonian, self.n_qubits)?;
         self.ensure_buffers(&params, 0)?;
-        let pair = PairSets::new(self, out)?;
-        self.submit_with_sets(&[(
-            pair.first,
-            Kernel::Hamil,
-            Push {
-                b: n_groups,
-                units: self.len() as u32,
-                ..Push::default()
-            },
-        )])
+        let mut sets = Sets::new(&self.ctx);
+        let set = sets.pair(self, out, self)?;
+        self.submit_with_sets(&[(set, Kernel::Hamil, hamil_push(n_groups, self.len()))])
     }
 
     /// `⟨ψ(θ)|H|ψ(θ)⟩` and its gradient by adjoint differentiation, where
@@ -126,6 +98,46 @@ impl GpuStatevector {
         }
         let (psi, lambda) = (final_state.try_clone()?, cotangent.try_clone()?);
         Ok(sweep(circuit, parameters, psi, lambda)?.1)
+    }
+}
+
+/// `hamil.comp`'s parameters for `H` (see the shader) and its number of
+/// groups: the diagonal terms, then each X-mask group.
+pub(super) fn hamil_params(
+    hamiltonian: &PauliSum,
+    n_qubits: usize,
+) -> Result<(Vec<f64>, u32), Error> {
+    let grouped = GroupedPauliSum::<C64>::new(hamiltonian, n_qubits, Imaginary::Reject)?;
+    let mut params = Vec::new();
+    let mut n_groups = 0;
+    if !grouped.diagonal.is_empty() {
+        params.extend([0.0, grouped.diagonal.len() as f64]);
+        for &(z, c) in &grouped.diagonal {
+            params.extend([z as f64, c, 0.0]);
+        }
+        n_groups += 1;
+    }
+    for g in &grouped.groups {
+        params.extend([g.x as f64, g.terms.len() as f64]);
+        for &(z, c) in &g.terms {
+            params.extend([z as f64, c.re, c.im]);
+        }
+        n_groups += 1;
+    }
+    if n_groups == 0 {
+        // H = 0: one empty group writes zeros.
+        params.extend([0.0, 0.0]);
+        n_groups = 1;
+    }
+    Ok((params, n_groups))
+}
+
+/// The push constants for `hamil.comp` with parameters at offset 0.
+pub(super) fn hamil_push(n_groups: u32, amps: usize) -> Push {
+    Push {
+        b: n_groups,
+        units: amps as u32,
+        ..Push::default()
     }
 }
 
@@ -232,7 +244,11 @@ fn sweep(
         &params,
         overlaps.len() * per_overlap as usize * AMPLITUDE_BYTES as usize,
     )?;
-    let pair = PairSets::new(&psi, &lambda)?;
+    let mut sets = Sets::new(&psi.ctx);
+    let (on_psi, on_lambda) = (
+        sets.pair(&psi, &lambda, &psi)?,
+        sets.pair(&lambda, &psi, &psi)?,
+    );
     let mut start = 0;
     while start < dispatches.len() {
         let mut work = 0u64;
@@ -245,8 +261,8 @@ fn sweep(
             .iter()
             .map(|&(on, kernel, push, _)| {
                 let set = match on {
-                    On::Psi => pair.first,
-                    On::Lambda => pair.second,
+                    On::Psi => on_psi,
+                    On::Lambda => on_lambda,
                 };
                 (set, kernel, push)
             })
@@ -254,7 +270,7 @@ fn sweep(
         psi.submit_with_sets(&batch)?;
         start = end;
     }
-    drop(pair);
+    drop(sets);
 
     let mut partials = vec![C64::new(0.0, 0.0); overlaps.len() * per_overlap as usize];
     psi.output.read(bytes_of_mut(&mut partials))?;
@@ -271,21 +287,34 @@ fn sweep(
     Ok((sums[0].re, gradient))
 }
 
-/// Two descriptor sets for a pair of states of the same layout: `first`
-/// has `a` at binding 0 and `b` as its partner, `second` the reverse. Both
-/// use `a`'s parameter and output buffers.
-struct PairSets<'a> {
-    ctx: &'a GpuStatevector,
-    first: vk::DescriptorSet,
-    second: vk::DescriptorSet,
+/// Descriptor sets binding one state and a partner, freed together on
+/// drop. Every set reads one owner's parameter and output buffers, which
+/// must not be reallocated while the sets live.
+pub(super) struct Sets {
+    ctx: Arc<GpuContext>,
+    sets: Vec<vk::DescriptorSet>,
 }
 
-impl<'a> PairSets<'a> {
-    fn new(a: &'a GpuStatevector, b: &GpuStatevector) -> Result<Self, Error> {
-        let ctx = &a.ctx;
-        let sets = {
+impl Sets {
+    pub(super) fn new(ctx: &Arc<GpuContext>) -> Self {
+        Sets {
+            ctx: ctx.clone(),
+            sets: Vec::new(),
+        }
+    }
+
+    /// A set with `state` at binding 0 and `partner` at binding 3, both of
+    /// the same layout, reading `owner`'s parameters and output.
+    pub(super) fn pair(
+        &mut self,
+        state: &GpuStatevector,
+        partner: &GpuStatevector,
+        owner: &GpuStatevector,
+    ) -> Result<vk::DescriptorSet, Error> {
+        let ctx = &self.ctx;
+        let set = {
             let _guard = ctx.lock.lock().expect("GPU lock poisoned");
-            let layouts = [ctx.descriptor_layout; 2];
+            let layouts = [ctx.descriptor_layout];
             // SAFETY: the pool is used only under the lock.
             unsafe {
                 ctx.device.allocate_descriptor_sets(
@@ -294,10 +323,11 @@ impl<'a> PairSets<'a> {
                         .set_layouts(&layouts),
                 )
             }
-            .map_err(|e| Error::Gpu(format!("allocating descriptor sets: {e}")))?
+            .map_err(|e| Error::Gpu(format!("allocating descriptor set: {e}")))?[0]
         };
+        self.sets.push(set);
         let chunks = |s: &GpuStatevector| -> Vec<vk::DescriptorBufferInfo> {
-            (0..super::MAX_CHUNKS)
+            (0..MAX_CHUNKS)
                 .map(|i| {
                     vk::DescriptorBufferInfo::default()
                         .buffer(s.chunks[i % s.chunks.len()].buffer)
@@ -310,37 +340,32 @@ impl<'a> PairSets<'a> {
                 .buffer(buffer)
                 .range(vk::WHOLE_SIZE)]
         };
-        let (ca, cb) = (chunks(a), chunks(b));
-        let (params, output) = (one(a.params.buffer), one(a.output.buffer));
+        let (a, b) = (chunks(state), chunks(partner));
+        let (params, output) = (one(owner.params.buffer), one(owner.output.buffer));
         let writes = [
-            write_set(sets[0], 0, &ca),
-            write_set(sets[0], 1, &params),
-            write_set(sets[0], 2, &output),
-            write_set(sets[0], 3, &cb),
-            write_set(sets[1], 0, &cb),
-            write_set(sets[1], 1, &params),
-            write_set(sets[1], 2, &output),
-            write_set(sets[1], 3, &ca),
+            write_set(set, 0, &a),
+            write_set(set, 1, &params),
+            write_set(set, 2, &output),
+            write_set(set, 3, &b),
         ];
-        // SAFETY: the new sets aren't in use yet.
+        // SAFETY: the new set isn't in use yet.
         unsafe { ctx.device.update_descriptor_sets(&writes, &[]) };
-        Ok(PairSets {
-            ctx: a,
-            first: sets[0],
-            second: sets[1],
-        })
+        Ok(set)
     }
 }
 
-impl Drop for PairSets<'_> {
+impl Drop for Sets {
     fn drop(&mut self) {
-        let ctx = &self.ctx.ctx;
-        let _guard = ctx.lock.lock().expect("GPU lock poisoned");
+        if self.sets.is_empty() {
+            return;
+        }
+        let _guard = self.ctx.lock.lock().expect("GPU lock poisoned");
         // SAFETY: every submission using the sets has been waited on.
         unsafe {
-            let _ = ctx
+            let _ = self
+                .ctx
                 .device
-                .free_descriptor_sets(ctx.descriptor_pool, &[self.first, self.second]);
+                .free_descriptor_sets(self.ctx.descriptor_pool, &self.sets);
         }
     }
 }
