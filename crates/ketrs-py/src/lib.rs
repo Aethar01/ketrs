@@ -645,6 +645,65 @@ impl PyCircuit {
     fn swap(slf: PyRefMut<'_, Self>, a: usize, b: usize) -> PyResult<PyRefMut<'_, Self>> {
         Self::push(slf, Operation::Swap(a, b))
     }
+    /// Toffoli: `X` on `target` when both controls are `|1⟩`.
+    fn ccx(
+        slf: PyRefMut<'_, Self>,
+        control1: usize,
+        control2: usize,
+        target: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        Self::mcx(slf, vec![control1, control2], target)
+    }
+    /// `X` on `target` when every one of `controls` is `|1⟩`.
+    fn mcx(
+        slf: PyRefMut<'_, Self>,
+        controls: Vec<usize>,
+        target: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        Self::push(
+            slf,
+            Operation::MultiControlled {
+                gate: Gate::X,
+                controls,
+                target,
+            },
+        )
+    }
+    /// An arbitrary single-qubit unitary on `target`, applied when every one
+    /// of `controls` is `|1⟩`.
+    fn multi_controlled(
+        slf: PyRefMut<'_, Self>,
+        matrix: Matrix2,
+        controls: Vec<usize>,
+        target: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        Self::push(
+            slf,
+            Operation::MultiControlled {
+                gate: Gate::Unitary(matrix),
+                controls,
+                target,
+            },
+        )
+    }
+    /// Fredkin: swap `a` and `b` when `control` is `|1⟩`.
+    fn cswap(
+        slf: PyRefMut<'_, Self>,
+        control: usize,
+        a: usize,
+        b: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        Self::controlled_swap(slf, vec![control], a, b)
+    }
+    /// Swap `a` and `b` when every one of `controls` is `|1⟩`.
+    fn controlled_swap(
+        slf: PyRefMut<'_, Self>,
+        controls: Vec<usize>,
+        a: usize,
+        b: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        Self::push(slf, Operation::ControlledSwap { controls, a, b })
+    }
     /// `exp(-iθ/2 · P)` for the Pauli string `label` (rightmost character on
     /// the first qubit). Without `qubits`, character `k` from the right acts
     /// on qubit `k`; otherwise it acts on `qubits[k]`.

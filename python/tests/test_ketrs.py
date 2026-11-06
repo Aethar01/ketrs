@@ -79,6 +79,38 @@ def test_seeded_sampling_is_reproducible():
     np.testing.assert_array_equal(a, b)
 
 
+def test_multi_controlled_gates_match_qiskit():
+    from qiskit.circuit.library import MCXGate, SwapGate, UGate, UnitaryGate
+
+    qc = random_circuit(6, 3, seed=11)
+    qc.ccx(0, 4, 2)
+    qc.cswap(5, 1, 3)
+    qc.append(MCXGate(4), [5, 0, 3, 1, 2])
+    qc.mcp(0.7, [1, 2, 3], 0)
+    qc.ch(4, 1)
+    qc.cu(0.3, 0.4, 0.5, 0.6, 2, 5)
+    qc.append(UGate(0.2, 0.1, -0.3).control(3, annotated=False), [0, 1, 2, 4])
+    # Open controls fall back to Qiskit's definition.
+    qc.append(UGate(0.2, 0.1, -0.3).control(2, ctrl_state="01", annotated=False), [0, 1, 3])
+    qc.append(SwapGate().control(2, annotated=False), [4, 0, 2, 5])
+    qc.append(UGate(0.5, 0.2, 0.1).control(2, annotated=True), [5, 3, 0])
+    assert np.allclose(run(qc), QiskitStatevector(qc).data, atol=1e-12)
+
+    ix = [[0, 1j], [1j, 0]]
+    built = ketrs.Circuit(4)
+    built.h(0).h(1).h(2).ccx(0, 1, 3).mcx([0, 1, 2], 3).cswap(0, 1, 2)
+    built.controlled_swap([0, 3], 1, 2).multi_controlled(ix, [1, 2], 0)
+    ref = QuantumCircuit(4)
+    ref.h([0, 1, 2])
+    ref.ccx(0, 1, 3)
+    ref.mcx([0, 1, 2], 3)
+    ref.cswap(0, 1, 2)
+    ref.append(SwapGate().control(2, annotated=False), [0, 3, 1, 2])
+    ref.append(UnitaryGate(ix).control(2, annotated=False), [1, 2, 0])
+    got = ketrs.Statevector.from_circuit(built).amplitudes()
+    assert np.allclose(got, QiskitStatevector(ref).data, atol=1e-12)
+
+
 def test_qiskit_while_loop_repeats_until_success():
     qc = QuantumCircuit(1, 1)
     qc.h(0)

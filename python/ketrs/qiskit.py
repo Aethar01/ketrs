@@ -2,9 +2,12 @@
 
 Gates ketrs supports directly are mapped one to one, including Pauli
 rotations (``rxx``, ``rzz``, …) and Trotterised ``PauliEvolutionGate``s, which
-ketrs applies in one pass each rather than as CNOT ladders. Anything else is
+ketrs applies in one pass each rather than as CNOT ladders. Controlled
+gates with any number of controls on a fixed single-qubit gate (``ccx``,
+``mcx``, ``ch``, ``mcphase`` with a bound angle, …) and controlled swaps
+(``cswap``) map onto ketrs' multi-controlled operations. Anything else is
 expanded through its Qiskit definition until only supported gates remain, so
-gates such as ``ccx`` work without transpiling first.
+other gates work without transpiling first.
 """
 
 from __future__ import annotations
@@ -91,6 +94,8 @@ def _append(circ: Circuit, op: Instruction, qubits: list[int], clbits: list[int]
             circ.unitary2(matrix, qubits[0], qubits[1])
         return 0.0
     if name == "PauliEvolution" and _append_pauli_evolution(circ, op, qubits):
+        return 0.0
+    if _append_controlled(circ, op, qubits):
         return 0.0
     if name == "measure":
         circ.measure(qubits[0], clbits[0])
@@ -210,6 +215,56 @@ def pauli_sum_from_qiskit(
             chars[width - 1 - qubits[k]] = ch
         terms.append(("".join(chars), float(complex(coeff).real)))
     return PauliSum(terms)
+
+
+def _append_controlled(circ: Circuit, op: Instruction, qubits: list[int]) -> bool:
+    """Append a bound gate controlled on all ones (a ``ControlledGate``, or
+    an ``AnnotatedOperation`` with one control modifier) as a ketrs
+    multi-controlled gate or swap. Returns False if it isn't one."""
+    from qiskit.circuit import AnnotatedOperation, ControlledGate, ControlModifier
+
+    if isinstance(op, ControlledGate):
+        base, k, state = op.base_gate, op.num_ctrl_qubits, op.ctrl_state
+    elif (
+        isinstance(op, AnnotatedOperation)
+        and len(op.modifiers) == 1
+        and isinstance(op.modifiers[0], ControlModifier)
+    ):
+        base, k, state = op.base_op, op.modifiers[0].num_ctrl_qubits, op.modifiers[0].ctrl_state
+    else:
+        return False
+    if state != (1 << k) - 1 or any(not _is_bound(p) for p in op.params):
+        return False
+    controls, rest = qubits[:k], qubits[k:]
+    if base.name == "swap" and len(rest) == 2:
+        circ.controlled_swap(controls, *rest)
+        return True
+    if len(rest) != 1:
+        return False
+    # The block of the full matrix where every control is set keeps phases
+    # that some gates (such as ``cu``'s γ) carry outside their base gate.
+    # Controls are the low bits of the index and the target the next one.
+    try:
+        if op.num_qubits > 8:
+            raise ValueError("too large to build")
+        ones = (1 << k) - 1
+        idx = [ones, ones | 1 << k]
+        matrix = op.to_matrix()[np.ix_(idx, idx)]
+    except Exception:
+        try:
+            matrix = base.to_matrix()
+        except Exception:
+            return False
+    circ.multi_controlled(np.asarray(matrix, dtype=complex).tolist(), controls, rest[0])
+    return True
+
+
+def _is_bound(value) -> bool:
+    try:
+        complex(value)
+    except TypeError:
+        return not hasattr(value, "parameters")
+    return True
 
 
 def _append_pauli_evolution(circ: Circuit, op: Instruction, qubits: list[int]) -> bool:
