@@ -100,6 +100,83 @@ impl Operation {
         )
     }
 
+    /// A controlled swap as `CX(b, a)`, `X` on `b` controlled by `controls`
+    /// and `a`, then `CX(b, a)` again.
+    pub(crate) fn controlled_swap_parts(controls: &[usize], a: usize, b: usize) -> [Operation; 3] {
+        let cx = Operation::Controlled {
+            gate: Gate::X,
+            control: b,
+            target: a,
+        };
+        let middle = Operation::MultiControlled {
+            gate: Gate::X,
+            controls: controls.iter().copied().chain([a]).collect(),
+            target: b,
+        };
+        [cx.clone(), middle, cx]
+    }
+
+    /// The operation as gates on at most two qubits, for engines that only
+    /// take those. Multi-controlled gates use Barenco et al.'s recursion
+    /// (Phys. Rev. A 52, 1995, lemma 7.5) with `V² = U`: `C(V)` from the
+    /// last control, `Cᵏ⁻¹(X)` onto it, `C(V†)`, `Cᵏ⁻¹(X)`, `Cᵏ⁻¹(V)`. Exact,
+    /// with `(3ᵏ − 1)/2` two-qubit gates for `k ≥ 1` controls.
+    pub(crate) fn decompose(&self, out: &mut Vec<Operation>) {
+        match self {
+            Operation::ControlledSwap { controls, a, b } => {
+                for part in Operation::controlled_swap_parts(controls, *a, *b) {
+                    part.decompose(out);
+                }
+            }
+            Operation::MultiControlled {
+                gate,
+                controls,
+                target,
+            } => match controls.as_slice() {
+                [] => out.push(Operation::Gate {
+                    gate: *gate,
+                    target: *target,
+                }),
+                [control] => out.push(Operation::Controlled {
+                    gate: *gate,
+                    control: *control,
+                    target: *target,
+                }),
+                [rest @ .., last] => {
+                    let v = sqrt_2x2(&gate.matrix());
+                    let flip = Operation::MultiControlled {
+                        gate: Gate::X,
+                        controls: rest.to_vec(),
+                        target: *last,
+                    };
+                    let parts = [
+                        Operation::Controlled {
+                            gate: Gate::Unitary(v),
+                            control: *last,
+                            target: *target,
+                        },
+                        flip.clone(),
+                        Operation::Controlled {
+                            gate: Gate::Unitary(adjoint(&v)),
+                            control: *last,
+                            target: *target,
+                        },
+                        flip,
+                        Operation::MultiControlled {
+                            gate: Gate::Unitary(v),
+                            controls: rest.to_vec(),
+                            target: *target,
+                        },
+                    ];
+                    for part in parts {
+                        part.decompose(out);
+                    }
+                }
+            },
+            _ => out.push(self.clone()),
+        }
+    }
+
     /// The highest qubit index this operation acts on, or 0 if it acts on
     /// none (an identity Pauli rotation, which is a global phase).
     pub fn max_qubit(&self) -> usize {
@@ -938,6 +1015,23 @@ impl Circuit {
     }
 }
 
+/// A square root of a 2×2 unitary: by Cayley–Hamilton,
+/// `(M + sI)² = (tr M + 2s) M` with `s² = det M`, choosing the sign of `s`
+/// that keeps `tr M + 2s` away from zero.
+fn sqrt_2x2(m: &Matrix2) -> Matrix2 {
+    let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    let trace = m[0][0] + m[1][1];
+    let mut s = det.sqrt();
+    if (trace + 2.0 * s).norm() < (trace - 2.0 * s).norm() {
+        s = -s;
+    }
+    let t = (trace + 2.0 * s).sqrt();
+    [
+        [(m[0][0] + s) / t, m[0][1] / t],
+        [m[1][0] / t, (m[1][1] + s) / t],
+    ]
+}
+
 /// A Hamiltonian term `(coefficient, string)`.
 type Term = (f64, PauliString);
 
@@ -980,20 +1074,6 @@ fn commuting_layers(terms: &[(f64, PauliString)], n_qubits: usize) -> Vec<(f64, 
         rest = &rest[run..];
     }
     out
-}
-
-impl Circuit {
-    /// Fail if the circuit has a multi-controlled operation, for engines
-    /// that don't apply them yet.
-    pub(crate) fn check_no_multi_controlled(&self, engine: &str) -> Result<(), Error> {
-        match self.ops().iter().find(|op| op.is_multi_controlled()) {
-            Some(op) => Err(Error::InvalidArgument(format!(
-                "{engine} doesn't support multi-controlled operations yet ({op:?}); \
-                 use a statevector or density matrix"
-            ))),
-            None => Ok(()),
-        }
-    }
 }
 
 #[cfg(test)]

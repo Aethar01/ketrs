@@ -148,13 +148,15 @@ Added along the way (from the Schwinger project's optimisations):
   counts on statevectors, MPS of any length and the GPU through one shared
   driver. Qiskit import of all of these, with `for_loop`s unrolled. Fusion
   never crosses an instruction.
+- **Multi-controlled operations**: gates and swaps with any number of
+  controls, applied directly on statevectors and density matrices; the GPU
+  pair kernel takes the control mask, and MPS decomposes them exactly
+  (Barenco's `V² = U` recursion) into one- and two-qubit gates.
 
 ## Later
 
 - Noise on statevectors by quantum trajectories (for more qubits than a
   density matrix allows); readout error; Aer noise-model import.
-- Multi-controlled operations on the MPS and GPU engines (statevectors and
-  density matrices have them).
 - OpenQASM: export (`to_qasm`), `def` subroutines, `ctrl(n) @` and `c3x`
   onto the native multi-controlled operations.
 

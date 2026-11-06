@@ -183,7 +183,7 @@ fn push_segment(
     ops: &Circuit,
     tile_bits: u32,
 ) {
-    let gpu_ops: Vec<GpuOp> = ops.fused().ops().iter().map(GpuOp::new).collect();
+    let gpu_ops: Vec<GpuOp> = GpuOp::plan(&ops.fused());
     let plan = Plan::new(&gpu_ops, ops.n_qubits(), tile_bits);
     let base = params.len() as u32;
     params.extend(&plan.params);
@@ -206,7 +206,6 @@ fn sweep(
     mut psi: GpuStatevector,
     lambda: GpuStatevector,
 ) -> Result<(f64, Vec<f64>), Error> {
-    circuit.check_no_multi_controlled("the GPU engine")?;
     let bound = circuit.bind(parameters)?;
     let n = bound.n_qubits();
     let amps = psi.len() as u32;

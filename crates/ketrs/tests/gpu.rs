@@ -96,6 +96,26 @@ fn random_circuits_match_cpu() {
 }
 
 #[test]
+fn multi_controlled_operations_match_cpu() {
+    let Some(ctx) = gpu() else { return };
+    // 5 qubits runs gate by gate, 13 in tiles.
+    for (n, seed) in [(5, 6), (13, 7)] {
+        let mut circ = random_circuit(n, 30, seed);
+        circ.ccx(0, n - 1, 2)
+            .cswap(1, n - 1, 3)
+            .controlled_swap(&[0, 2, 4], 1, n - 2)
+            .multi_controlled(ketrs::Gate::Ry(0.3), &[1, 3], 0)
+            .multi_controlled(ketrs::Gate::H, &[], 4);
+        circ.extend(&random_circuit(n, 30, seed + 1)).unwrap();
+        let gpu_state = GpuStatevector::from_circuit(&ctx, &circ).unwrap();
+        assert_close(
+            &gpu_state.amplitudes().unwrap(),
+            Statevector::from_circuit(&circ).amplitudes(),
+        );
+    }
+}
+
+#[test]
 fn upload_run_download_round_trip() {
     let Some(ctx) = gpu() else { return };
     let n = 10;
@@ -296,6 +316,25 @@ fn gradients_on_gpu_match_cpu() {
         for (g, w) in gradient.iter().zip(&want) {
             assert!((g - w).abs() < 1e-10, "n={n}: {gradient:?} vs {want:?}");
         }
+    }
+}
+
+#[test]
+fn gradients_through_multi_controlled_operations() {
+    let Some(ctx) = gpu() else { return };
+    let (mut circ, values) = parametric(7, 4);
+    let p = circ.parameters(2);
+    circ.ccx(0, 3, 6).cswap(1, 2, 5).ry(p[0], 6).crx(p[1], 5, 1);
+    circ.ccx(6, 5, 0).h(0);
+    let values = [values, vec![0.3, -0.8]].concat();
+    let h = hamiltonian(7, 40);
+    let start = GpuStatevector::zero(&ctx, 7).unwrap();
+    let (_, gradient) = start.expectation_gradient(&circ, &values, &h).unwrap();
+    let (_, want) = Statevector::zero(7)
+        .expectation_gradient(&circ, &values, &h)
+        .unwrap();
+    for (g, w) in gradient.iter().zip(&want) {
+        assert!((g - w).abs() < 1e-10, "{gradient:?} vs {want:?}");
     }
 }
 

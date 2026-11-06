@@ -37,8 +37,8 @@ impl Step {
 }
 
 /// `op` as steps on sites and neighbouring bonds: gates on distant qubits
-/// are routed with swaps, and Pauli rotations on more than two qubits are
-/// decomposed exactly.
+/// are routed with swaps, and Pauli rotations on more than two qubits and
+/// multi-controlled operations are decomposed exactly.
 pub(super) fn steps(op: &Operation, out: &mut Vec<Step>) {
     match local_matrix(op) {
         Some((qubits, m)) if qubits.len() == 1 => {
@@ -71,10 +71,17 @@ pub(super) fn steps(op: &Operation, out: &mut Vec<Step>) {
             }
         }
         None => {
-            let Operation::PauliRotation { pauli, theta } = op else {
-                unreachable!("operations on more than two qubits are Pauli rotations")
+            let parts = match op {
+                Operation::PauliRotation { pauli, theta } => {
+                    decompose_pauli_rotation(pauli, *theta)
+                }
+                _ => {
+                    let mut parts = Vec::new();
+                    op.decompose(&mut parts);
+                    parts
+                }
             };
-            for part in decompose_pauli_rotation(pauli, *theta) {
+            for part in parts {
                 steps(&part, out);
             }
         }

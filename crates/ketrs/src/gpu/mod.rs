@@ -664,7 +664,6 @@ impl GpuStatevector {
     /// and no unbound parameters.
     pub fn run(&mut self, circuit: &Circuit) -> Result<(), Error> {
         circuit.check_unitary()?;
-        circuit.check_no_multi_controlled("the GPU engine")?;
         if circuit.n_qubits() != self.n_qubits {
             return Err(Error::QubitCountMismatch {
                 expected: self.n_qubits,
@@ -677,7 +676,7 @@ impl GpuStatevector {
                 circuit.n_parameters()
             )));
         }
-        let mut ops: Vec<GpuOp> = circuit.fused().ops().iter().map(GpuOp::new).collect();
+        let mut ops: Vec<GpuOp> = GpuOp::plan(&circuit.fused());
         if circuit.global_phase() != 0.0 {
             let phase = C64::cis(circuit.global_phase());
             ops.push(GpuOp::Phase {
@@ -851,6 +850,22 @@ enum GpuOp {
 }
 
 impl GpuOp {
+    /// Every operation of `circuit` as GPU operations.
+    fn plan(circuit: &Circuit) -> Vec<GpuOp> {
+        let mut out = Vec::with_capacity(circuit.ops().len());
+        for op in circuit.ops() {
+            match op {
+                Operation::ControlledSwap { controls, a, b } => out.extend(
+                    Operation::controlled_swap_parts(controls, *a, *b)
+                        .iter()
+                        .map(GpuOp::new),
+                ),
+                _ => out.push(GpuOp::new(op)),
+            }
+        }
+        out
+    }
+
     fn new(op: &Operation) -> GpuOp {
         match op {
             Operation::Gate { gate, target } => GpuOp::pair(&gate.matrix(), *target as u32, 0),
@@ -859,9 +874,16 @@ impl GpuOp {
                 control,
                 target,
             } => GpuOp::pair(&gate.matrix(), *target as u32, 1 << control),
-            Operation::MultiControlled { .. } | Operation::ControlledSwap { .. } => {
-                unreachable!("rejected before planning")
-            }
+            Operation::MultiControlled {
+                gate,
+                controls,
+                target,
+            } => GpuOp::pair(
+                &gate.matrix(),
+                *target as u32,
+                controls.iter().fold(0, |acc, c| acc | 1 << c),
+            ),
+            Operation::ControlledSwap { .. } => unreachable!("split by `plan`"),
             Operation::PauliRotation { pauli, theta } => {
                 let masks = pauli.masks();
                 let (sin, cos) = (theta / 2.0).sin_cos();

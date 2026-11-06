@@ -226,7 +226,6 @@ impl Mps {
     /// and no unbound parameters.
     pub fn run(&mut self, circuit: &Circuit) -> Result<(), Error> {
         circuit.check_unitary()?;
-        circuit.check_no_multi_controlled("the MPS engine")?;
         if circuit.n_qubits() != self.n_qubits() {
             return Err(Error::QubitCountMismatch {
                 expected: self.n_qubits(),
@@ -257,11 +256,6 @@ impl Mps {
     /// Apply one operation.
     pub fn apply(&mut self, op: &Operation) -> Result<(), Error> {
         op.validate(self.n_qubits())?;
-        if op.is_multi_controlled() {
-            return Err(Error::InvalidArgument(
-                "the MPS engine doesn't support multi-controlled operations yet".into(),
-            ));
-        }
         self.apply_unchecked(op);
         Ok(())
     }

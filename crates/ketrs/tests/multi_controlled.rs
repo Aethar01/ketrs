@@ -201,18 +201,37 @@ fn inverses_undo_and_real_states_work() {
 }
 
 #[test]
-fn density_matrices_and_unsupported_engines() {
+fn density_matrices_and_mps() {
     let mut circ = scrambled(3, 5);
     circ.ccx(0, 1, 2).cswap(2, 1, 0);
     let mut rho = ketrs::DensityMatrix::zero(3);
     rho.run(&circ).unwrap();
     let psi = Statevector::from_circuit(&circ);
     assert!((rho.fidelity(&psi).unwrap() - 1.0).abs() < 1e-10);
-    // Engines without the operations say so instead of misbehaving.
-    assert!(matches!(
-        ketrs::Mps::from_circuit(&circ, ketrs::MpsOptions::default()),
-        Err(Error::InvalidArgument(_))
-    ));
+
+    // The MPS engine decomposes them into one- and two-qubit gates, with
+    // distant qubits routed by swaps; up to five controls here.
+    let options = ketrs::MpsOptions::default();
+    for n in [3, 7] {
+        let mut circ = scrambled(n, 6);
+        circ.ccx(0, n - 1, 1)
+            .cswap(n - 1, 0, 1)
+            .multi_controlled(Gate::Ry(0.4), &[], 2)
+            .multi_controlled(Gate::Phase(0.8), &[0], 2);
+        if n == 7 {
+            circ.controlled_swap(&[0, 2], 6, 1)
+                .mcx(&[0, 1, 2, 4, 6], 3)
+                .multi_controlled(Gate::H, &[6, 5, 1], 0);
+        }
+        let mps = ketrs::Mps::from_circuit(&circ, options).unwrap();
+        assert_state_eq(&Statevector::from_circuit(&circ), &mps.to_amplitudes());
+        // One operation at a time too.
+        let mut stepped = ketrs::Mps::zero(n, options);
+        for op in circ.ops() {
+            stepped.apply(op).unwrap();
+        }
+        assert_state_eq(&Statevector::from_circuit(&circ), &stepped.to_amplitudes());
+    }
 }
 
 #[test]
