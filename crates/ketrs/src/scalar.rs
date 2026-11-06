@@ -390,6 +390,27 @@ mod simd {
                 }
                 k += 2;
             }
+        } else if m[0][0].im == 0.0 && m[1][1].im == 0.0 && m[0][1].re == 0.0 && m[1][0].re == 0.0 {
+            // Real diagonal, imaginary off-diagonal (Rx, Y): `i t · y` is
+            // `(−t y_im, t y_re)`, the swapped pair times `(−t, t)`.
+            let imaginary = |t: f64| _mm256_setr_pd(-t, t, -t, t);
+            let (t01, t10) = (imaginary(m[0][1].im), imaginary(m[1][0].im));
+            while k + 2 <= n {
+                // SAFETY: as below.
+                unsafe {
+                    let x = _mm256_loadu_pd(lo_ptr.add(2 * k));
+                    let y = _mm256_loadu_pd(hi_ptr.add(2 * k));
+                    let (xs, ys) = (
+                        _mm256_permute_pd::<0b0101>(x),
+                        _mm256_permute_pd::<0b0101>(y),
+                    );
+                    let a = _mm256_fmadd_pd(t01, ys, _mm256_mul_pd(r00, x));
+                    let b = _mm256_fmadd_pd(t10, xs, _mm256_mul_pd(r11, y));
+                    _mm256_storeu_pd(lo_ptr.add(2 * k), a);
+                    _mm256_storeu_pd(hi_ptr.add(2 * k), b);
+                }
+                k += 2;
+            }
         }
         while k + 2 <= n {
             // SAFETY: k + 2 ≤ n, so four f64s from 2k are in bounds;
