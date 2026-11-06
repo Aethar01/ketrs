@@ -51,6 +51,9 @@ basis-state index, and Pauli labels have qubit 0 rightmost.
   history, `sample_circuit` returns counts, simulating the deterministic
   prefix once and sampling the final state directly when all measurements
   are terminal.
+- `ketrs.from_qasm` (Rust: `ketrs::qasm::parse`) reads OpenQASM 3 and 2:
+  registers, inputs as parameters, the standard gates, `gate` definitions,
+  `inv`/`ctrl`/`pow` modifiers, measurement, reset, `if`, `while` and `for`.
 - `ketrs.qiskit.from_qiskit` converts Qiskit circuits, including parametric
   ones, measurements, resets, `if_test`, `while_loop` and `for_loop` blocks
   and classical expressions; unsupported gates are

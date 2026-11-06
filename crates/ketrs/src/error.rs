@@ -34,6 +34,13 @@ pub enum Error {
     BreaksSymmetry(String),
     /// No usable GPU, or a GPU operation failed.
     Gpu(String),
+    /// Source text (OpenQASM) that couldn't be read, at a 1-based line.
+    Parse {
+        /// The line of the problem.
+        line: usize,
+        /// What went wrong.
+        message: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -55,6 +62,7 @@ impl fmt::Display for Error {
             | Error::NotReal(msg)
             | Error::BreaksSymmetry(msg)
             | Error::Gpu(msg) => f.write_str(msg),
+            Error::Parse { line, message } => write!(f, "line {line}: {message}"),
         }
     }
 }

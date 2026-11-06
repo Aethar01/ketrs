@@ -1274,6 +1274,17 @@ fn eigenstates<T: Scalar>(
         .collect())
 }
 
+/// Read an OpenQASM 3 (or 2) program into a `Circuit`: registers, inputs
+/// (as parameters, in declaration order), the standard gates, `gate`
+/// definitions, `inv`/`ctrl`/`pow` modifiers, measurement, reset, `if`,
+/// `while` and `for`. Errors name the line.
+#[pyfunction]
+fn from_qasm(source: &str) -> PyResult<PyCircuit> {
+    Ok(PyCircuit {
+        inner: ketrs::qasm::parse(source).map_err(to_py_err)?,
+    })
+}
+
 /// The name of the GPU ketrs would use, or None: this build has no GPU
 /// support (build with the `gpu` feature to enable it).
 #[cfg(not(feature = "gpu"))]
@@ -1315,6 +1326,7 @@ fn _ketrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(not(feature = "gpu"))]
     m.add_function(wrap_pyfunction!(gpu_device, m)?)?;
     m.add_function(wrap_pyfunction!(lowest_eigenstates, m)?)?;
+    m.add_function(wrap_pyfunction!(from_qasm, m)?)?;
     m.add_function(wrap_pyfunction!(qft, m)?)?;
     m.add_function(wrap_pyfunction!(ghz, m)?)?;
     Ok(())

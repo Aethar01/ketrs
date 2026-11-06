@@ -477,6 +477,58 @@ def test_dmrg_ground_state_matches_numpy():
     assert mps.expectation(pauli_sum_from_qiskit(op)) == pytest.approx(energy, abs=1e-8)
 
 
+# --- OpenQASM --------------------------------------------------------------------------
+
+
+def test_qasm3_from_qiskit_round_trips():
+    from qiskit import qasm3
+
+    for seed in range(8):
+        qc = random_circuit(5, depth=8, max_operands=3, seed=seed)
+        circ = ketrs.from_qasm(qasm3.dumps(qc))
+        # Qiskit's exporter drops the global phase of gate definitions (ecr's
+        # −π/4, for one), so compare states up to a phase.
+        got = ketrs.Statevector.from_circuit(circ).amplitudes()
+        assert abs(np.vdot(got, QiskitStatevector(qc).data)) == pytest.approx(1.0, abs=1e-10)
+
+
+def test_qasm2_from_qiskit_round_trips():
+    from qiskit import qasm2
+
+    for seed in range(5):
+        qc = random_circuit(4, depth=6, max_operands=2, seed=seed + 20)
+        circ = ketrs.from_qasm(qasm2.dumps(qc))
+        np.testing.assert_allclose(
+            ketrs.Statevector.from_circuit(circ).amplitudes(), QiskitStatevector(qc).data, atol=1e-10
+        )
+
+
+def test_qasm3_parameters_and_control_flow():
+    from qiskit import qasm3
+
+    ansatz = efficient_su2(4, reps=2)
+    circ = ketrs.from_qasm(qasm3.dumps(ansatz))
+    assert circ.n_parameters == ansatz.num_parameters
+    x = np.random.default_rng(1).uniform(-2, 2, ansatz.num_parameters)
+    np.testing.assert_allclose(
+        ketrs.Statevector.from_circuit(circ.bind(x)).amplitudes(),
+        QiskitStatevector(ansatz.assign_parameters(x)).data,
+        atol=1e-10,
+    )
+
+    qc = QuantumCircuit(1, 1)
+    qc.h(0)
+    qc.measure(0, 0)
+    with qc.while_loop((qc.clbits[0], 0)):
+        qc.reset(0)
+        qc.h(0)
+        qc.measure(0, 0)
+    counts = ketrs.Statevector(1, seed=3).sample_circuit(ketrs.from_qasm(qasm3.dumps(qc)), 200)
+    assert counts == {"1": 200}
+    with pytest.raises(ValueError, match="line 2"):
+        ketrs.from_qasm("qubit q;\nnosuchgate q;")
+
+
 # --- Density matrices and noise ------------------------------------------------------
 
 

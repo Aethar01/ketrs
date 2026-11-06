@@ -27,6 +27,7 @@ pub mod library;
 pub mod mps;
 pub mod observable;
 pub mod parameter;
+pub mod qasm;
 pub mod scalar;
 pub mod sector;
 pub mod statevector;

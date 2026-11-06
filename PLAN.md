@@ -134,6 +134,11 @@ Added along the way (from the Schwinger project's optimisations):
   complex multiply), chosen at run time with portable fallbacks
   (`KETRS_NO_SIMD=1` forces them). Layered circuits 17–23% faster at 18–22
   qubits; `target-cpu=native` auto-vectorisation gained only 6–12%.
+- **OpenQASM 3 import**: a hand-written lexer and recursive-descent parser to
+  a syntax tree, lowered onto `Circuit`: registers, inputs as parameters,
+  `stdgates.inc` and `qelib1.inc`, gate definitions, modifiers,
+  broadcasting, measurement, reset, `if`/`while` on classical expressions,
+  unrolled `for`. Round-trips Qiskit's `qasm3.dumps` and `qasm2.dumps`.
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
@@ -147,8 +152,8 @@ Added along the way (from the Schwinger project's optimisations):
 ## Later
 
 - Noise on statevectors by quantum trajectories (for more qubits than a
-  density matrix allows); readout error; Aer noise-model import. OpenQASM 3
-  parser.
+  density matrix allows); readout error; Aer noise-model import.
+- OpenQASM: export (`to_qasm`), `def` subroutines, multi-controlled gates.
 
 ## Benchmarks
 
