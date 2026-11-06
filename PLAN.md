@@ -119,6 +119,11 @@ Added along the way (from the Schwinger project's optimisations):
   one pass of the recurrence downloading only α and β, then a replay from
   the stored coefficients with no downloads. 2.8–6.5× faster than the CPU
   at 18–24 qubits.
+- **GPU precision and size**: every kernel also compiles in single
+  precision, for any GPU (f64 parameters are decoded in the shader with
+  integer arithmetic, so 31-bit masks stay exact); `complex64` is 2.8–5.8×
+  faster than `complex128` on a consumer card. States span up to sixteen
+  buffers, so 31 qubits on any device.
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
@@ -129,8 +134,6 @@ Added along the way (from the Schwinger project's optimisations):
 
 ## Later
 
-- GPU: a single-precision
-  option for GPUs without f64.
 - Classical control on the MPS and GPU engines; Qiskit `while`/`for` loops
   and expression conditions.
 - Density matrices and noise, SIMD kernels, OpenQASM 3 parser.

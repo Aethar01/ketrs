@@ -51,25 +51,72 @@ macro_rules! spirv {
     };
 }
 
-/// Each kernel before `Tile`, as [single-buffer, chunked] variants.
-const SHADERS: [[&[u8]; 2]; 9] = [
-    [spirv!("pair_0"), spirv!("pair_1")],
-    [spirv!("quad_0"), spirv!("quad_1")],
-    [spirv!("pauli_0"), spirv!("pauli_1")],
-    [spirv!("phase_0"), spirv!("phase_1")],
-    [spirv!("expect_0"), spirv!("expect_1")],
-    [spirv!("probs_0"), spirv!("probs_1")],
-    [spirv!("overlap_0"), spirv!("overlap_1")],
-    [spirv!("hamil_0"), spirv!("hamil_1")],
-    [spirv!("axpy_0"), spirv!("axpy_1")],
+/// Each kernel before `Tile`, as `[double, single][single-buffer, chunked]`
+/// variants.
+const SHADERS: [[[&[u8]; 2]; 2]; 9] = [
+    [
+        [spirv!("pair_0_0"), spirv!("pair_1_0")],
+        [spirv!("pair_0_1"), spirv!("pair_1_1")],
+    ],
+    [
+        [spirv!("quad_0_0"), spirv!("quad_1_0")],
+        [spirv!("quad_0_1"), spirv!("quad_1_1")],
+    ],
+    [
+        [spirv!("pauli_0_0"), spirv!("pauli_1_0")],
+        [spirv!("pauli_0_1"), spirv!("pauli_1_1")],
+    ],
+    [
+        [spirv!("phase_0_0"), spirv!("phase_1_0")],
+        [spirv!("phase_0_1"), spirv!("phase_1_1")],
+    ],
+    [
+        [spirv!("expect_0_0"), spirv!("expect_1_0")],
+        [spirv!("expect_0_1"), spirv!("expect_1_1")],
+    ],
+    [
+        [spirv!("probs_0_0"), spirv!("probs_1_0")],
+        [spirv!("probs_0_1"), spirv!("probs_1_1")],
+    ],
+    [
+        [spirv!("overlap_0_0"), spirv!("overlap_1_0")],
+        [spirv!("overlap_0_1"), spirv!("overlap_1_1")],
+    ],
+    [
+        [spirv!("hamil_0_0"), spirv!("hamil_1_0")],
+        [spirv!("hamil_0_1"), spirv!("hamil_1_1")],
+    ],
+    [
+        [spirv!("axpy_0_0"), spirv!("axpy_1_0")],
+        [spirv!("axpy_0_1"), spirv!("axpy_1_1")],
+    ],
 ];
 
-/// The tile kernel for 2^bits-amplitude tiles, by bits, as [single-buffer,
-/// chunked] variants.
-const TILE_SHADERS: [(u32, [&[u8]; 2]); 3] = [
-    (10, [spirv!("tile_0_10"), spirv!("tile_1_10")]),
-    (11, [spirv!("tile_0_11"), spirv!("tile_1_11")]),
-    (12, [spirv!("tile_0_12"), spirv!("tile_1_12")]),
+/// The tile kernel for 2^bits-amplitude tiles, by bits, as
+/// `[double, single][single-buffer, chunked]` variants.
+#[allow(clippy::type_complexity)]
+const TILE_SHADERS: [(u32, [[&[u8]; 2]; 2]); 3] = [
+    (
+        10,
+        [
+            [spirv!("tile_0_0_10"), spirv!("tile_1_0_10")],
+            [spirv!("tile_0_1_10"), spirv!("tile_1_1_10")],
+        ],
+    ),
+    (
+        11,
+        [
+            [spirv!("tile_0_0_11"), spirv!("tile_1_0_11")],
+            [spirv!("tile_0_1_11"), spirv!("tile_1_1_11")],
+        ],
+    ),
+    (
+        12,
+        [
+            [spirv!("tile_0_0_12"), spirv!("tile_1_0_12")],
+            [spirv!("tile_0_1_12"), spirv!("tile_1_1_12")],
+        ],
+    ),
 ];
 
 /// State buffers a chunked kernel can address (`MAX_CHUNKS` in
@@ -145,8 +192,10 @@ impl Drop for InstanceGuard {
 
 /// A Vulkan compute device able to run ketrs's statevector kernels.
 ///
-/// Creating one loads the system Vulkan driver and picks a GPU with 64-bit
-/// float support, preferring a discrete card. Share it through the returned
+/// Creating one loads the system Vulkan driver and picks a GPU, preferring
+/// a discrete card and, among equals, one with 64-bit floats. Without them,
+/// states are single precision (see
+/// [`GpuPrecision`](super::GpuPrecision)). Share it through the returned
 /// `Arc` across any number of [`GpuStatevector`](super::GpuStatevector)s.
 pub struct GpuContext {
     _entry: ash::Entry,
@@ -158,6 +207,9 @@ pub struct GpuContext {
     /// Whether kernels can index several state buffers, for states larger
     /// than one buffer (Vulkan 1.2 non-uniform descriptor indexing).
     chunks_supported: bool,
+    /// Whether shaders may use 64-bit floats; otherwise only
+    /// single-precision states are available.
+    f64_supported: bool,
     /// Qubits per shared-memory tile.
     tile_bits: u32,
     name: String,
@@ -177,7 +229,8 @@ unsafe impl Send for GpuContext {}
 unsafe impl Sync for GpuContext {}
 
 impl GpuContext {
-    /// Load Vulkan and open the best device with 64-bit float support.
+    /// Load Vulkan and open the best compute device: discrete GPUs first,
+    /// and among those, ones with 64-bit floats.
     pub fn new() -> Result<Arc<Self>, Error> {
         // SAFETY: loads the system Vulkan library; failure is reported.
         let entry = unsafe { ash::Entry::load() }
@@ -215,7 +268,11 @@ impl GpuContext {
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(family)
             .queue_priorities(&priorities)];
-        let features = vk::PhysicalDeviceFeatures::default().shader_float64(true);
+        // SAFETY: plain query on a valid physical device.
+        let f64_supported = unsafe { instance.get().get_physical_device_features(physical) }
+            .shader_float64
+            == vk::TRUE;
+        let features = vk::PhysicalDeviceFeatures::default().shader_float64(f64_supported);
         let chunks_supported = {
             let mut v12 = vk::PhysicalDeviceVulkan12Features::default();
             let mut all = vk::PhysicalDeviceFeatures2::default().push_next(&mut v12);
@@ -252,6 +309,7 @@ impl GpuContext {
             memory,
             max_storage_range: props.limits.max_storage_buffer_range as u64,
             chunks_supported,
+            f64_supported,
             tile_bits: choose_tile_bits(props.limits.max_compute_shared_memory_size),
             name,
             command_pool: vk::CommandPool::null(),
@@ -287,25 +345,24 @@ impl GpuContext {
             };
             // Bindings 0 and 3 hold MAX_CHUNKS state buffers each.
             let buffers = 2 * MAX_CHUNKS as u32 + 2;
-            if features.shader_float64 != vk::TRUE
-                || props.api_version < vk::API_VERSION_1_2
+            if props.api_version < vk::API_VERSION_1_2
                 || props.limits.max_per_stage_descriptor_storage_buffers < buffers
                 || props.limits.max_descriptor_set_storage_buffers < buffers
             {
                 continue;
             }
-            let rank = match props.device_type {
+            let rank = 2 * match props.device_type {
                 vk::PhysicalDeviceType::DISCRETE_GPU => 3,
                 vk::PhysicalDeviceType::INTEGRATED_GPU => 2,
                 vk::PhysicalDeviceType::VIRTUAL_GPU => 1,
                 _ => 0,
-            };
+            } + (features.shader_float64 == vk::TRUE) as u32;
             if best.is_none_or(|(_, _, r)| rank > r) {
                 best = Some((p, family as u32, rank));
             }
         }
         best.map(|(p, f, _)| (p, f))
-            .ok_or_else(|| Error::Gpu("no Vulkan 1.2 GPU with 64-bit float support".into()))
+            .ok_or_else(|| Error::Gpu("no Vulkan 1.2 compute device".into()))
     }
 
     fn create_objects(&mut self, family: u32) -> Result<(), Error> {
@@ -362,14 +419,17 @@ impl GpuContext {
                 .find(|(bits, _)| *bits == self.tile_bits)
                 .expect("a compiled tile size")
                 .1;
-            // Pipelines in kernel order, [single-buffer, chunked] each; the
-            // chunked variant is null when the device can't use it.
-            for (variant, spv) in SHADERS
+            // Pipelines in kernel order, each as [double, single] ×
+            // [single-buffer, chunked]; variants the device can't use are
+            // null.
+            for (index, spv) in SHADERS
                 .into_iter()
                 .chain([tile])
-                .flat_map(|pair| pair.into_iter().enumerate())
+                .flat_map(|variants| variants.into_iter().flatten())
+                .enumerate()
             {
-                if variant == 1 && !self.chunks_supported {
+                let (single, chunked) = (index / 2 % 2 == 1, index % 2 == 1);
+                if (chunked && !self.chunks_supported) || (!single && !self.f64_supported) {
                     self.pipelines.push(vk::Pipeline::null());
                     continue;
                 }
@@ -417,9 +477,15 @@ impl GpuContext {
         self.tile_bits
     }
 
-    /// The pipeline for `kernel`, in its chunked variant if `chunked`.
-    pub(crate) fn pipeline(&self, kernel: Kernel, chunked: bool) -> vk::Pipeline {
-        self.pipelines[kernel as usize * 2 + chunked as usize]
+    /// The pipeline for `kernel`, in its chunked variant if `chunked` and
+    /// its single-precision one if `single`.
+    pub(crate) fn pipeline(&self, kernel: Kernel, chunked: bool, single: bool) -> vk::Pipeline {
+        self.pipelines[kernel as usize * 4 + single as usize * 2 + chunked as usize]
+    }
+
+    /// Whether the device has 64-bit floats, so double-precision states.
+    pub fn supports_f64(&self) -> bool {
+        self.f64_supported
     }
 
     /// Whether states may span several buffers.
@@ -427,11 +493,11 @@ impl GpuContext {
         self.chunks_supported
     }
 
-    /// The most amplitudes one state buffer may hold, as a power of two:
-    /// 16-byte amplitudes within the device's storage-buffer range.
-    pub(crate) fn max_chunk_bits(&self) -> u32 {
+    /// The most amplitudes of `bytes` each one state buffer may hold, as a
+    /// power of two, within the device's storage-buffer range.
+    pub(crate) fn max_chunk_bits(&self, bytes: u64) -> u32 {
         let mut bits = 0;
-        while 16u64 << (bits + 1) <= self.max_storage_range && bits < 31 {
+        while bytes << (bits + 1) <= self.max_storage_range && bits < 31 {
             bits += 1;
         }
         bits

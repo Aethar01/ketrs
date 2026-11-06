@@ -1,5 +1,6 @@
 #version 450
 // ketrs-variants: CHUNKED = 0 1
+// ketrs-variants: SINGLE = 0 1
 // A 2×2 matrix on qubit `a`, applied where every bit of control mask `b` is
 // set (b = 0 for an uncontrolled gate). One unit per amplitude pair.
 // Params: m00, m01, m10, m11 (complex).
@@ -7,14 +8,14 @@
 
 void main() {
     uint target = pc.a, control = pc.b;
-    dvec2 m00 = cparam(0u), m01 = cparam(1u), m10 = cparam(2u), m11 = cparam(3u);
+    cplx m00 = cparam(0u), m01 = cparam(1u), m10 = cparam(2u), m11 = cparam(3u);
     FOR_EACH_UNIT(k) {
         uint i0 = insert_zero_bit(k, target);
         if ((i0 & control) != control) {
             continue;
         }
         uint i1 = i0 | (1u << target);
-        dvec2 x = load_amp(i0), y = load_amp(i1);
+        cplx x = load_amp(i0), y = load_amp(i1);
         store_amp(i0, cmul(m00, x) + cmul(m01, y));
         store_amp(i1, cmul(m10, x) + cmul(m11, y));
     }

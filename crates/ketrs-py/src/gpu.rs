@@ -1,9 +1,9 @@
 //! Python bindings for GPU statevectors.
 
 use super::{Observable, PyCircuit, PyStatevector, State, rng_from_seed, to_py_err};
-use ketrs::{Complex64 as C64, GpuContext, GpuStatevector};
+use ketrs::{Circuit, Complex64 as C64, GpuContext, GpuPrecision, GpuStatevector};
 use numpy::{PyArray1, PyReadonlyArray1};
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rand::rngs::StdRng;
@@ -18,16 +18,32 @@ fn context() -> PyResult<Arc<GpuContext>> {
         .map_err(PyRuntimeError::new_err)
 }
 
-/// The name of the GPU ketrs would use, or None if there is no Vulkan GPU
-/// with 64-bit float support.
+/// The precision for `dtype`: "complex128", "complex64", or None for the
+/// GPU's best.
+fn precision(ctx: &GpuContext, dtype: Option<&str>) -> PyResult<GpuPrecision> {
+    match dtype {
+        None if ctx.supports_f64() => Ok(GpuPrecision::Double),
+        None => Ok(GpuPrecision::Single),
+        Some("complex" | "complex128") => Ok(GpuPrecision::Double),
+        Some("complex64") => Ok(GpuPrecision::Single),
+        Some(other) => Err(PyValueError::new_err(format!(
+            "GPU dtype must be 'complex128' or 'complex64', got {other:?}"
+        ))),
+    }
+}
+
+/// The name of the GPU ketrs would use, or None if there is no Vulkan GPU.
 #[pyfunction]
 fn gpu_device() -> Option<String> {
     context().ok().map(|ctx| ctx.device_name().to_owned())
 }
 
-/// A statevector in GPU memory (complex128), simulated with Vulkan compute
-/// on any NVIDIA, AMD or other GPU with 64-bit floats. Needs only the
-/// system's Vulkan driver.
+/// A statevector in GPU memory, simulated with Vulkan compute on any NVIDIA,
+/// AMD or other GPU. Needs only the system's Vulkan driver.
+///
+/// `dtype="complex128"` needs a GPU with 64-bit floats and is the default
+/// where available; `"complex64"` halves the memory, works on any GPU and is
+/// accurate to about 1e-6.
 #[pyclass(name = "GpuStatevector", module = "ketrs", unsendable)]
 struct PyGpuStatevector {
     inner: GpuStatevector,
@@ -39,26 +55,36 @@ impl PyGpuStatevector {
     /// `|0…0⟩` on `n_qubits` qubits. States over one GPU buffer (usually
     /// 27 qubits) are split across several, up to 31 qubits.
     #[new]
-    #[pyo3(signature = (n_qubits, seed=None))]
-    fn new(n_qubits: usize, seed: Option<u64>) -> PyResult<Self> {
+    #[pyo3(signature = (n_qubits, seed=None, dtype=None))]
+    fn new(n_qubits: usize, seed: Option<u64>, dtype: Option<&str>) -> PyResult<Self> {
+        let ctx = context()?;
+        let precision = precision(&ctx, dtype)?;
         Ok(PyGpuStatevector {
-            inner: GpuStatevector::zero(&context()?, n_qubits).map_err(to_py_err)?,
+            inner: GpuStatevector::zero_with_precision(&ctx, n_qubits, precision)
+                .map_err(to_py_err)?,
             rng: rng_from_seed(seed),
         })
     }
 
     /// Run `circuit` on `|0…0⟩`.
     #[staticmethod]
-    #[pyo3(signature = (circuit, seed=None))]
+    #[pyo3(signature = (circuit, seed=None, dtype=None))]
     fn from_circuit(
         py: Python<'_>,
         circuit: PyRef<'_, PyCircuit>,
         seed: Option<u64>,
+        dtype: Option<&str>,
     ) -> PyResult<Self> {
         let ctx = context()?;
-        let circ = &circuit.inner;
+        let precision = precision(&ctx, dtype)?;
+        let circ: &Circuit = &circuit.inner;
         let inner = py
-            .detach(|| GpuStatevector::from_circuit(&ctx, circ))
+            .detach(|| {
+                let mut state =
+                    GpuStatevector::zero_with_precision(&ctx, circ.n_qubits(), precision)?;
+                state.run(circ)?;
+                Ok::<_, ketrs::Error>(state)
+            })
             .map_err(to_py_err)?;
         Ok(PyGpuStatevector {
             inner,
@@ -68,13 +94,29 @@ impl PyGpuStatevector {
 
     /// Upload a complex128 array whose length is a power of two.
     #[staticmethod]
-    #[pyo3(signature = (amplitudes, seed=None))]
-    fn from_amplitudes(amplitudes: PyReadonlyArray1<'_, C64>, seed: Option<u64>) -> PyResult<Self> {
+    #[pyo3(signature = (amplitudes, seed=None, dtype=None))]
+    fn from_amplitudes(
+        amplitudes: PyReadonlyArray1<'_, C64>,
+        seed: Option<u64>,
+        dtype: Option<&str>,
+    ) -> PyResult<Self> {
         let amps = amplitudes.as_slice()?;
+        let ctx = context()?;
+        let precision = precision(&ctx, dtype)?;
         Ok(PyGpuStatevector {
-            inner: GpuStatevector::from_amplitudes(&context()?, amps).map_err(to_py_err)?,
+            inner: GpuStatevector::from_amplitudes_with_precision(&ctx, amps, precision)
+                .map_err(to_py_err)?,
             rng: rng_from_seed(seed),
         })
+    }
+
+    /// `"complex128"` or `"complex64"`.
+    #[getter]
+    fn dtype(&self) -> &'static str {
+        match self.inner.precision() {
+            GpuPrecision::Double => "complex128",
+            GpuPrecision::Single => "complex64",
+        }
     }
 
     #[getter]
@@ -90,8 +132,9 @@ impl PyGpuStatevector {
 
     fn __repr__(&self) -> String {
         format!(
-            "GpuStatevector(n_qubits={}, device={:?})",
+            "GpuStatevector(n_qubits={}, dtype={}, device={:?})",
             self.inner.n_qubits(),
+            self.dtype(),
             self.inner.context().device_name()
         )
     }

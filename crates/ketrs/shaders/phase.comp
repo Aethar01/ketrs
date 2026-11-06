@@ -1,5 +1,6 @@
 #version 450
 // ketrs-variants: CHUNKED = 0 1
+// ketrs-variants: SINGLE = 0 1
 // Multiply each amplitude by one of two phases by the parity of its index
 // masked with a: the diagonal Pauli rotation exp(-iθ/2 · Z…Z), or a global
 // phase with a = 0. One unit per amplitude. Params: plus, minus (complex).
@@ -7,7 +8,7 @@
 
 void main() {
     uint z = pc.a;
-    dvec2 plus = cparam(0u), minus = cparam(1u);
+    cplx plus = cparam(0u), minus = cparam(1u);
     FOR_EACH_UNIT(i) {
         store_amp(i, cmul(parity(i & z) == 1u ? minus : plus, load_amp(i)));
     }

@@ -9,7 +9,7 @@
 //! come back in a single download at the end.
 
 use super::context::{GpuContext, Kernel, MAX_CHUNKS, Push};
-use super::{AMPLITUDE_BYTES, BATCH_UNITS, GpuOp, GpuStatevector, Plan, bytes_of_mut, write_set};
+use super::{BATCH_UNITS, GpuOp, GpuStatevector, Plan, write_set};
 use crate::circuit::Circuit;
 use crate::error::Error;
 use crate::observable::PauliSum;
@@ -22,8 +22,8 @@ use std::sync::Arc;
 impl GpuStatevector {
     /// A copy of this state on the same GPU.
     pub fn try_clone(&self) -> Result<Self, Error> {
-        let copy = Self::allocate(&self.ctx, self.n_qubits, self.chunk_bits)?;
-        let size = AMPLITUDE_BYTES << self.chunk_bits;
+        let copy = Self::allocate(&self.ctx, self.n_qubits, self.chunk_bits, self.precision)?;
+        let size = self.amplitude_bytes() << self.chunk_bits;
         self.ctx.submit(|cmd| {
             for (from, to) in self.chunks.iter().zip(&copy.chunks) {
                 let region = [vk::BufferCopy::default().size(size)];
@@ -41,7 +41,7 @@ impl GpuStatevector {
     /// `H|ψ⟩` as a new (generally unnormalised) state, computed on the GPU
     /// in one pass.
     pub fn apply_pauli_sum(&mut self, hamiltonian: &PauliSum) -> Result<Self, Error> {
-        let out = Self::allocate(&self.ctx, self.n_qubits, self.chunk_bits)?;
+        let out = Self::allocate(&self.ctx, self.n_qubits, self.chunk_bits, self.precision)?;
         self.apply_pauli_sum_into(hamiltonian, &out)?;
         Ok(out)
     }
@@ -91,9 +91,10 @@ impl GpuStatevector {
         }
         if !Arc::ptr_eq(&final_state.ctx, &cotangent.ctx)
             || final_state.chunk_bits != cotangent.chunk_bits
+            || final_state.precision != cotangent.precision
         {
             return Err(Error::InvalidArgument(
-                "states must share a GPU and buffer layout".into(),
+                "states must share a GPU, buffer layout and precision".into(),
             ));
         }
         let (psi, lambda) = (final_state.try_clone()?, cotangent.try_clone()?);
@@ -242,7 +243,7 @@ fn sweep(
 
     psi.ensure_buffers(
         &params,
-        overlaps.len() * per_overlap as usize * AMPLITUDE_BYTES as usize,
+        overlaps.len() * per_overlap as usize * psi.amplitude_bytes() as usize,
     )?;
     let mut sets = Sets::new(&psi.ctx);
     let (on_psi, on_lambda) = (
@@ -272,8 +273,7 @@ fn sweep(
     }
     drop(sets);
 
-    let mut partials = vec![C64::new(0.0, 0.0); overlaps.len() * per_overlap as usize];
-    psi.output.read(bytes_of_mut(&mut partials))?;
+    let partials = psi.read_output(overlaps.len() * per_overlap as usize)?;
     let sums: Vec<C64> = partials
         .chunks(per_overlap as usize)
         .map(|c| c.iter().sum())

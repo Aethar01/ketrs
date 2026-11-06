@@ -1,12 +1,13 @@
 #version 450
 // ketrs-variants: CHUNKED = 0 1
+// ketrs-variants: SINGLE = 0 1
 //
 // partner += a · ψ, with the complex a at `offset`. units = number of
 // amplitudes.
 #include "common.glsl"
 
 void main() {
-    dvec2 a = cparam(0u);
+    cplx a = cparam(0u);
     FOR_EACH_UNIT(j) {
         store_partner(j, load_partner(j) + cmul(a, load_amp(j)));
     }

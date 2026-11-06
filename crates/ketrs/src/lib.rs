@@ -35,7 +35,7 @@ pub use classical::{Condition, Instruction};
 pub use error::Error;
 pub use gate::Gate;
 #[cfg(feature = "gpu")]
-pub use gpu::{GpuContext, GpuStatevector};
+pub use gpu::{GpuContext, GpuPrecision, GpuStatevector};
 pub use mps::{DmrgOptions, DmrgResult, Mps, MpsOptions};
 pub use num_complex::{Complex32, Complex64};
 pub use observable::{Pauli, PauliString, PauliSum};

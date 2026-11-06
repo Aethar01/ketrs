@@ -1,5 +1,6 @@
 #version 450
 // ketrs-variants: CHUNKED = 0 1
+// ketrs-variants: SINGLE = 0 1
 //
 // ⟨λ|G|ψ⟩ for a generator G = Π_c |1⟩⟨1|_c ⊗ (Pauli terms sharing X-mask a),
 // with λ the partner state: over its share of basis states j whose control
@@ -10,27 +11,27 @@
 // units = number of amplitudes.
 #include "common.glsl"
 
-layout(std430, set = 0, binding = 2) writeonly buffer Out { dvec2 partial[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer Out { cplx partial[]; };
 
-shared dvec2 sums[256];
+shared cplx sums[256];
 
 void main() {
     uint x = pc.a, terms = pc.b;
-    uint controls = uint(params[pc.offset]);
-    dvec2 acc = dvec2(0.0);
+    uint controls = param_uint(pc.offset);
+    cplx acc = cplx(0.0);
     FOR_EACH_UNIT(j) {
         if ((j & controls) != controls) {
             continue;
         }
         uint i = j ^ x;
-        dvec2 c = dvec2(0.0);
+        cplx c = cplx(0.0);
         for (uint t = 0u; t < terms; t++) {
             uint p = pc.offset + 1u + 3u * t;
-            dvec2 coeff = dvec2(params[p + 1u], params[p + 2u]);
-            c += parity(i & uint(params[p])) == 1u ? -coeff : coeff;
+            cplx coeff = cplx(param(p + 1u), param(p + 2u));
+            c += parity(i & param_uint(p)) == 1u ? -coeff : coeff;
         }
-        dvec2 lambda = load_partner(j);
-        acc += cmul(dvec2(lambda.x, -lambda.y), cmul(c, load_amp(i)));
+        cplx lambda = load_partner(j);
+        acc += cmul(cplx(lambda.x, -lambda.y), cmul(c, load_amp(i)));
     }
     uint lane = gl_LocalInvocationID.x;
     sums[lane] = acc;

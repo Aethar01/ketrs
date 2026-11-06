@@ -35,7 +35,35 @@ use rand::Rng;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-const AMPLITUDE_BYTES: u64 = size_of::<C64>() as u64;
+/// The amplitude type of a [`GpuStatevector`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuPrecision {
+    /// Complex `f64` amplitudes, 16 bytes each. Needs a GPU with 64-bit
+    /// floats ([`GpuContext::supports_f64`]).
+    Double,
+    /// Complex `f32` amplitudes, 8 bytes each: half the memory, on any GPU,
+    /// with errors of about `1e-6` instead of `1e-15`. Gate parameters are
+    /// still computed in `f64`.
+    Single,
+}
+
+impl GpuPrecision {
+    /// Bytes per amplitude.
+    fn amplitude_bytes(self) -> u64 {
+        match self {
+            GpuPrecision::Double => 16,
+            GpuPrecision::Single => 8,
+        }
+    }
+
+    /// Machine epsilon of the real type.
+    fn epsilon(self) -> f64 {
+        match self {
+            GpuPrecision::Double => f64::EPSILON,
+            GpuPrecision::Single => f32::EPSILON as f64,
+        }
+    }
+}
 
 /// Work per submission, in amplitudes touched. 2²⁸ is about four passes
 /// over a 26-qubit state, tens of milliseconds, far below driver timeouts
@@ -46,10 +74,12 @@ const BATCH_UNITS: u64 = 1 << 28;
 /// each block's probability, and only sampled blocks are downloaded.
 const SAMPLE_BLOCK_BITS: u32 = 10;
 
-/// A statevector held in GPU memory, with complex `f64` amplitudes.
+/// A statevector held in GPU memory, with complex `f64` or `f32`
+/// amplitudes (see [`GpuPrecision`]).
 pub struct GpuStatevector {
     ctx: Arc<GpuContext>,
     n_qubits: usize,
+    precision: GpuPrecision,
     /// The amplitudes, `2^chunk_bits` per buffer, in index order.
     chunks: Vec<Buffer>,
     chunk_bits: u32,
@@ -61,13 +91,23 @@ pub struct GpuStatevector {
 }
 
 impl GpuStatevector {
-    /// `|0…0⟩` on `n_qubits` qubits.
+    /// `|0…0⟩` on `n_qubits` qubits, in double precision if the GPU has
+    /// 64-bit floats and single otherwise.
     pub fn zero(ctx: &Arc<GpuContext>, n_qubits: usize) -> Result<Self, Error> {
-        let chunk_bits = (n_qubits as u32).min(ctx.max_chunk_bits());
-        Self::zero_with_chunk_bits(ctx, n_qubits, chunk_bits)
+        Self::zero_with_precision(ctx, n_qubits, default_precision(ctx))
     }
 
-    /// `|0…0⟩` with the state split into buffers of `2^chunk_bits`
+    /// `|0…0⟩` on `n_qubits` qubits with amplitudes of `precision`.
+    pub fn zero_with_precision(
+        ctx: &Arc<GpuContext>,
+        n_qubits: usize,
+        precision: GpuPrecision,
+    ) -> Result<Self, Error> {
+        let chunk_bits = (n_qubits as u32).min(ctx.max_chunk_bits(precision.amplitude_bytes()));
+        Self::zero_with_layout(ctx, n_qubits, chunk_bits, precision)
+    }
+
+    /// `|0…0⟩` in double precision, split into buffers of `2^chunk_bits`
     /// amplitudes. For testing the multi-buffer kernels on small states.
     #[doc(hidden)]
     pub fn zero_with_chunk_bits(
@@ -75,18 +115,40 @@ impl GpuStatevector {
         n_qubits: usize,
         chunk_bits: u32,
     ) -> Result<Self, Error> {
-        let state = Self::allocate(ctx, n_qubits, chunk_bits)?;
+        Self::zero_with_layout(ctx, n_qubits, chunk_bits, GpuPrecision::Double)
+    }
+
+    /// `|0…0⟩` with a given buffer size and precision.
+    #[doc(hidden)]
+    pub fn zero_with_layout(
+        ctx: &Arc<GpuContext>,
+        n_qubits: usize,
+        chunk_bits: u32,
+        precision: GpuPrecision,
+    ) -> Result<Self, Error> {
+        let state = Self::allocate(ctx, n_qubits, chunk_bits, precision)?;
         state.set_basis(0)?;
         Ok(state)
     }
 
-    /// Upload a statevector's amplitudes (length a power of two).
+    /// Upload a statevector's amplitudes (length a power of two), in double
+    /// precision if the GPU has 64-bit floats and single otherwise.
     pub fn from_amplitudes(ctx: &Arc<GpuContext>, amplitudes: &[C64]) -> Result<Self, Error> {
+        Self::from_amplitudes_with_precision(ctx, amplitudes, default_precision(ctx))
+    }
+
+    /// Upload a statevector's amplitudes, stored with `precision`.
+    pub fn from_amplitudes_with_precision(
+        ctx: &Arc<GpuContext>,
+        amplitudes: &[C64],
+        precision: GpuPrecision,
+    ) -> Result<Self, Error> {
         if !amplitudes.len().is_power_of_two() {
             return Err(Error::InvalidLength(amplitudes.len()));
         }
         let n = amplitudes.len().trailing_zeros();
-        let state = Self::allocate(ctx, n as usize, n.min(ctx.max_chunk_bits()))?;
+        let bits = n.min(ctx.max_chunk_bits(precision.amplitude_bytes()));
+        let state = Self::allocate(ctx, n as usize, bits, precision)?;
         state.upload(amplitudes)?;
         Ok(state)
     }
@@ -98,20 +160,37 @@ impl GpuStatevector {
         Ok(state)
     }
 
-    fn allocate(ctx: &Arc<GpuContext>, n_qubits: usize, chunk_bits: u32) -> Result<Self, Error> {
+    /// The amplitude type.
+    pub fn precision(&self) -> GpuPrecision {
+        self.precision
+    }
+
+    fn allocate(
+        ctx: &Arc<GpuContext>,
+        n_qubits: usize,
+        chunk_bits: u32,
+        precision: GpuPrecision,
+    ) -> Result<Self, Error> {
+        if precision == GpuPrecision::Double && !ctx.supports_f64() {
+            return Err(Error::Gpu(format!(
+                "{} has no 64-bit floats; use GpuPrecision::Single",
+                ctx.device_name()
+            )));
+        }
+        let bytes = precision.amplitude_bytes();
         let chunk_bits = chunk_bits.min(n_qubits as u32);
         let n_chunks = 1usize << (n_qubits as u32 - chunk_bits).min(31);
         let too_big = |why: String| {
             Error::Gpu(format!(
                 "{n_qubits} qubits needs {} MiB of GPU memory; {why}",
-                (16u128 << n_qubits) >> 20
+                ((bytes as u128) << n_qubits) >> 20
             ))
         };
         if n_qubits > 31 || n_chunks > MAX_CHUNKS {
             return Err(too_big(format!(
                 "{} holds at most {} amplitudes per buffer and {MAX_CHUNKS} buffers",
                 ctx.device_name(),
-                1u64 << ctx.max_chunk_bits()
+                1u64 << ctx.max_chunk_bits(bytes)
             )));
         }
         if n_chunks > 1 && !ctx.chunks_supported() {
@@ -124,7 +203,7 @@ impl GpuStatevector {
             .map(|_| {
                 Buffer::new(
                     ctx,
-                    AMPLITUDE_BYTES << chunk_bits,
+                    bytes << chunk_bits,
                     vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::TRANSFER_SRC
                         | vk::BufferUsageFlags::TRANSFER_DST,
@@ -160,6 +239,7 @@ impl GpuStatevector {
         let gpu = GpuStatevector {
             ctx: ctx.clone(),
             n_qubits,
+            precision,
             chunks,
             chunk_bits,
             params,
@@ -214,11 +294,58 @@ impl GpuStatevector {
         1 << self.chunk_bits
     }
 
+    fn amplitude_bytes(&self) -> u64 {
+        self.precision.amplitude_bytes()
+    }
+
+    /// Amplitudes as this state stores them.
+    fn encode(&self, amplitudes: &[C64]) -> Vec<u8> {
+        match self.precision {
+            GpuPrecision::Double => bytes_of(amplitudes).to_vec(),
+            GpuPrecision::Single => amplitudes
+                .iter()
+                .flat_map(|a| [a.re as f32, a.im as f32])
+                .flat_map(f32::to_ne_bytes)
+                .collect(),
+        }
+    }
+
+    /// Amplitudes from this state's storage format.
+    fn decode(&self, bytes: &[u8]) -> Vec<C64> {
+        match self.precision {
+            GpuPrecision::Double => bytes
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .map(|b| {
+                    let (re, im) = b.split_at(8);
+                    let f = |b: &[u8]| f64::from_ne_bytes(b.try_into().expect("8 bytes"));
+                    C64::new(f(re), f(im))
+                })
+                .collect(),
+            GpuPrecision::Single => bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|b| {
+                    let (re, im) = b.split_at(4);
+                    let f = |b: &[u8]| f32::from_ne_bytes(b.try_into().expect("4 bytes")) as f64;
+                    C64::new(f(re), f(im))
+                })
+                .collect(),
+        }
+    }
+
+    /// The first `n` complex values of the output buffer.
+    fn read_output(&self, n: usize) -> Result<Vec<C64>, Error> {
+        let mut bytes = vec![0u8; n * self.amplitude_bytes() as usize];
+        self.output.read(&mut bytes)?;
+        Ok(self.decode(&bytes))
+    }
+
     /// Set the state to basis state `index`.
     fn set_basis(&self, index: usize) -> Result<(), Error> {
-        let one: [u8; 16] = bytes_of(&[C64::new(1.0, 0.0)])
-            .try_into()
-            .expect("16 bytes");
+        let one = self.encode(&[C64::new(1.0, 0.0)]);
         let (chunk, offset) = (index >> self.chunk_bits, index & (self.chunk_len() - 1));
         self.ctx.submit(|cmd| {
             // SAFETY: recording transfers into this state's buffers.
@@ -235,7 +362,7 @@ impl GpuStatevector {
                 d.cmd_update_buffer(
                     cmd,
                     self.chunks[chunk].buffer,
-                    offset as u64 * AMPLITUDE_BYTES,
+                    offset as u64 * self.amplitude_bytes(),
                     &one,
                 );
             }
@@ -245,12 +372,12 @@ impl GpuStatevector {
     fn upload(&self, amplitudes: &[C64]) -> Result<(), Error> {
         let mut staging = Buffer::new(
             &self.ctx,
-            amplitudes.len() as u64 * AMPLITUDE_BYTES,
+            amplitudes.len() as u64 * self.amplitude_bytes(),
             vk::BufferUsageFlags::TRANSFER_SRC,
             Memory::Upload,
         )?;
-        staging.write(bytes_of(amplitudes));
-        let size = AMPLITUDE_BYTES << self.chunk_bits;
+        staging.write(&self.encode(amplitudes));
+        let size = self.amplitude_bytes() << self.chunk_bits;
         self.ctx.submit(|cmd| {
             for (i, chunk) in self.chunks.iter().enumerate() {
                 let region = [vk::BufferCopy::default()
@@ -270,9 +397,10 @@ impl GpuStatevector {
     /// within one chunk, concatenated.
     fn download_ranges(&self, ranges: &[(usize, usize)]) -> Result<Vec<C64>, Error> {
         let total: usize = ranges.iter().map(|&(_, n)| n).sum();
+        let bytes = self.amplitude_bytes();
         let staging = Buffer::new(
             &self.ctx,
-            total as u64 * AMPLITUDE_BYTES,
+            total as u64 * bytes,
             vk::BufferUsageFlags::TRANSFER_DST,
             Memory::Download,
         )?;
@@ -281,21 +409,21 @@ impl GpuStatevector {
             for &(index, count) in ranges {
                 let chunk = &self.chunks[index >> self.chunk_bits];
                 let region = [vk::BufferCopy::default()
-                    .src_offset((index & (self.chunk_len() - 1)) as u64 * AMPLITUDE_BYTES)
+                    .src_offset((index & (self.chunk_len() - 1)) as u64 * bytes)
                     .dst_offset(dst)
-                    .size(count as u64 * AMPLITUDE_BYTES)];
+                    .size(count as u64 * bytes)];
                 // SAFETY: ranges lie within their chunk and the staging buffer.
                 unsafe {
                     self.ctx
                         .device
                         .cmd_copy_buffer(cmd, chunk.buffer, staging.buffer, &region)
                 };
-                dst += count as u64 * AMPLITUDE_BYTES;
+                dst += count as u64 * bytes;
             }
         })?;
-        let mut out = vec![C64::new(0.0, 0.0); total];
-        staging.read(bytes_of_mut(&mut out))?;
-        Ok(out)
+        let mut out = vec![0u8; total * bytes as usize];
+        staging.read(&mut out)?;
+        Ok(self.decode(&out))
     }
 
     /// Download the amplitudes.
@@ -365,12 +493,12 @@ impl GpuStatevector {
                 },
             ));
         }
-        self.ensure_buffers(&params, groups.len() * per_group * AMPLITUDE_BYTES as usize)?;
+        let bytes = self.amplitude_bytes() as usize;
+        self.ensure_buffers(&params, groups.len() * per_group * bytes)?;
         for batch in dispatches.chunks((BATCH_UNITS / units as u64).max(1) as usize) {
             self.submit_dispatches(batch)?;
         }
-        let mut partials = vec![C64::new(0.0, 0.0); groups.len() * per_group];
-        self.output.read(bytes_of_mut(&mut partials))?;
+        let partials = self.read_output(groups.len() * per_group)?;
         Ok(partials.iter().sum())
     }
 
@@ -380,7 +508,7 @@ impl GpuStatevector {
     pub fn sample(&mut self, shots: usize, rng: &mut impl Rng) -> Result<Vec<usize>, Error> {
         let block_bits = SAMPLE_BLOCK_BITS.min(self.n_qubits as u32);
         let blocks = self.len() >> block_bits;
-        self.ensure_buffers(&[], blocks * AMPLITUDE_BYTES as usize)?;
+        self.ensure_buffers(&[], blocks * self.amplitude_bytes() as usize)?;
         self.submit_dispatches(&[(
             Kernel::Probs,
             Push {
@@ -389,8 +517,7 @@ impl GpuStatevector {
                 ..Push::default()
             },
         )])?;
-        let mut totals = vec![C64::new(0.0, 0.0); blocks];
-        self.output.read(bytes_of_mut(&mut totals))?;
+        let totals = self.read_output(blocks)?;
         let cumulative: Vec<f64> = totals
             .iter()
             .scan(0.0, |acc, t| {
@@ -541,6 +668,7 @@ impl GpuStatevector {
     ) -> Result<(), Error> {
         let ctx = &self.ctx;
         let chunked = self.chunked();
+        let single = self.precision == GpuPrecision::Single;
         ctx.submit(|cmd| {
             let d = &ctx.device;
             // SAFETY: recording dispatches against live descriptor sets.
@@ -563,7 +691,7 @@ impl GpuStatevector {
                         d.cmd_bind_pipeline(
                             cmd,
                             vk::PipelineBindPoint::COMPUTE,
-                            ctx.pipeline(kernel, chunked),
+                            ctx.pipeline(kernel, chunked, single),
                         );
                         bound = Some(kernel);
                     }
@@ -594,6 +722,15 @@ impl Drop for GpuStatevector {
                 .device
                 .free_descriptor_sets(self.ctx.descriptor_pool, &[self.set]);
         }
+    }
+}
+
+/// Double precision where the GPU has 64-bit floats, single otherwise.
+fn default_precision(ctx: &GpuContext) -> GpuPrecision {
+    if ctx.supports_f64() {
+        GpuPrecision::Double
+    } else {
+        GpuPrecision::Single
     }
 }
 
@@ -869,13 +1006,6 @@ fn write_set(
 fn bytes_of(values: &[C64]) -> &[u8] {
     // SAFETY: Complex<f64> is repr(C) as two f64s, with no padding.
     unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
-}
-
-fn bytes_of_mut(values: &mut [C64]) -> &mut [u8] {
-    // SAFETY: as for `bytes_of`; every bit pattern is a valid f64.
-    unsafe {
-        std::slice::from_raw_parts_mut(values.as_mut_ptr().cast(), std::mem::size_of_val(values))
-    }
 }
 
 fn bytes_of_f64(values: &[f64]) -> &[u8] {

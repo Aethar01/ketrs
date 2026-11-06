@@ -5,8 +5,8 @@
 mod common;
 
 use ketrs::{
-    Circuit, Complex64 as C64, Error, GpuContext, GpuStatevector, Pauli, PauliString, PauliSum,
-    Statevector,
+    Circuit, Complex64 as C64, Error, GpuContext, GpuPrecision, GpuStatevector, Pauli, PauliString,
+    PauliSum, Statevector,
 };
 use std::sync::Arc;
 
@@ -354,6 +354,93 @@ fn too_many_buffers_are_rejected() {
         GpuStatevector::zero_with_chunk_bits(&ctx, 12, 7),
         Err(Error::Gpu(_))
     ));
+}
+
+fn assert_close_single(got: &[C64], want: &[C64]) {
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        assert!((g - w).norm() < 2e-5, "amplitude {i}: GPU {g}, CPU {w}");
+    }
+}
+
+#[test]
+fn single_precision_matches_cpu() {
+    let Some(ctx) = gpu() else { return };
+    // 7 qubits gate by gate, 13 in tiles, and 13 over eight buffers.
+    for (n, chunk_bits, seed) in [(7, 7, 1), (13, 13, 2), (13, 10, 3)] {
+        let circ = random_circuit(n, 60, seed);
+        let mut gpu_state =
+            GpuStatevector::zero_with_layout(&ctx, n, chunk_bits, GpuPrecision::Single).unwrap();
+        assert_eq!(gpu_state.precision(), GpuPrecision::Single);
+        gpu_state.run(&circ).unwrap();
+        let cpu = Statevector::from_circuit(&circ);
+        assert_close_single(&gpu_state.amplitudes().unwrap(), cpu.amplitudes());
+        let h = hamiltonian(n, seed + 50);
+        let got = gpu_state.expectation(&h).unwrap();
+        assert!((got - cpu.expectation(&h).unwrap()).abs() < 1e-4);
+        let applied = gpu_state.apply_pauli_sum(&h).unwrap();
+        assert_close_single(
+            &applied.amplitudes().unwrap(),
+            cpu.apply_pauli_sum(&h).unwrap().amplitudes(),
+        );
+
+        let (pcirc, values) = parametric(n, seed);
+        let start =
+            GpuStatevector::zero_with_layout(&ctx, n, chunk_bits, GpuPrecision::Single).unwrap();
+        let (value, gradient) = start.expectation_gradient(&pcirc, &values, &h).unwrap();
+        let (want_value, want) = Statevector::zero(n)
+            .expectation_gradient(&pcirc, &values, &h)
+            .unwrap();
+        assert!((value - want_value).abs() < 1e-4);
+        for (g, w) in gradient.iter().zip(&want) {
+            assert!((g - w).abs() < 1e-4, "{gradient:?} vs {want:?}");
+        }
+
+        gpu_state.evolve(&h, 1.5).unwrap();
+        let mut evolved = cpu.clone();
+        evolved.evolve(&h, 1.5).unwrap();
+        assert!(
+            gpu_state
+                .amplitudes()
+                .unwrap()
+                .iter()
+                .zip(evolved.amplitudes())
+                .all(|(g, w)| (g - w).norm() < 1e-4)
+        );
+    }
+}
+
+/// Masks above 2^24 can't be held exactly as f32; single-precision kernels
+/// decode them from the f64 parameters with integer arithmetic.
+#[test]
+fn single_precision_handles_high_qubits() {
+    let Some(ctx) = gpu() else { return };
+    let n = 26;
+    let theta = 0.8;
+    let mut circ = Circuit::new(n);
+    circ.pauli_rotation(
+        theta,
+        PauliString::new([(25, Pauli::X), (24, Pauli::X)]).unwrap(),
+    );
+    circ.h(0).cx(0, 25).rz(0.3, 25).cp(0.7, 25, 3);
+    let mut state = GpuStatevector::zero_with_precision(&ctx, n, GpuPrecision::Single).unwrap();
+    state.run(&circ).unwrap();
+    // After the rotation ⟨Z₂₄⟩ = cos θ; CX copies qubit 0's superposition,
+    // so ⟨Z₀Z₂₅⟩ tracks qubit 25's state.
+    let z24 = PauliSum::from_list([(&*label(n, &[(24, 'Z')]), 1.0)]).unwrap();
+    assert!((state.expectation(&z24).unwrap() - theta.cos()).abs() < 1e-5);
+    let p_flip = (theta / 2.0).sin().powi(2);
+    let zz = PauliSum::from_list([(&*label(n, &[(25, 'Z'), (0, 'Z')]), 1.0)]).unwrap();
+    // Qubit 25 flipped with probability p, independent of the CX parity.
+    let want = (1.0 - p_flip) - p_flip;
+    assert!((state.expectation(&zz).unwrap() - want).abs() < 1e-5);
+}
+
+fn label(n: usize, ops: &[(usize, char)]) -> String {
+    let mut l = vec!['I'; n];
+    for &(q, p) in ops {
+        l[n - 1 - q] = p;
+    }
+    l.into_iter().collect()
 }
 
 /// A 28-qubit state (4 GiB, two buffers on most GPUs) without downloading

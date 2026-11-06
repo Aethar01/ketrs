@@ -480,6 +480,19 @@ def test_gpu_gradient_matches_cpu():
 
 
 @gpu
+def test_gpu_single_precision():
+    qc = random_circuit(8, depth=8, seed=21)
+    exact = QiskitStatevector(qc).data
+    state = ketrs.GpuStatevector.from_circuit(from_qiskit(qc), dtype="complex64")
+    assert state.dtype == "complex64"
+    np.testing.assert_allclose(state.amplitudes(), exact, atol=2e-5)
+    up = ketrs.GpuStatevector.from_amplitudes(exact, dtype="complex64")
+    assert up.norm_sqr() == pytest.approx(1.0, abs=1e-5)
+    with pytest.raises(ValueError, match="complex64"):
+        ketrs.GpuStatevector(3, dtype="float32")
+
+
+@gpu
 def test_gpu_evolution_matches_cpu():
     psi0 = QiskitStatevector(random_circuit(6, depth=5, seed=8)).data
     h = pauli_sum_from_qiskit(ISING.tensor(SparsePauliOp("II")))

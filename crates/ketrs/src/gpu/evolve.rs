@@ -10,7 +10,7 @@
 
 use super::context::{Kernel, Push};
 use super::gradient::{Sets, hamil_params, hamil_push};
-use super::{AMPLITUDE_BYTES, BATCH_UNITS, GpuStatevector, bytes_of_mut};
+use super::{BATCH_UNITS, GpuStatevector};
 use crate::error::Error;
 use crate::observable::PauliSum;
 use crate::statevector::evolve::{KRYLOV_DIM, STEP_TOLERANCE, tridiagonal_exp};
@@ -23,7 +23,8 @@ use num_complex::Complex64 as C64;
 const EXTRA_PARAMS: usize = 16 * (KRYLOV_DIM + 2);
 
 impl GpuStatevector {
-    /// Evolve by `exp(-iHt)` exactly (to about 1e-13 per step), on the GPU.
+    /// Evolve by `exp(-iHt)` exactly (to about 1e-13 per step, or 1e-6 in
+    /// single precision), on the GPU.
     /// See [`Statevector::evolve`](crate::Statevector::evolve); needs room
     /// for three more statevectors.
     pub fn evolve(&mut self, hamiltonian: &PauliSum, time: f64) -> Result<(), Error> {
@@ -69,8 +70,9 @@ struct Krylov<'a> {
 
 impl<'a> Krylov<'a> {
     fn new(psi: &'a mut GpuStatevector, hamil: Vec<f64>, n_groups: u32) -> Result<Self, Error> {
-        let vectors =
-            [(); 3].map(|()| GpuStatevector::allocate(&psi.ctx, psi.n_qubits, psi.chunk_bits));
+        let vectors = [(); 3].map(|()| {
+            GpuStatevector::allocate(&psi.ctx, psi.n_qubits, psi.chunk_bits, psi.precision)
+        });
         let [a, b, c] = vectors;
         let vectors = [a?, b?, c?];
         // Size ψ's buffers for the largest submission now: the sets below
@@ -78,7 +80,7 @@ impl<'a> Krylov<'a> {
         let per = Kernel::Overlap.groups(psi.len() as u32) as usize;
         psi.ensure_buffers(
             &vec![0.0; hamil.len() + EXTRA_PARAMS],
-            per * AMPLITUDE_BYTES as usize,
+            per * psi.amplitude_bytes() as usize,
         )?;
         let mut owner = Sets::new(&psi.ctx);
         let mut sets = [[vk::DescriptorSet::null(); 4]; 4];
@@ -147,14 +149,12 @@ impl<'a> Krylov<'a> {
             start = end;
         }
         let per = Kernel::Overlap.groups(self.amps() as u32) as usize;
-        let mut partials = vec![C64::new(0.0, 0.0); per];
-        self.psi.output.read(bytes_of_mut(&mut partials))?;
-        Ok(partials.iter().sum())
+        Ok(self.psi.read_output(per)?.iter().sum())
     }
 
     /// Copy ψ into vector `v`.
     fn copy_psi_to(&self, v: usize) -> Result<(), Error> {
-        let size = AMPLITUDE_BYTES << self.psi.chunk_bits;
+        let size = self.psi.amplitude_bytes() << self.psi.chunk_bits;
         let ctx = &self.psi.ctx;
         ctx.submit(|cmd| {
             for (from, to) in self.psi.chunks.iter().zip(&self.vectors[v].chunks) {
@@ -182,6 +182,7 @@ impl<'a> Krylov<'a> {
     /// `ψ ← exp(-iHt) ψ` in adaptive Krylov steps.
     fn evolve(&mut self, time: f64) -> Result<(), Error> {
         let amps = self.amps();
+        let tolerance = STEP_TOLERANCE.max(10.0 * self.psi.precision.epsilon());
         let mut remaining = time;
         while remaining != 0.0 {
             let beta0 = self.psi_norm()?;
@@ -247,7 +248,7 @@ impl<'a> Krylov<'a> {
             let mut dt = remaining;
             let y = loop {
                 let y = tridiagonal_exp(&alphas, &betas[..m - 1], dt);
-                if residual * y[m - 1].norm() <= STEP_TOLERANCE {
+                if residual * y[m - 1].norm() <= tolerance {
                     break y;
                 }
                 dt /= 2.0;

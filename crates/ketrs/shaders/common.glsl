@@ -1,6 +1,8 @@
 // Shared declarations for ketrs's statevector compute shaders.
 //
-// Amplitudes are complex doubles (dvec2: real, imaginary). Each shader
+// Amplitudes are complex numbers (cplx: real, imaginary) of type `real`:
+// doubles, or floats in the SINGLE = 1 variants for GPUs without 64-bit
+// floats. Each shader
 // processes `units` independent pieces of work (amplitude pairs, quads or
 // single amplitudes) in a grid-stride loop, so any state size fits in the
 // workgroup-count limit. Gate parameters (matrix entries, cosines, …) live in
@@ -14,6 +16,14 @@
 
 #extension GL_EXT_nonuniform_qualifier : enable
 
+#if SINGLE
+#define real float
+#define cplx vec2
+#else
+#define real double
+#define cplx dvec2
+#endif
+
 layout(local_size_x = 256) in;
 
 #define MAX_CHUNKS 16
@@ -21,13 +31,54 @@ layout(local_size_x = 256) in;
 // Binding 3 is a second state of the same size, the "partner", for kernels
 // that combine two states (overlaps, H|ψ⟩); otherwise it repeats binding 0.
 #if CHUNKED
-layout(std430, set = 0, binding = 0) buffer State { dvec2 data[]; } chunks[MAX_CHUNKS];
-layout(std430, set = 0, binding = 3) buffer Partner { dvec2 data[]; } partner_chunks[MAX_CHUNKS];
+layout(std430, set = 0, binding = 0) buffer State { cplx data[]; } chunks[MAX_CHUNKS];
+layout(std430, set = 0, binding = 3) buffer Partner { cplx data[]; } partner_chunks[MAX_CHUNKS];
 #else
-layout(std430, set = 0, binding = 0) buffer State { dvec2 amps[]; };
-layout(std430, set = 0, binding = 3) buffer Partner { dvec2 partner_amps[]; };
+layout(std430, set = 0, binding = 0) buffer State { cplx amps[]; };
+layout(std430, set = 0, binding = 3) buffer Partner { cplx partner_amps[]; };
 #endif
+// Parameters are always doubles, written by the host as f64. Without
+// 64-bit floats they are read as pairs of 32-bit words and decoded with
+// integer arithmetic: integers (masks, qubits) exactly, other values
+// rounded towards zero to float.
+#if SINGLE
+layout(std430, set = 0, binding = 1) readonly buffer Params { uint params_raw[]; };
+
+real param(uint i) {
+    uint lo = params_raw[2u * i], hi = params_raw[2u * i + 1u];
+    int e = int((hi >> 20u) & 0x7FFu) - 1023;
+    if (e < -126) {
+        return 0.0;
+    }
+    uint mantissa = ((hi & 0xFFFFFu) << 3u) | (lo >> 29u);
+    return uintBitsToFloat((hi & 0x80000000u) | (uint(min(e, 127) + 127) << 23u) | mantissa);
+}
+
+// A non-negative integer below 2^32 stored as a double.
+uint param_uint(uint i) {
+    uint lo = params_raw[2u * i], hi = params_raw[2u * i + 1u];
+    int e = int((hi >> 20u) & 0x7FFu) - 1023;
+    if (e < 0) {
+        return 0u;
+    }
+    // The value is 1.f × 2^e: the leading one and the top e fraction bits.
+    uint e_u = uint(e);
+    uint top = e_u == 0u ? 0u
+        : e_u <= 20u ? (hi & 0xFFFFFu) >> (20u - e_u)
+        : ((hi & 0xFFFFFu) << (e_u - 20u)) | (lo >> (52u - e_u));
+    return (1u << e_u) | top;
+}
+#else
 layout(std430, set = 0, binding = 1) readonly buffer Params { double params[]; };
+
+real param(uint i) {
+    return params[i];
+}
+
+uint param_uint(uint i) {
+    return uint(params[i]);
+}
+#endif
 
 // Generic slots; each shader documents its use of a, b, c.
 layout(push_constant) uniform Push {
@@ -40,40 +91,40 @@ layout(push_constant) uniform Push {
 } pc;
 
 #if CHUNKED
-dvec2 load_amp(uint i) {
+cplx load_amp(uint i) {
     return chunks[nonuniformEXT(i >> pc.chunk_bits)].data[i & ((1u << pc.chunk_bits) - 1u)];
 }
-void store_amp(uint i, dvec2 v) {
+void store_amp(uint i, cplx v) {
     chunks[nonuniformEXT(i >> pc.chunk_bits)].data[i & ((1u << pc.chunk_bits) - 1u)] = v;
 }
-dvec2 load_partner(uint i) {
+cplx load_partner(uint i) {
     return partner_chunks[nonuniformEXT(i >> pc.chunk_bits)].data[i & ((1u << pc.chunk_bits) - 1u)];
 }
-void store_partner(uint i, dvec2 v) {
+void store_partner(uint i, cplx v) {
     partner_chunks[nonuniformEXT(i >> pc.chunk_bits)].data[i & ((1u << pc.chunk_bits) - 1u)] = v;
 }
 #else
-dvec2 load_amp(uint i) {
+cplx load_amp(uint i) {
     return amps[i];
 }
-void store_amp(uint i, dvec2 v) {
+void store_amp(uint i, cplx v) {
     amps[i] = v;
 }
-dvec2 load_partner(uint i) {
+cplx load_partner(uint i) {
     return partner_amps[i];
 }
-void store_partner(uint i, dvec2 v) {
+void store_partner(uint i, cplx v) {
     partner_amps[i] = v;
 }
 #endif
 
-dvec2 cmul(dvec2 x, dvec2 y) {
-    return dvec2(x.x * y.x - x.y * y.y, x.x * y.y + x.y * y.x);
+cplx cmul(cplx x, cplx y) {
+    return cplx(x.x * y.x - x.y * y.y, x.x * y.y + x.y * y.x);
 }
 
 // Complex parameter number i.
-dvec2 cparam(uint i) {
-    return dvec2(params[pc.offset + 2u * i], params[pc.offset + 2u * i + 1u]);
+cplx cparam(uint i) {
+    return cplx(param(pc.offset + 2u * i), param(pc.offset + 2u * i + 1u));
 }
 
 // k with a zero bit inserted at position `bit`.

@@ -1,5 +1,6 @@
 #version 450
 // ketrs-variants: CHUNKED = 0 1
+// ketrs-variants: SINGLE = 0 1
 // A 4×4 matrix on qubits a (index bit 0) and b (index bit 1). One unit per
 // group of four amplitudes. c is min(a, b). Params: 16 complex entries,
 // row-major.
@@ -10,9 +11,9 @@ void main() {
     FOR_EACH_UNIT(k) {
         uint base = insert_zero_bit(insert_zero_bit(k, low), high);
         uint idx[4] = uint[4](base, base | (1u << q0), base | (1u << q1), base | (1u << q0) | (1u << q1));
-        dvec2 v[4] = dvec2[4](load_amp(idx[0]), load_amp(idx[1]), load_amp(idx[2]), load_amp(idx[3]));
+        cplx v[4] = cplx[4](load_amp(idx[0]), load_amp(idx[1]), load_amp(idx[2]), load_amp(idx[3]));
         for (uint r = 0u; r < 4u; r++) {
-            dvec2 acc = dvec2(0.0);
+            cplx acc = cplx(0.0);
             for (uint c = 0u; c < 4u; c++) {
                 acc += cmul(cparam(4u * r + c), v[c]);
             }
