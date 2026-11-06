@@ -1,0 +1,35 @@
+#version 450
+// ketrs-variants: CHUNKED = 0 1
+//
+// Total probability Σ|ψᵢ|² of each block of 2^c amplitudes (units blocks),
+// written to partial[block] as (total, 0). Used to sample on the GPU: the
+// CPU picks blocks from these totals and fetches only the chosen blocks.
+#include "common.glsl"
+
+layout(std430, set = 0, binding = 2) writeonly buffer Out { dvec2 partial[]; };
+
+shared double sums[256];
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint size = 1u << pc.c;
+    for (uint block = gl_WorkGroupID.x; block < pc.units; block += gl_NumWorkGroups.x) {
+        double acc = 0.0;
+        for (uint i = lane; i < size; i += 256u) {
+            dvec2 a = load_amp(block * size + i);
+            acc += a.x * a.x + a.y * a.y;
+        }
+        sums[lane] = acc;
+        barrier();
+        for (uint s = 128u; s > 0u; s >>= 1u) {
+            if (lane < s) {
+                sums[lane] += sums[lane + s];
+            }
+            barrier();
+        }
+        if (lane == 0u) {
+            partial[block] = dvec2(sums[0], 0.0);
+        }
+        barrier();
+    }
+}

@@ -1,0 +1,45 @@
+//! Quantum computer simulation backend.
+//!
+//! Qubit ordering follows Qiskit: qubit 0 is the least significant bit of a
+//! basis-state index, so on three qubits `|q2 q1 q0⟩ = |001⟩` is index 1.
+//!
+//! ```
+//! use ketrs::{Circuit, Statevector};
+//!
+//! let mut bell = Circuit::new(2);
+//! bell.h(0).cx(0, 1);
+//!
+//! let state = Statevector::from_circuit(&bell);
+//! let probs = state.probabilities();
+//! assert!((probs[0] - 0.5).abs() < 1e-12);
+//! assert!((probs[3] - 0.5).abs() < 1e-12);
+//! ```
+
+pub mod circuit;
+pub mod classical;
+mod error;
+mod fusion;
+pub mod gate;
+#[cfg(feature = "gpu")]
+pub mod gpu;
+pub mod library;
+pub mod mps;
+pub mod observable;
+pub mod parameter;
+pub mod scalar;
+pub mod sector;
+pub mod statevector;
+
+pub use circuit::{Circuit, Operation};
+pub use classical::{Condition, Instruction};
+pub use error::Error;
+pub use gate::Gate;
+#[cfg(feature = "gpu")]
+pub use gpu::{GpuContext, GpuStatevector};
+pub use mps::{DmrgOptions, DmrgResult, Mps, MpsOptions};
+pub use num_complex::Complex64;
+pub use observable::{Pauli, PauliString, PauliSum};
+pub use parameter::{Angle, Parameter};
+pub use scalar::Scalar;
+pub use sector::{RealSectorStatevector, SectorBasis, SectorState, SectorStatevector};
+pub use statevector::{DenseState, RealStatevector, Statevector};

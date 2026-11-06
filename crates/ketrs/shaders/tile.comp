@@ -1,0 +1,117 @@
+#version 450
+// ketrs-variants: CHUNKED = 0 1
+// ketrs-variants: TILE_BITS = 10 11 12
+//
+// The GPU's cache blocking: a run of gates that together act on at most
+// TILE_BITS qubits, applied tile by tile in workgroup shared memory, so the
+// whole run costs one pass over GPU memory.
+//
+// A tile is the 2^TILE_BITS amplitudes that differ only in the qubits of
+// mask b (TILE_BITS of the c qubits in the state); `units` tiles cover the
+// state, one workgroup each. a = number of gates. Gates use positions within
+// the tile: tile bit j is the j-th lowest qubit in b.
+//
+// The gate list starts at `offset` in the parameter buffer. Each gate is an
+// opcode followed by its integers (as doubles) and its numbers:
+//   0 pair:  target, control mask, then m00 m01 m10 m11 (complex)
+//   1 quad:  q0, q1, min(q0, q1), then 16 complex entries, row-major
+//   2 pauli: x mask, z mask, highest bit of x, then cos, factor (complex)
+//   3 phase: z mask, then plus, minus (complex)
+#include "common.glsl"
+
+const uint TILE = 1u << TILE_BITS;
+shared dvec2 tile[TILE];
+
+dvec2 cat(uint p) {
+    return dvec2(params[p], params[p + 1u]);
+}
+
+// Parallel bit deposit: the low bits of `src` placed, in order, at the set
+// bits of `mask`.
+uint deposit(uint src, uint mask) {
+    uint out_bits = 0u;
+    for (uint bit = 1u; mask != 0u; bit <<= 1u) {
+        uint lowest = mask & (~mask + 1u);
+        if ((src & bit) != 0u) {
+            out_bits |= lowest;
+        }
+        mask &= mask - 1u;
+    }
+    return out_bits;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint inside = pc.b;
+    uint outside = (pc.c >= 32u ? 0xffffffffu : (1u << pc.c) - 1u) & ~inside;
+    for (uint t = gl_WorkGroupID.x; t < pc.units; t += gl_NumWorkGroups.x) {
+        uint base = deposit(t, outside);
+        for (uint i = lane; i < TILE; i += 256u) {
+            tile[i] = load_amp(base | deposit(i, inside));
+        }
+        barrier();
+
+        uint p = pc.offset;
+        for (uint g = 0u; g < pc.a; g++) {
+            uint kind = uint(params[p]);
+            if (kind == 0u) {
+                uint target = uint(params[p + 1u]), control = uint(params[p + 2u]);
+                dvec2 m00 = cat(p + 3u), m01 = cat(p + 5u), m10 = cat(p + 7u), m11 = cat(p + 9u);
+                for (uint k = lane; k < TILE / 2u; k += 256u) {
+                    uint i0 = insert_zero_bit(k, target);
+                    if ((i0 & control) == control) {
+                        uint i1 = i0 | (1u << target);
+                        dvec2 x = tile[i0], y = tile[i1];
+                        tile[i0] = cmul(m00, x) + cmul(m01, y);
+                        tile[i1] = cmul(m10, x) + cmul(m11, y);
+                    }
+                }
+                p += 11u;
+            } else if (kind == 1u) {
+                uint q0 = uint(params[p + 1u]), q1 = uint(params[p + 2u]), low = uint(params[p + 3u]);
+                uint high = q0 + q1 - low;
+                uint m = p + 4u;
+                for (uint k = lane; k < TILE / 4u; k += 256u) {
+                    uint b = insert_zero_bit(insert_zero_bit(k, low), high);
+                    uint idx[4] = uint[4](b, b | (1u << q0), b | (1u << q1), b | (1u << q0) | (1u << q1));
+                    dvec2 v[4] = dvec2[4](tile[idx[0]], tile[idx[1]], tile[idx[2]], tile[idx[3]]);
+                    for (uint r = 0u; r < 4u; r++) {
+                        dvec2 acc = dvec2(0.0);
+                        for (uint c = 0u; c < 4u; c++) {
+                            acc += cmul(cat(m + 8u * r + 2u * c), v[c]);
+                        }
+                        tile[idx[r]] = acc;
+                    }
+                }
+                p += 36u;
+            } else if (kind == 2u) {
+                uint x = uint(params[p + 1u]), z = uint(params[p + 2u]), high = uint(params[p + 3u]);
+                double cs = params[p + 4u];
+                dvec2 f = cat(p + 5u);
+                for (uint k = lane; k < TILE / 2u; k += 256u) {
+                    uint j = insert_zero_bit(k, high);
+                    uint jp = j ^ x;
+                    dvec2 a = tile[j], b = tile[jp];
+                    dvec2 fj = parity(jp & z) == 1u ? -f : f;
+                    dvec2 fjp = parity(j & z) == 1u ? -f : f;
+                    tile[j] = cs * a + cmul(fj, b);
+                    tile[jp] = cs * b + cmul(fjp, a);
+                }
+                p += 7u;
+            } else {
+                uint z = uint(params[p + 1u]);
+                dvec2 plus = cat(p + 2u), minus = cat(p + 4u);
+                for (uint i = lane; i < TILE; i += 256u) {
+                    tile[i] = cmul(parity(i & z) == 1u ? minus : plus, tile[i]);
+                }
+                p += 6u;
+            }
+            barrier();
+        }
+
+        for (uint i = lane; i < TILE; i += 256u) {
+            store_amp(base | deposit(i, inside), tile[i]);
+        }
+        barrier();
+    }
+}

@@ -1,0 +1,22 @@
+#version 450
+// ketrs-variants: CHUNKED = 0 1
+// exp(-iθ/2 · P) for a Pauli string with X-mask a ≠ 0 and Z-mask b; c is the
+// highest bit of a. One unit per amplitude pair (j, j ⊕ a).
+// Params: cos(θ/2), then factor = −i sin(θ/2) iⁿʸ (complex).
+#include "common.glsl"
+
+void main() {
+    uint x = pc.a, z = pc.b, high = pc.c;
+    double cs = params[pc.offset];
+    dvec2 f = dvec2(params[pc.offset + 1u], params[pc.offset + 2u]);
+    FOR_EACH_UNIT(k) {
+        uint j = insert_zero_bit(k, high);
+        uint jp = j ^ x;
+        dvec2 a = load_amp(j), b = load_amp(jp);
+        // P|i⟩ = iⁿʸ (−1)^|i ∧ z| |i ⊕ x⟩.
+        dvec2 fj = parity(jp & z) == 1u ? -f : f;
+        dvec2 fjp = parity(j & z) == 1u ? -f : f;
+        store_amp(j, cs * a + cmul(fj, b));
+        store_amp(jp, cs * b + cmul(fjp, a));
+    }
+}

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a2c0bf9bc009cee5a7524ddd505086ea6aad65315dc23782d1ebac9f83a77ece # shrinks to circ = Circuit { n_qubits: 15, ops: [Unitary2 { matrix: [[Complex { re: -0.6615809768650951, im: 0.0 }, Complex { re: 0.2496209347194794, im: 0.0 }, Complex { re: -0.6615809768650951, im: 0.0 }, Complex { re: 0.2496209347194794, im: 0.0 }], [Complex { re: -0.2496209347194794, im: 0.0 }, Complex { re: -0.6615809768650951, im: 0.0 }, Complex { re: -0.2496209347194794, im: 0.0 }, Complex { re: -0.6615809768650951, im: 0.0 }], [Complex { re: -0.6615809768650951, im: 0.0 }, Complex { re: 0.2496209347194794, im: 0.0 }, Complex { re: 0.6615809768650951, im: 0.0 }, Complex { re: -0.2496209347194794, im: -0.0 }], [Complex { re: -0.2496209347194794, im: 0.0 }, Complex { re: -0.6615809768650951, im: 0.0 }, Complex { re: 0.2496209347194794, im: 0.0 }, Complex { re: 0.6615809768650951, im: 0.0 }]], qubits: [14, 6] }, PauliRotation { pauli: PauliString { ops: [(1, X), (4, X), (6, X), (7, X), (8, Y), (9, Z), (10, Y), (11, Y), (12, Z), (13, Z), (14, X)] }, theta: 6.8974270714577 }], global_phase: 0.0, n_parameters: 0, bindings: [], n_clbits: 0, instructions: [] }

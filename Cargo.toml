@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/ketrs", "crates/ketrs-py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+authors = ["Elliott Ashby"]
+repository = "https://github.com/Aethar01/ketrs"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Tests run numerical work (DMRG, large statevectors) that is very slow
+# unoptimised. Optimise test builds and all dependencies; debug assertions
+# and overflow checks stay on.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test]
+opt-level = 2

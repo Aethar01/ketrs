@@ -1,0 +1,214 @@
+//! Dense statevector simulation.
+//!
+//! Stores all `2ⁿ` amplitudes. [`Statevector`] uses complex amplitudes
+//! (16 bytes each, so 28 qubits needs 4 GiB); [`RealStatevector`] uses `f64`
+//! at half the memory and time for circuits whose gates are all real.
+
+pub(crate) mod eigen;
+pub(crate) mod evolve;
+mod gradient;
+pub(crate) mod hamiltonian;
+pub(crate) mod kernels;
+pub(crate) mod krylov;
+mod measure;
+mod shots;
+
+pub use eigen::{EigenOptions, Eigenstate};
+
+use crate::circuit::{Circuit, Operation};
+use crate::error::Error;
+use crate::scalar::Scalar;
+use kernels::Prepared;
+use num_complex::Complex64 as C64;
+use rayon::prelude::*;
+
+/// Circuits are partly fused (see [`Circuit::fused_where`]) before running
+/// on states at least this large. Below it the state fits in cache and the
+/// specialised kernels beat fused generic matrices.
+const FUSION_MIN_QUBITS: usize = 16;
+
+/// A pure state on `n` qubits, stored as `2ⁿ` amplitudes of type `T`.
+///
+/// Usually named through [`Statevector`] or [`RealStatevector`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct DenseState<T: Scalar> {
+    n_qubits: usize,
+    amps: Vec<T>,
+}
+
+/// A statevector with complex amplitudes; runs any circuit.
+pub type Statevector = DenseState<C64>;
+
+/// A statevector with real amplitudes. Runs circuits whose gates are all
+/// real (e.g. H, X, Z, Ry, CX, CZ, SWAP, Pauli rotations with an odd number
+/// of Y factors) at half the memory of [`Statevector`].
+pub type RealStatevector = DenseState<f64>;
+
+impl<T: Scalar> DenseState<T> {
+    /// The all-zero state `|0…0⟩`.
+    pub fn zero(n_qubits: usize) -> Self {
+        Self::basis(n_qubits, 0)
+    }
+
+    /// The computational basis state with the given index.
+    ///
+    /// # Panics
+    /// If `index >= 2^n_qubits`.
+    pub fn basis(n_qubits: usize, index: usize) -> Self {
+        let dim = 1usize << n_qubits;
+        assert!(
+            index < dim,
+            "basis index {index} out of range for {n_qubits} qubits"
+        );
+        let mut amps = vec![T::ZERO; dim];
+        amps[index] = T::ONE;
+        DenseState { n_qubits, amps }
+    }
+
+    /// Wrap existing amplitudes. The length must be a power of two; the
+    /// vector is not normalised.
+    pub fn from_amplitudes(amps: Vec<T>) -> Result<Self, Error> {
+        if !amps.len().is_power_of_two() {
+            return Err(Error::InvalidLength(amps.len()));
+        }
+        Ok(DenseState {
+            n_qubits: amps.len().trailing_zeros() as usize,
+            amps,
+        })
+    }
+
+    /// Run `circuit` on `|0…0⟩`. Fails with [`Error::NotReal`] if `T` can't
+    /// represent one of its operations.
+    pub fn try_from_circuit(circuit: &Circuit) -> Result<Self, Error> {
+        let mut state = Self::zero(circuit.n_qubits());
+        state.run(circuit)?;
+        Ok(state)
+    }
+
+    /// Number of qubits.
+    pub fn n_qubits(&self) -> usize {
+        self.n_qubits
+    }
+
+    /// The amplitudes, indexed by basis state.
+    pub fn amplitudes(&self) -> &[T] {
+        &self.amps
+    }
+
+    /// Take ownership of the amplitudes.
+    pub fn into_amplitudes(self) -> Vec<T> {
+        self.amps
+    }
+
+    /// Measurement probabilities `|ψᵢ|²` for each basis state.
+    pub fn probabilities(&self) -> Vec<f64> {
+        self.amps.iter().map(|a| a.norm_sqr()).collect()
+    }
+
+    /// The squared norm `⟨ψ|ψ⟩`.
+    pub fn norm_sqr(&self) -> f64 {
+        self.amps.iter().map(|a| a.norm_sqr()).sum()
+    }
+
+    /// The inner product `⟨self|other⟩`.
+    pub fn inner(&self, other: &Self) -> Result<T, Error> {
+        self.check_same_width(other)?;
+        Ok(hamiltonian::chunked_sum(self.amps.len(), |range| {
+            self.amps[range.clone()]
+                .iter()
+                .zip(&other.amps[range])
+                .map(|(a, b)| a.conj() * *b)
+                .sum::<T>()
+        }))
+    }
+
+    /// Apply one operation.
+    pub fn apply(&mut self, op: &Operation) -> Result<(), Error> {
+        op.validate(self.n_qubits)?;
+        Prepared::new(op)?.apply(&mut self.amps);
+        Ok(())
+    }
+
+    /// Apply every operation in `circuit`, which must have the same width.
+    /// Nothing is applied if an operation can't be represented in `T`.
+    pub fn run(&mut self, circuit: &Circuit) -> Result<(), Error> {
+        circuit.check_unitary()?;
+        if circuit.n_qubits() != self.n_qubits {
+            return Err(Error::QubitCountMismatch {
+                expected: self.n_qubits,
+                found: circuit.n_qubits(),
+            });
+        }
+        if circuit.n_parameters() > 0 {
+            return Err(Error::InvalidArgument(format!(
+                "circuit has {} unbound parameters; call bind first",
+                circuit.n_parameters()
+            )));
+        }
+        let phase = T::from_complex(C64::cis(circuit.global_phase())).ok_or_else(|| {
+            Error::NotReal(format!(
+                "global phase {} is not real",
+                circuit.global_phase()
+            ))
+        })?;
+        // Circuit operations are validated on insertion, so only the width
+        // needed checking.
+        let prepared = if self.n_qubits >= FUSION_MIN_QUBITS {
+            // Gates on low qubits are already cheap through cache blocking,
+            // so only fuse gates that need a full pass over memory.
+            let fused = circuit.fused_where(|op| op.max_qubit() >= kernels::CACHE_BLOCK_QUBITS);
+            prepare(fused.ops())?
+        } else {
+            prepare(circuit.ops())?
+        };
+        kernels::run(&mut self.amps, &prepared);
+        if phase != T::ONE {
+            self.amps.par_iter_mut().for_each(|a| *a *= phase);
+        }
+        Ok(())
+    }
+
+    fn check_qubit(&self, qubit: usize) -> Result<(), Error> {
+        if qubit >= self.n_qubits {
+            return Err(Error::QubitOutOfRange {
+                qubit,
+                n_qubits: self.n_qubits,
+            });
+        }
+        Ok(())
+    }
+
+    fn check_same_width(&self, other: &Self) -> Result<(), Error> {
+        if self.n_qubits != other.n_qubits {
+            return Err(Error::QubitCountMismatch {
+                expected: self.n_qubits,
+                found: other.n_qubits,
+            });
+        }
+        Ok(())
+    }
+}
+
+fn prepare<T: Scalar>(ops: &[Operation]) -> Result<Vec<Prepared<T>>, Error> {
+    ops.iter().map(Prepared::new).collect()
+}
+
+impl Statevector {
+    /// Run `circuit` on `|0…0⟩`.
+    ///
+    /// # Panics
+    /// If `circuit` has unbound parameters; use
+    /// [`try_from_circuit`](Self::try_from_circuit) to get an error instead.
+    /// Complex amplitudes represent every operation, so nothing else fails.
+    pub fn from_circuit(circuit: &Circuit) -> Self {
+        Self::try_from_circuit(circuit).unwrap_or_else(|e| panic!("{e}"))
+    }
+}
+
+impl RealStatevector {
+    /// Run `circuit` on `|0…0⟩`, or fail with [`Error::NotReal`] if it
+    /// contains a complex gate.
+    pub fn from_circuit(circuit: &Circuit) -> Result<Self, Error> {
+        Self::try_from_circuit(circuit)
+    }
+}

@@ -1,0 +1,27 @@
+[package]
+name = "ketrs-py"
+description = "Python bindings for ketrs"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_ketrs"
+crate-type = ["cdylib"]
+
+[dependencies]
+ketrs = { path = "../ketrs" }
+numpy = "0.30"
+pyo3 = { version = "0.30", features = ["num-complex"] }
+rand = "0.9"
+
+[features]
+# GPU statevectors (opt-in): `maturin develop --features gpu`. Needs glslc.
+gpu = ["ketrs/gpu"]
+
+[lints]
+workspace = true

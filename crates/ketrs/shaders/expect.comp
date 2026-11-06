@@ -1,0 +1,41 @@
+#version 450
+// ketrs-variants: CHUNKED = 0 1
+//
+// One group of Pauli terms sharing X-mask a, for ⟨ψ|H|ψ⟩: over its share of
+// basis states j, each workgroup sums conj(ψ_j) c(j ⊕ a) ψ_{j⊕a}, with
+// c(i) = Σₜ coeffₜ (−1)^|i ∧ zₜ|, and writes the sum to partial[c + group].
+// b = number of terms; at `offset`, each term is z (as a double) then its
+// coefficient including iⁿʸ (complex). units = number of amplitudes.
+#include "common.glsl"
+
+layout(std430, set = 0, binding = 2) writeonly buffer Out { dvec2 partial[]; };
+
+shared dvec2 sums[256];
+
+void main() {
+    uint x = pc.a, terms = pc.b;
+    dvec2 acc = dvec2(0.0);
+    FOR_EACH_UNIT(j) {
+        uint i = j ^ x;
+        dvec2 c = dvec2(0.0);
+        for (uint t = 0u; t < terms; t++) {
+            uint p = pc.offset + 3u * t;
+            dvec2 coeff = dvec2(params[p + 1u], params[p + 2u]);
+            c += parity(i & uint(params[p])) == 1u ? -coeff : coeff;
+        }
+        dvec2 psi = load_amp(j);
+        acc += cmul(dvec2(psi.x, -psi.y), cmul(c, load_amp(i)));
+    }
+    uint lane = gl_LocalInvocationID.x;
+    sums[lane] = acc;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (lane < s) {
+            sums[lane] += sums[lane + s];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        partial[pc.c + gl_WorkGroupID.x] = sums[0];
+    }
+}
