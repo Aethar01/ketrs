@@ -344,12 +344,13 @@ fn tdvp_is_exact_with_full_bonds() {
 
 #[test]
 fn tdvp_from_a_product_state_converges() {
-    // Bonds must grow from 1, which costs accuracy in the first steps;
-    // smaller steps shrink that error.
+    // Bonds must grow from 1. Subspace expansion lets long-range couplings
+    // act from the first step, so the error falls as for a second-order
+    // integrator (it was 1e-3, falling linearly, without it).
     let coarse = tdvp_error(8, 1.0, 10);
     let fine = tdvp_error(8, 1.0, 40);
-    assert!(fine < 5e-4, "{fine}");
-    assert!(fine < 0.5 * coarse, "{coarse} -> {fine}");
+    assert!(coarse < 1e-5, "{coarse}");
+    assert!(fine < coarse / 16.0, "{coarse} -> {fine}");
 }
 
 #[test]
