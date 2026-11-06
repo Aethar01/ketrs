@@ -21,14 +21,14 @@ use crate::circuit::{Circuit, Operation};
 use crate::error::Error;
 use crate::fusion::local_matrix;
 use crate::observable::{PauliMasks, PauliSum};
-use crate::scalar::Scalar;
+use crate::scalar::{ComplexScalar, Scalar};
 use crate::statevector::DenseState;
 use crate::statevector::eigen::{EigenOptions, Eigenstate, lowest_eigenvectors};
-use crate::statevector::evolve::krylov_evolve;
+use crate::statevector::evolve::{apply_phase, krylov_evolve};
 use crate::statevector::hamiltonian::{GroupedPauliSum, Imaginary, diagonal_entry};
 use crate::statevector::krylov::LinearOperator;
 use basis::SegmentStates;
-use num_complex::Complex64 as C64;
+use num_complex::{Complex32 as C32, Complex64 as C64};
 use rand::Rng;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
@@ -51,6 +51,12 @@ pub type SectorStatevector = SectorState<C64>;
 
 /// A real statevector within a sector.
 pub type RealSectorStatevector = SectorState<f64>;
+
+/// A complex statevector within a sector, in single precision.
+pub type SectorStatevector32 = SectorState<C32>;
+
+/// A real statevector within a sector, in single precision.
+pub type RealSectorStatevector32 = SectorState<f32>;
 
 impl<T: Scalar> SectorState<T> {
     /// The computational basis state `state` (a full `n`-qubit index), which
@@ -255,7 +261,7 @@ impl<T: Scalar> SectorState<T> {
     }
 }
 
-impl SectorStatevector {
+impl<T: ComplexScalar> SectorState<T> {
     /// Evolve by `exp(-iHt)` within the sector, which `H` must conserve.
     /// See [`Statevector::evolve`](crate::Statevector::evolve).
     pub fn evolve(&mut self, hamiltonian: &PauliSum, time: f64) -> Result<(), Error> {
@@ -269,13 +275,10 @@ impl SectorStatevector {
             }
         }
         if !rest.terms().is_empty() {
-            let op = SectorPauliSum::<C64>::new(&self.basis, &rest, Imaginary::Reject, true, true)?;
+            let op = SectorPauliSum::<T>::new(&self.basis, &rest, Imaginary::Reject, true, true)?;
             krylov_evolve(&op, &mut self.amps, time, true)?;
         }
-        if shift != 0.0 {
-            let phase = C64::cis(-shift * time);
-            self.amps.par_iter_mut().for_each(|a| *a *= phase);
-        }
+        apply_phase(&mut self.amps, shift * time);
         Ok(())
     }
 }

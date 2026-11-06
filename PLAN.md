@@ -82,7 +82,10 @@ Added along the way (from the Schwinger project's optimisations):
   expectation values; exact `exp(-iHt)` by Krylov time-stepping; lowest
   eigenstates by Lanczos with deflation (two-pass, memory-light).
 - **Generic engine**: `DenseState<T: Scalar>`, with `Statevector` (complex)
-  and `RealStatevector` (f64, half the memory) sharing every kernel.
+  and `RealStatevector` (f64, half the memory) sharing every kernel, and
+  single-precision `Statevector32`/`RealStatevector32` (and sector
+  equivalents): everything but MPS and the GPU, with tolerances scaled to
+  the precision. Python takes `dtype="complex64"` or `"float32"`.
 - **Parameters and adjoint gradients**: linear parameter forms, `bind`,
   `adjoint_gradient` for any loss given its cotangent, `expectation_gradient`.
   The backward sweep fuses the gates between parameters and runs gates and
@@ -109,7 +112,6 @@ Added along the way (from the Schwinger project's optimisations):
 
 ## Later
 
-- Single precision (`f32`/`Complex32`) behind the same `Scalar` trait.
 - MPS: apply gates on disjoint bonds in parallel (single-threaded now; still
   1.5–2.5× faster than Aer's MPS). TDVP for long-range real-time dynamics
   (TEBD routes long-range gates with swaps).

@@ -3,24 +3,88 @@
 //! The Python-facing API mirrors the Rust one; `python/ketrs` re-exports it.
 
 use ketrs::gate::{Matrix2, Matrix4};
+/// Run `$body` with `$s` bound to the state of whatever dtype `$state`
+/// holds, for a dtype enum `$kind` (`State` or the sector `Kind`).
+macro_rules! dispatch {
+    ($kind:ident, $state:expr, $s:ident => $body:expr) => {
+        match $state {
+            $kind::Complex($s) => $body,
+            $kind::Real($s) => $body,
+            $kind::Complex32($s) => $body,
+            $kind::Real32($s) => $body,
+        }
+    };
+}
+
+/// Like `dispatch!`, wrapping the result in the same dtype of enum `$to`.
+macro_rules! convert {
+    ($from:ident => $to:ident, $state:expr, $s:ident => $body:expr) => {
+        match $state {
+            $from::Complex($s) => $to::Complex($body),
+            $from::Real($s) => $to::Real($body),
+            $from::Complex32($s) => $to::Complex32($body),
+            $from::Real32($s) => $to::Real32($body),
+        }
+    };
+}
+
+/// Run `$body` on two states of the same dtype, or fail.
+macro_rules! same_dtype {
+    ($kind:ident, $a:expr, $b:expr, ($x:ident, $y:ident) => $body:expr) => {
+        match ($a, $b) {
+            ($kind::Complex($x), $kind::Complex($y)) => $body,
+            ($kind::Real($x), $kind::Real($y)) => $body,
+            ($kind::Complex32($x), $kind::Complex32($y)) => $body,
+            ($kind::Real32($x), $kind::Real32($y)) => $body,
+            _ => return Err(PyValueError::new_err("states have different dtypes")),
+        }
+    };
+}
+
+/// Build a `$kind` of `dtype`, evaluating `$body` with `$t` naming the
+/// amplitude type.
+macro_rules! by_dtype {
+    ($kind:ident, $dtype:expr, $t:ident => $body:expr) => {
+        match $dtype {
+            DType::Complex => {
+                type $t = ketrs::Complex64;
+                $kind::Complex($body)
+            }
+            DType::Real => {
+                type $t = f64;
+                $kind::Real($body)
+            }
+            DType::Complex32 => {
+                type $t = ketrs::Complex32;
+                $kind::Complex32($body)
+            }
+            DType::Real32 => {
+                type $t = f32;
+                $kind::Real32($body)
+            }
+        }
+    };
+}
+
 #[cfg(feature = "gpu")]
 mod gpu;
 mod mps;
 mod sector;
 
+use ketrs::SectorState;
 use ketrs::statevector::EigenOptions;
 use ketrs::{Angle, Condition, Instruction, Parameter};
 use ketrs::{
-    Circuit, Complex64 as C64, Error, Gate, Operation, Pauli, PauliString, PauliSum,
-    RealStatevector, Statevector,
+    Circuit, Complex32, Complex64 as C64, DenseState, Error, Gate, Operation, Pauli, PauliString,
+    PauliSum, RealStatevector, RealStatevector32, Scalar, Statevector, Statevector32,
 };
-use ketrs::{RealSectorStatevector, SectorStatevector};
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use sector::Kind as SectorKind;
 use sector::{PySectorBasis, PySectorStatevector};
 
 fn to_py_err(e: Error) -> PyErr {
@@ -687,22 +751,16 @@ fn rng_from_seed(seed: Option<u64>) -> StdRng {
 enum State {
     Complex(Statevector),
     Real(RealStatevector),
-}
-
-/// Run `$body` with `$s` bound to whichever statevector `$state` holds.
-macro_rules! dispatch {
-    ($state:expr, $s:ident => $body:expr) => {
-        match $state {
-            State::Complex($s) => $body,
-            State::Real($s) => $body,
-        }
-    };
+    Complex32(Statevector32),
+    Real32(RealStatevector32),
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum DType {
     Complex,
     Real,
+    Complex32,
+    Real32,
 }
 
 impl DType {
@@ -710,9 +768,32 @@ impl DType {
         match name {
             "complex" | "complex128" => Ok(DType::Complex),
             "real" | "float64" => Ok(DType::Real),
+            "complex64" => Ok(DType::Complex32),
+            "float32" => Ok(DType::Real32),
             _ => Err(PyValueError::new_err(format!(
-                "dtype must be 'complex' or 'real', got {name:?}"
+                "dtype must be 'complex', 'real', 'complex64' or 'float32', got {name:?}"
             ))),
+        }
+    }
+
+    /// The numpy name of each dtype.
+    fn name(self) -> &'static str {
+        match self {
+            DType::Complex => "complex128",
+            DType::Real => "float64",
+            DType::Complex32 => "complex64",
+            DType::Real32 => "float32",
+        }
+    }
+}
+
+impl State {
+    fn dtype(&self) -> DType {
+        match self {
+            State::Complex(_) => DType::Complex,
+            State::Real(_) => DType::Real,
+            State::Complex32(_) => DType::Complex32,
+            State::Real32(_) => DType::Real32,
         }
     }
 }
@@ -722,6 +803,8 @@ impl DType {
 enum Amplitudes<'py> {
     Complex(PyReadonlyArray1<'py, C64>),
     Real(PyReadonlyArray1<'py, f64>),
+    Complex32(PyReadonlyArray1<'py, Complex32>),
+    Real32(PyReadonlyArray1<'py, f32>),
 }
 
 /// A pure state on `n` qubits. Qubit 0 is the least significant bit of a
@@ -730,6 +813,8 @@ enum Amplitudes<'py> {
 /// `dtype="complex"` (the default) runs any circuit. `dtype="real"` stores
 /// real amplitudes at half the memory and runs circuits whose gates are all
 /// real (H, X, Z, Ry, CX, CZ, SWAP, …); complex gates raise `ValueError`.
+/// `"complex64"` and `"float32"` are the same in single precision: half the
+/// memory again, with errors of about 1e-6 instead of 1e-15.
 ///
 /// Sampling and measurement draw from a random generator owned by the state;
 /// pass `seed` for reproducible results.
@@ -751,10 +836,7 @@ impl PyStatevector {
     #[new]
     #[pyo3(signature = (n_qubits, seed=None, dtype="complex"))]
     fn new(n_qubits: usize, seed: Option<u64>, dtype: &str) -> PyResult<Self> {
-        let state = match DType::parse(dtype)? {
-            DType::Complex => State::Complex(Statevector::zero(n_qubits)),
-            DType::Real => State::Real(RealStatevector::zero(n_qubits)),
-        };
+        let state = by_dtype!(State, DType::parse(dtype)?, T => DenseState::<T>::zero(n_qubits));
         Ok(Self::wrap(state, rng_from_seed(seed)))
     }
 
@@ -768,21 +850,14 @@ impl PyStatevector {
         dtype: &str,
     ) -> PyResult<Self> {
         let circ = &circuit.inner;
-        let state = match DType::parse(dtype)? {
-            DType::Complex => State::Complex(
-                py.detach(|| Statevector::try_from_circuit(circ))
-                    .map_err(to_py_err)?,
-            ),
-            DType::Real => State::Real(
-                py.detach(|| RealStatevector::from_circuit(circ))
-                    .map_err(to_py_err)?,
-            ),
-        };
+        let state = by_dtype!(State, DType::parse(dtype)?, T => py
+            .detach(|| DenseState::<T>::try_from_circuit(circ))
+            .map_err(to_py_err)?);
         Ok(Self::wrap(state, rng_from_seed(seed)))
     }
 
-    /// Wrap a 1-D array whose length is a power of two. A float64 array
-    /// gives a real statevector, a complex128 array a complex one.
+    /// Wrap a 1-D array whose length is a power of two. The array's dtype
+    /// (complex128, float64, complex64 or float32) sets the state's.
     #[staticmethod]
     #[pyo3(signature = (amplitudes, seed=None))]
     fn from_amplitudes(amplitudes: Amplitudes<'_>, seed: Option<u64>) -> PyResult<Self> {
@@ -793,22 +868,25 @@ impl PyStatevector {
             Amplitudes::Real(a) => State::Real(
                 RealStatevector::from_amplitudes(a.as_array().to_vec()).map_err(to_py_err)?,
             ),
+            Amplitudes::Complex32(a) => State::Complex32(
+                Statevector32::from_amplitudes(a.as_array().to_vec()).map_err(to_py_err)?,
+            ),
+            Amplitudes::Real32(a) => State::Real32(
+                RealStatevector32::from_amplitudes(a.as_array().to_vec()).map_err(to_py_err)?,
+            ),
         };
         Ok(Self::wrap(state, rng_from_seed(seed)))
     }
 
     #[getter]
     fn n_qubits(&self) -> usize {
-        dispatch!(&self.state, s => s.n_qubits())
+        dispatch!(State, &self.state, s => s.n_qubits())
     }
 
-    /// `"complex128"` or `"float64"`.
+    /// `"complex128"`, `"float64"`, `"complex64"` or `"float32"`.
     #[getter]
     fn dtype(&self) -> &'static str {
-        match self.state {
-            State::Complex(_) => "complex128",
-            State::Real(_) => "float64",
-        }
+        self.state.dtype().name()
     }
 
     fn __repr__(&self) -> String {
@@ -830,12 +908,13 @@ impl PyStatevector {
     ) -> PyResult<Option<Vec<usize>>> {
         let circ = &circuit.inner;
         if circ.is_unitary() {
-            dispatch!(&mut self.state, s => py.detach(|| s.run(circ))).map_err(to_py_err)?;
+            dispatch!(State, &mut self.state, s => py.detach(|| s.run(circ))).map_err(to_py_err)?;
             return Ok(None);
         }
         let rng = &mut self.rng;
-        let bits = dispatch!(&mut self.state, s => py.detach(|| s.run_trajectory(circ, rng)))
-            .map_err(to_py_err)?;
+        let bits =
+            dispatch!(State, &mut self.state, s => py.detach(|| s.run_trajectory(circ, rng)))
+                .map_err(to_py_err)?;
         Ok(Some(bits.into_iter().map(usize::from).collect()))
     }
 
@@ -851,8 +930,9 @@ impl PyStatevector {
         let circ = &circuit.inner;
         let n = circ.n_clbits();
         let rng = &mut self.rng;
-        let counts = dispatch!(&self.state, s => py.detach(|| s.sample_circuit(circ, shots, rng)))
-            .map_err(to_py_err)?;
+        let counts =
+            dispatch!(State, &self.state, s => py.detach(|| s.sample_circuit(circ, shots, rng)))
+                .map_err(to_py_err)?;
         let dict = PyDict::new(py);
         for (bits, count) in counts {
             dict.set_item(format!("{bits:0n$b}"), count)?;
@@ -860,45 +940,36 @@ impl PyStatevector {
         Ok(dict)
     }
 
-    /// A copy of the amplitudes as a complex128 or float64 array.
+    /// A copy of the amplitudes, as an array of the state's dtype.
     fn amplitudes<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
-        dispatch!(&self.state, s => PyArray1::from_slice(py, s.amplitudes()).into_any())
+        dispatch!(State, &self.state, s => PyArray1::from_slice(py, s.amplitudes()).into_any())
     }
 
     /// Measurement probability of each basis state.
     fn probabilities<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        PyArray1::from_vec(py, dispatch!(&self.state, s => s.probabilities()))
+        PyArray1::from_vec(py, dispatch!(State, &self.state, s => s.probabilities()))
     }
 
     /// `⟨self|other⟩`. Both states must have the same dtype.
     fn inner(&self, other: PyRef<'_, PyStatevector>) -> PyResult<C64> {
-        match (&self.state, &other.state) {
-            (State::Complex(a), State::Complex(b)) => a.inner(b).map_err(to_py_err),
-            (State::Real(a), State::Real(b)) => {
-                a.inner(b).map(|x| C64::new(x, 0.0)).map_err(to_py_err)
-            }
-            _ => Err(PyValueError::new_err("states have different dtypes")),
-        }
+        same_dtype!(State, &self.state, &other.state, (a, b) => {
+            a.inner(b).map(Scalar::to_complex).map_err(to_py_err)
+        })
     }
 
     /// `⟨ψ|H|ψ⟩`. Accepts a `PauliSum`, a single label such as `"ZZ"`, or a
     /// list of `(label, coefficient)` pairs.
     fn expectation(&self, py: Python<'_>, observable: Observable) -> PyResult<f64> {
         let sum = observable.into_sum()?;
-        dispatch!(&self.state, s => py.detach(|| s.expectation(&sum))).map_err(to_py_err)
+        dispatch!(State, &self.state, s => py.detach(|| s.expectation(&sum))).map_err(to_py_err)
     }
 
     /// `H|ψ⟩` as a new, generally unnormalised, statevector.
     fn apply_pauli_sum(&self, py: Python<'_>, hamiltonian: Observable) -> PyResult<Self> {
         let sum = hamiltonian.into_sum()?;
-        let state = match &self.state {
-            State::Complex(s) => {
-                State::Complex(py.detach(|| s.apply_pauli_sum(&sum)).map_err(to_py_err)?)
-            }
-            State::Real(s) => {
-                State::Real(py.detach(|| s.apply_pauli_sum(&sum)).map_err(to_py_err)?)
-            }
-        };
+        let state = convert!(State => State, &self.state, s => {
+            py.detach(|| s.apply_pauli_sum(&sum)).map_err(to_py_err)?
+        });
         Ok(Self::wrap(state, self.rng.clone()))
     }
 
@@ -908,8 +979,9 @@ impl PyStatevector {
         let sum = hamiltonian.into_sum()?;
         match &mut self.state {
             State::Complex(s) => py.detach(|| s.evolve(&sum, time)).map_err(to_py_err),
-            State::Real(_) => Err(PyValueError::new_err(
-                "exp(-iHt) is complex; evolve needs dtype='complex'",
+            State::Complex32(s) => py.detach(|| s.evolve(&sum, time)).map_err(to_py_err),
+            State::Real(_) | State::Real32(_) => Err(PyValueError::new_err(
+                "exp(-iHt) is complex; evolve needs dtype='complex' or 'complex64'",
             )),
         }
     }
@@ -926,7 +998,7 @@ impl PyStatevector {
     ) -> PyResult<(f64, Bound<'py, PyArray1<f64>>)> {
         let sum = observable.into_sum()?;
         let circ = &circuit.inner;
-        let (value, gradient) = dispatch!(&self.state, s => py.detach(|| s.expectation_gradient(circ, &parameters, &sum)))
+        let (value, gradient) = dispatch!(State, &self.state, s => py.detach(|| s.expectation_gradient(circ, &parameters, &sum)))
             .map_err(to_py_err)?;
         Ok((value, PyArray1::from_vec(py, gradient)))
     }
@@ -944,28 +1016,22 @@ impl PyStatevector {
         cotangent: PyRef<'_, PyStatevector>,
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let circ = &circuit.inner;
-        let gradient = match (&final_state.state, &cotangent.state) {
-            (State::Complex(f), State::Complex(c)) => {
-                py.detach(|| Statevector::adjoint_gradient(circ, &parameters, f, c))
-            }
-            (State::Real(f), State::Real(c)) => {
-                py.detach(|| RealStatevector::adjoint_gradient(circ, &parameters, f, c))
-            }
-            _ => return Err(PyValueError::new_err("states have different dtypes")),
-        }
+        let gradient = same_dtype!(State, &final_state.state, &cotangent.state, (f, c) => {
+            py.detach(|| DenseState::adjoint_gradient(circ, &parameters, f, c))
+        })
         .map_err(to_py_err)?;
         Ok(PyArray1::from_vec(py, gradient))
     }
 
     /// Probability that measuring `qubit` gives 1.
     fn probability_one(&self, qubit: usize) -> PyResult<f64> {
-        dispatch!(&self.state, s => s.probability_one(qubit)).map_err(to_py_err)
+        dispatch!(State, &self.state, s => s.probability_one(qubit)).map_err(to_py_err)
     }
 
     /// Draw `shots` basis-state indices without changing the state.
     fn sample<'py>(&mut self, py: Python<'py>, shots: usize) -> Bound<'py, PyArray1<usize>> {
         let rng = &mut self.rng;
-        PyArray1::from_vec(py, dispatch!(&self.state, s => s.sample(shots, rng)))
+        PyArray1::from_vec(py, dispatch!(State, &self.state, s => s.sample(shots, rng)))
     }
 
     /// Counts keyed by bitstring, most significant qubit first (Qiskit style).
@@ -976,7 +1042,7 @@ impl PyStatevector {
     ) -> PyResult<Bound<'py, PyDict>> {
         let n = self.n_qubits();
         let rng = &mut self.rng;
-        let counts = dispatch!(&self.state, s => s.sample_counts(shots, rng));
+        let counts = dispatch!(State, &self.state, s => s.sample_counts(shots, rng));
         let dict = PyDict::new(py);
         for (index, count) in counts {
             dict.set_item(format!("{index:0n$b}"), count)?;
@@ -987,20 +1053,21 @@ impl PyStatevector {
     /// Measure `qubit`, collapsing the state. Returns 0 or 1.
     fn measure(&mut self, qubit: usize) -> PyResult<u8> {
         let rng = &mut self.rng;
-        let one = dispatch!(&mut self.state, s => s.measure(qubit, rng)).map_err(to_py_err)?;
+        let one =
+            dispatch!(State, &mut self.state, s => s.measure(qubit, rng)).map_err(to_py_err)?;
         Ok(one as u8)
     }
 
     /// Measure every qubit, collapsing to a basis state. Returns its index.
     fn measure_all(&mut self) -> usize {
         let rng = &mut self.rng;
-        dispatch!(&mut self.state, s => s.measure_all(rng))
+        dispatch!(State, &mut self.state, s => s.measure_all(rng))
     }
 
     /// Measure `qubit` and flip it to `|0⟩` if the outcome was 1.
     fn reset(&mut self, qubit: usize) -> PyResult<()> {
         let rng = &mut self.rng;
-        dispatch!(&mut self.state, s => s.reset(qubit, rng)).map_err(to_py_err)
+        dispatch!(State, &mut self.state, s => s.reset(qubit, rng)).map_err(to_py_err)
     }
 }
 
@@ -1059,20 +1126,10 @@ fn lowest_eigenstates(
                 "sector has a different number of qubits",
             ));
         }
-        let found: Vec<(f64, f64, PySectorStatevector)> = match DType::parse(dtype)? {
-            DType::Complex => py
-                .detach(|| SectorStatevector::lowest_eigenstates(basis, &sum, k, &options))
-                .map_err(to_py_err)?
-                .into_iter()
-                .map(|e| (e.energy, e.residual, PySectorStatevector::complex(e.state)))
-                .collect(),
-            DType::Real => py
-                .detach(|| RealSectorStatevector::lowest_eigenstates(basis, &sum, k, &options))
-                .map_err(to_py_err)?
-                .into_iter()
-                .map(|e| (e.energy, e.residual, PySectorStatevector::real(e.state)))
-                .collect(),
-        };
+        let found = by_dtype!(SectorKind, DType::parse(dtype)?, T => py
+            .detach(|| SectorState::<T>::lowest_eigenstates(basis, &sum, k, &options))
+            .map_err(to_py_err)?);
+        let found: Vec<(f64, f64, PySectorStatevector)> = sector::eigenstates(found);
         return found
             .into_iter()
             .map(|(energy, residual, state)| {
@@ -1084,19 +1141,11 @@ fn lowest_eigenstates(
             })
             .collect();
     }
-    let found: Vec<(f64, f64, State)> = match DType::parse(dtype)? {
-        DType::Complex => py
-            .detach(|| Statevector::lowest_eigenstates(&sum, n_qubits, k, &options))
-            .map_err(to_py_err)?
-            .into_iter()
-            .map(|e| (e.energy, e.residual, State::Complex(e.state)))
-            .collect(),
-        DType::Real => py
-            .detach(|| RealStatevector::lowest_eigenstates(&sum, n_qubits, k, &options))
-            .map_err(to_py_err)?
-            .into_iter()
-            .map(|e| (e.energy, e.residual, State::Real(e.state)))
-            .collect(),
+    let found = match DType::parse(dtype)? {
+        DType::Complex => eigenstates(py, &sum, n_qubits, k, &options, State::Complex)?,
+        DType::Real => eigenstates(py, &sum, n_qubits, k, &options, State::Real)?,
+        DType::Complex32 => eigenstates(py, &sum, n_qubits, k, &options, State::Complex32)?,
+        DType::Real32 => eigenstates(py, &sum, n_qubits, k, &options, State::Real32)?,
     };
     found
         .into_iter()
@@ -1108,6 +1157,23 @@ fn lowest_eigenstates(
             })
         })
         .collect()
+}
+
+/// `DenseState::<T>::lowest_eigenstates`, each state wrapped by `wrap`.
+fn eigenstates<T: Scalar>(
+    py: Python<'_>,
+    sum: &PauliSum,
+    n_qubits: usize,
+    k: usize,
+    options: &EigenOptions,
+    wrap: fn(DenseState<T>) -> State,
+) -> PyResult<Vec<(f64, f64, State)>> {
+    Ok(py
+        .detach(|| DenseState::<T>::lowest_eigenstates(sum, n_qubits, k, options))
+        .map_err(to_py_err)?
+        .into_iter()
+        .map(|e| (e.energy, e.residual, wrap(e.state)))
+        .collect())
 }
 
 /// The name of the GPU ketrs would use, or None: this build has no GPU

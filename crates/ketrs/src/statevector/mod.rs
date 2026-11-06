@@ -44,6 +44,14 @@ pub type Statevector = DenseState<C64>;
 /// of Y factors) at half the memory of [`Statevector`].
 pub type RealStatevector = DenseState<f64>;
 
+/// [`Statevector`] in single precision: half the memory, and errors of
+/// about `1e-6` instead of `1e-15`.
+pub type Statevector32 = DenseState<num_complex::Complex32>;
+
+/// [`RealStatevector`] in single precision: a quarter of the memory of
+/// [`Statevector`].
+pub type RealStatevector32 = DenseState<f32>;
+
 impl<T: Scalar> DenseState<T> {
     /// The all-zero state `|0…0⟩`.
     pub fn zero(n_qubits: usize) -> Self {
@@ -193,22 +201,29 @@ fn prepare<T: Scalar>(ops: &[Operation]) -> Result<Vec<Prepared<T>>, Error> {
     ops.iter().map(Prepared::new).collect()
 }
 
-impl Statevector {
-    /// Run `circuit` on `|0…0⟩`.
-    ///
-    /// # Panics
-    /// If `circuit` has unbound parameters; use
-    /// [`try_from_circuit`](Self::try_from_circuit) to get an error instead.
-    /// Complex amplitudes represent every operation, so nothing else fails.
-    pub fn from_circuit(circuit: &Circuit) -> Self {
-        Self::try_from_circuit(circuit).unwrap_or_else(|e| panic!("{e}"))
-    }
+/// Infallible and fallible `from_circuit` for the complex and real types.
+macro_rules! from_circuit {
+    (complex: $($t:ty),*; real: $($r:ty),*) => {
+        $(impl DenseState<$t> {
+            /// Run `circuit` on `|0…0⟩`.
+            ///
+            /// # Panics
+            /// If `circuit` has unbound parameters; use
+            /// [`try_from_circuit`](Self::try_from_circuit) to get an error
+            /// instead. Complex amplitudes represent every operation, so
+            /// nothing else fails.
+            pub fn from_circuit(circuit: &Circuit) -> Self {
+                Self::try_from_circuit(circuit).unwrap_or_else(|e| panic!("{e}"))
+            }
+        })*
+        $(impl DenseState<$r> {
+            /// Run `circuit` on `|0…0⟩`, or fail with [`Error::NotReal`] if
+            /// it contains a complex gate.
+            pub fn from_circuit(circuit: &Circuit) -> Result<Self, Error> {
+                Self::try_from_circuit(circuit)
+            }
+        })*
+    };
 }
 
-impl RealStatevector {
-    /// Run `circuit` on `|0…0⟩`, or fail with [`Error::NotReal`] if it
-    /// contains a complex gate.
-    pub fn from_circuit(circuit: &Circuit) -> Result<Self, Error> {
-        Self::try_from_circuit(circuit)
-    }
-}
+from_circuit!(complex: C64, num_complex::Complex32; real: f64, f32);

@@ -9,24 +9,27 @@
 //! replaying the deterministic recurrence, trading extra `H|ψ⟩` products
 //! for memory.
 
-use super::Statevector;
+use super::DenseState;
 use super::hamiltonian::{CompiledPauliSum, Imaginary};
 use super::krylov::{LinearOperator, axpy, breakdown, norm, recurrence, scale};
 use crate::error::Error;
 use crate::observable::PauliSum;
+use crate::scalar::ComplexScalar;
 use num_complex::Complex64 as C64;
 use rayon::prelude::*;
 use std::ops::ControlFlow;
 
 /// Lanczos vectors per step.
 const KRYLOV_DIM: usize = 40;
-/// Allowed error per step, relative to `‖ψ‖`.
+/// Allowed error per step, relative to `‖ψ‖`, in double precision; single
+/// precision allows a few times its epsilon instead.
 const STEP_TOLERANCE: f64 = 1e-13;
 /// Keep the Krylov basis when it fits in this many bytes; otherwise replay.
 const BASIS_MEMORY: usize = 2 << 30;
 
-impl Statevector {
-    /// Evolve by `exp(-iHt)`, to about 1e-13 per step, without forming the
+impl<T: ComplexScalar> DenseState<T> {
+    /// Evolve by `exp(-iHt)`, to about 1e-13 per step (1e-6 in single
+    /// precision), without forming the
     /// matrix exponential.
     ///
     /// Uses Lanczos time-stepping with adaptive steps (see the module
@@ -34,7 +37,7 @@ impl Statevector {
     /// width of `H`. Identity terms only contribute a phase and are applied
     /// separately.
     pub fn evolve(&mut self, hamiltonian: &PauliSum, time: f64) -> Result<(), Error> {
-        let store = (KRYLOV_DIM + 3) * self.amps.len() * size_of::<C64>() <= BASIS_MEMORY;
+        let store = (KRYLOV_DIM + 3) * self.amps.len() * size_of::<T>() <= BASIS_MEMORY;
         self.evolve_krylov(hamiltonian, time, store)
     }
 
@@ -55,33 +58,32 @@ impl Statevector {
                 rest.add(*c, s.clone());
             }
         }
-        let op = CompiledPauliSum::<C64>::new(&rest, self.n_qubits, Imaginary::Reject, true)?;
+        let op = CompiledPauliSum::<T>::new(&rest, self.n_qubits, Imaginary::Reject, true)?;
         if !rest.terms().is_empty() {
             krylov_evolve(&op, &mut self.amps, time, store)?;
         }
-        if shift != 0.0 {
-            let phase = C64::cis(-shift * time);
-            self.amps.par_iter_mut().for_each(|a| *a *= phase);
-        }
+        apply_phase(&mut self.amps, shift * time);
         Ok(())
     }
 }
 
 /// `amps ← exp(-iAt) amps` for a Hermitian operator `A`, by Lanczos
 /// time-stepping; `store` keeps each Krylov basis instead of replaying it.
-pub(crate) fn krylov_evolve(
-    op: &impl LinearOperator<C64>,
-    amps: &mut [C64],
+pub(crate) fn krylov_evolve<T: ComplexScalar>(
+    op: &impl LinearOperator<T>,
+    amps: &mut [T],
     time: f64,
     store: bool,
 ) -> Result<(), Error> {
+    let tolerance = STEP_TOLERANCE.max(10.0 * T::EPSILON);
+    let complex = |c: C64| T::from_complex(c).expect("complex scalar");
     let mut remaining = time;
     while remaining != 0.0 {
         let beta0 = norm(amps);
         if beta0 == 0.0 {
             break;
         }
-        let inv = C64::new(1.0 / beta0, 0.0);
+        let inv = T::from_real(1.0 / beta0);
         let mut v0 = amps.to_vec();
         scale(&mut v0, inv);
 
@@ -107,7 +109,7 @@ pub(crate) fn krylov_evolve(
         let mut dt = remaining;
         let y = loop {
             let y = tridiagonal_exp(&alphas, &betas[..m - 1], dt);
-            if residual * y[m - 1].norm() <= STEP_TOLERANCE {
+            if residual * y[m - 1].norm() <= tolerance {
                 break y;
             }
             dt /= 2.0;
@@ -119,9 +121,9 @@ pub(crate) fn krylov_evolve(
         };
 
         // ψ ← ‖ψ‖ Σₖ yₖ vₖ.
-        scale(amps, C64::new(0.0, 0.0));
-        let accumulate = |amps: &mut [C64], k: usize, v: &[C64]| {
-            let c = y[k] * beta0;
+        scale(amps, T::ZERO);
+        let accumulate = |amps: &mut [T], k: usize, v: &[T]| {
+            let c = complex(y[k] * beta0);
             axpy(amps, c, v);
         };
         if store {
@@ -141,6 +143,14 @@ pub(crate) fn krylov_evolve(
         remaining = if dt == remaining { 0.0 } else { remaining - dt };
     }
     Ok(())
+}
+
+/// `amps ← e^{-iφ} amps`.
+pub(crate) fn apply_phase<T: ComplexScalar>(amps: &mut [T], phi: f64) {
+    if phi != 0.0 {
+        let phase = T::from_complex(C64::cis(-phi)).expect("complex scalar");
+        amps.par_iter_mut().for_each(|a| *a *= phase);
+    }
 }
 
 /// `exp(-iTt) e₁` for the symmetric tridiagonal `T` with diagonal `a` and
@@ -188,7 +198,7 @@ fn tridiagonal_exp(a: &[f64], b: &[f64], t: f64) -> Vec<C64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Circuit;
+    use crate::{Circuit, Statevector};
 
     #[test]
     fn replaying_the_basis_matches_storing_it() {

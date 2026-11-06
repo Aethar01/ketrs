@@ -151,15 +151,50 @@ def test_apply_pauli_sum_matches_matrix():
     np.testing.assert_allclose(got.amplitudes(), ISING.to_matrix() @ psi0, atol=1e-12)
 
 
-@pytest.mark.parametrize("dtype", ["complex", "real"])
+NUMPY_DTYPE = {"complex": "complex128", "real": "float64", "complex64": "complex64", "float32": "float32"}
+
+
+@pytest.mark.parametrize("dtype", ["complex", "real", "complex64", "float32"])
 def test_lowest_eigenstates_match_numpy(dtype):
     real_ising = SparsePauliOp.from_list([(l, c) for l, c in ISING.to_list() if l != "YYII"])
     h = pauli_sum_from_qiskit(real_ising)
     want = np.linalg.eigvalsh(real_ising.to_matrix().real)[:4]
     found = ketrs.lowest_eigenstates(h, 4, k=4, dtype=dtype)
-    np.testing.assert_allclose([e.energy for e in found], want, atol=1e-8)
-    assert found[0].state.dtype == ("float64" if dtype == "real" else "complex128")
-    assert max(e.residual for e in found) < 1e-7
+    single = dtype in ("complex64", "float32")
+    np.testing.assert_allclose([e.energy for e in found], want, atol=1e-4 if single else 1e-8)
+    assert found[0].state.dtype == NUMPY_DTYPE[dtype]
+    assert max(e.residual for e in found) < (1e-3 if single else 1e-7)
+
+
+def test_single_precision():
+    circ = from_qiskit(efficient_su2(6, reps=2))
+    x = np.random.default_rng(5).uniform(-2, 2, circ.n_parameters)
+    bound = circ.bind(x)
+    double = ketrs.Statevector.from_circuit(bound)
+    single = ketrs.Statevector.from_circuit(bound, dtype="complex64")
+    assert single.dtype == "complex64"
+    assert single.amplitudes().dtype == np.complex64
+    np.testing.assert_allclose(single.amplitudes(), double.amplitudes(), atol=1e-5)
+
+    h = pauli_sum_from_qiskit(ISING.tensor(SparsePauliOp("II")))
+    value, grad = ketrs.Statevector(6, dtype="complex64").expectation_gradient(circ, x, h)
+    want_value, want_grad = ketrs.Statevector(6).expectation_gradient(circ, x, h)
+    assert value == pytest.approx(want_value, abs=1e-4)
+    np.testing.assert_allclose(grad, want_grad, atol=1e-4)
+
+    evolved = ketrs.Statevector.from_amplitudes(double.amplitudes().astype(np.complex64))
+    evolved.evolve(h, 1.0)
+    want = ketrs.Statevector.from_amplitudes(double.amplitudes())
+    want.evolve(h, 1.0)
+    np.testing.assert_allclose(evolved.amplitudes(), want.amplitudes(), atol=1e-4)
+
+    real = ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1), dtype="float32")
+    assert real.amplitudes().dtype == np.float32
+    assert real.inner(real) == pytest.approx(1.0, abs=1e-6)
+    with pytest.raises(ValueError, match="complex"):
+        real.evolve("ZZ", 1.0)
+    with pytest.raises(ValueError, match="different dtypes"):
+        single.inner(double)
 
 
 def test_real_statevector():
@@ -297,6 +332,21 @@ def test_sector_evolution_and_eigenstates_match_full():
     found = ketrs.lowest_eigenstates(h, n, k=2, dtype="real", sector=basis)
     assert isinstance(found[0].state, ketrs.SectorStatevector)
     np.testing.assert_allclose([e.energy for e in found], want, atol=1e-8)
+
+    # Single precision, within its accuracy.
+    found = ketrs.lowest_eigenstates(h, n, k=2, dtype="float32", sector=basis)
+    assert found[0].state.dtype == "float32"
+    np.testing.assert_allclose([e.energy for e in found], want, atol=1e-4)
+    single = ketrs.SectorStatevector(basis, neel, dtype="complex64")
+    single.run(circ)
+    single.evolve(h, 0.5)
+    double = ketrs.SectorStatevector(basis, neel)
+    double.run(circ)
+    double.evolve(h, 0.5)
+    np.testing.assert_allclose(single.amplitudes(), double.amplitudes(), atol=1e-4)
+    dense = single.to_dense()
+    assert dense.dtype == "complex64"
+    assert ketrs.SectorStatevector.from_dense(basis, dense).dtype == "complex64"
 
 
 def test_sector_rejects_symmetry_breaking():

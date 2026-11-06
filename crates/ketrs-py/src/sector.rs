@@ -1,7 +1,11 @@
 //! Python bindings for symmetry-sector simulation.
 
 use super::{DType, Observable, PyCircuit, PyStatevector, State, rng_from_seed, to_py_err};
-use ketrs::{Complex64 as C64, RealSectorStatevector, SectorBasis, SectorStatevector};
+use ketrs::statevector::Eigenstate;
+use ketrs::{
+    Complex64 as C64, RealSectorStatevector, RealSectorStatevector32, Scalar, SectorBasis,
+    SectorState, SectorStatevector, SectorStatevector32,
+};
 use numpy::PyArray1;
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
@@ -76,19 +80,62 @@ impl PySectorBasis {
     }
 }
 
+/// A sector state of any dtype; with eigenpairs, one per eigenstate.
 #[derive(Clone)]
-enum Kind {
-    Complex(SectorStatevector),
-    Real(RealSectorStatevector),
+pub(crate) enum Kind<
+    C = SectorStatevector,
+    R = RealSectorStatevector,
+    C32 = SectorStatevector32,
+    R32 = RealSectorStatevector32,
+> {
+    Complex(C),
+    Real(R),
+    Complex32(C32),
+    Real32(R32),
 }
 
-macro_rules! dispatch {
-    ($state:expr, $s:ident => $body:expr) => {
-        match $state {
-            Kind::Complex($s) => $body,
-            Kind::Real($s) => $body,
+impl Kind {
+    fn dtype(&self) -> DType {
+        match self {
+            Kind::Complex(_) => DType::Complex,
+            Kind::Real(_) => DType::Real,
+            Kind::Complex32(_) => DType::Complex32,
+            Kind::Real32(_) => DType::Real32,
         }
-    };
+    }
+}
+
+/// Eigenpairs found for one dtype.
+pub(crate) type FoundEigenstates = Kind<
+    Vec<Eigenstate<SectorStatevector>>,
+    Vec<Eigenstate<RealSectorStatevector>>,
+    Vec<Eigenstate<SectorStatevector32>>,
+    Vec<Eigenstate<RealSectorStatevector32>>,
+>;
+
+/// The eigenpairs found for some dtype, as Python sector states.
+pub(crate) fn eigenstates(found: FoundEigenstates) -> Vec<(f64, f64, PySectorStatevector)> {
+    fn each<S>(
+        found: Vec<Eigenstate<S>>,
+        wrap: fn(S) -> Kind,
+    ) -> Vec<(f64, f64, PySectorStatevector)> {
+        found
+            .into_iter()
+            .map(|e| {
+                (
+                    e.energy,
+                    e.residual,
+                    PySectorStatevector::wrap(wrap(e.state)),
+                )
+            })
+            .collect()
+    }
+    match found {
+        Kind::Complex(f) => each(f, Kind::Complex),
+        Kind::Real(f) => each(f, Kind::Real),
+        Kind::Complex32(f) => each(f, Kind::Complex32),
+        Kind::Real32(f) => each(f, Kind::Real32),
+    }
 }
 
 /// A state within a symmetry sector, storing one amplitude per sector basis
@@ -101,16 +148,9 @@ pub(crate) struct PySectorStatevector {
 }
 
 impl PySectorStatevector {
-    pub(crate) fn complex(state: SectorStatevector) -> Self {
+    fn wrap(state: Kind) -> Self {
         PySectorStatevector {
-            state: Kind::Complex(state),
-            rng: rng_from_seed(None),
-        }
-    }
-
-    pub(crate) fn real(state: RealSectorStatevector) -> Self {
-        PySectorStatevector {
-            state: Kind::Real(state),
+            state,
             rng: rng_from_seed(None),
         }
     }
@@ -128,14 +168,9 @@ impl PySectorStatevector {
         dtype: &str,
     ) -> PyResult<Self> {
         let b = basis.inner.clone();
-        let state = match DType::parse(dtype)? {
-            DType::Complex => {
-                Kind::Complex(SectorStatevector::basis_state(b, state).map_err(to_py_err)?)
-            }
-            DType::Real => {
-                Kind::Real(RealSectorStatevector::basis_state(b, state).map_err(to_py_err)?)
-            }
-        };
+        let state = by_dtype!(Kind, DType::parse(dtype)?, T => {
+            SectorState::<T>::basis_state(b, state).map_err(to_py_err)?
+        });
         Ok(PySectorStatevector {
             state,
             rng: rng_from_seed(seed),
@@ -151,14 +186,9 @@ impl PySectorStatevector {
         seed: Option<u64>,
     ) -> PyResult<Self> {
         let b = basis.inner.clone();
-        let state = match &state.state {
-            State::Complex(s) => {
-                Kind::Complex(SectorStatevector::from_dense(b, s).map_err(to_py_err)?)
-            }
-            State::Real(s) => {
-                Kind::Real(RealSectorStatevector::from_dense(b, s).map_err(to_py_err)?)
-            }
-        };
+        let state = convert!(State => Kind, &state.state, s => {
+            SectorState::from_dense(b, s).map_err(to_py_err)?
+        });
         Ok(PySectorStatevector {
             state,
             rng: rng_from_seed(seed),
@@ -167,27 +197,24 @@ impl PySectorStatevector {
 
     #[getter]
     fn n_qubits(&self) -> usize {
-        dispatch!(&self.state, s => s.n_qubits())
+        dispatch!(Kind, &self.state, s => s.n_qubits())
     }
 
     /// Number of stored amplitudes.
     #[getter]
     fn dim(&self) -> usize {
-        dispatch!(&self.state, s => s.basis().dim())
+        dispatch!(Kind, &self.state, s => s.basis().dim())
     }
 
     #[getter]
     fn dtype(&self) -> &'static str {
-        match self.state {
-            Kind::Complex(_) => "complex128",
-            Kind::Real(_) => "float64",
-        }
+        self.state.dtype().name()
     }
 
     #[getter]
     fn basis(&self) -> PySectorBasis {
         PySectorBasis {
-            inner: dispatch!(&self.state, s => s.basis().clone()),
+            inner: dispatch!(Kind, &self.state, s => s.basis().clone()),
         }
     }
 
@@ -203,67 +230,58 @@ impl PySectorStatevector {
     /// Apply `circuit`, which must conserve the sector.
     fn run(&mut self, py: Python<'_>, circuit: PyRef<'_, PyCircuit>) -> PyResult<()> {
         let circ = &circuit.inner;
-        dispatch!(&mut self.state, s => py.detach(|| s.run(circ))).map_err(to_py_err)
+        dispatch!(Kind, &mut self.state, s => py.detach(|| s.run(circ))).map_err(to_py_err)
     }
 
     /// The amplitudes in sector order (see `SectorBasis.states`).
     fn amplitudes<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
-        dispatch!(&self.state, s => PyArray1::from_slice(py, s.amplitudes()).into_any())
+        dispatch!(Kind, &self.state, s => PyArray1::from_slice(py, s.amplitudes()).into_any())
     }
 
     /// Probability of each sector basis state, in sector order.
     fn probabilities<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        PyArray1::from_vec(py, dispatch!(&self.state, s => s.probabilities()))
+        PyArray1::from_vec(py, dispatch!(Kind, &self.state, s => s.probabilities()))
     }
 
     /// The same state as a full `Statevector`.
     fn to_dense(&self) -> PyStatevector {
-        let state = match &self.state {
-            Kind::Complex(s) => State::Complex(s.to_dense()),
-            Kind::Real(s) => State::Real(s.to_dense()),
-        };
+        let state = convert!(Kind => State, &self.state, s => s.to_dense());
         PyStatevector::wrap(state, self.rng.clone())
     }
 
     /// `⟨self|other⟩`; both must share the sector and dtype.
     fn inner(&self, other: PyRef<'_, PySectorStatevector>) -> PyResult<C64> {
-        match (&self.state, &other.state) {
-            (Kind::Complex(a), Kind::Complex(b)) => a.inner(b).map_err(to_py_err),
-            (Kind::Real(a), Kind::Real(b)) => {
-                a.inner(b).map(|x| C64::new(x, 0.0)).map_err(to_py_err)
-            }
-            _ => Err(PyValueError::new_err("states have different dtypes")),
-        }
+        same_dtype!(Kind, &self.state, &other.state, (a, b) => {
+            a.inner(b).map(Scalar::to_complex).map_err(to_py_err)
+        })
     }
 
     /// `⟨ψ|H|ψ⟩`; terms leaving the sector contribute nothing.
     fn expectation(&self, py: Python<'_>, observable: Observable) -> PyResult<f64> {
         let sum = observable.into_sum()?;
-        dispatch!(&self.state, s => py.detach(|| s.expectation(&sum))).map_err(to_py_err)
+        dispatch!(Kind, &self.state, s => py.detach(|| s.expectation(&sum))).map_err(to_py_err)
     }
 
     /// `H|ψ⟩`; `H` must conserve the sector.
     fn apply_pauli_sum(&self, py: Python<'_>, hamiltonian: Observable) -> PyResult<Self> {
         let sum = hamiltonian.into_sum()?;
-        let state = match &self.state {
-            Kind::Complex(s) => {
-                Kind::Complex(py.detach(|| s.apply_pauli_sum(&sum)).map_err(to_py_err)?)
-            }
-            Kind::Real(s) => Kind::Real(py.detach(|| s.apply_pauli_sum(&sum)).map_err(to_py_err)?),
-        };
+        let state = convert!(Kind => Kind, &self.state, s => {
+            py.detach(|| s.apply_pauli_sum(&sum)).map_err(to_py_err)?
+        });
         Ok(PySectorStatevector {
             state,
             rng: self.rng.clone(),
         })
     }
 
-    /// Evolve by `exp(-iHt)` within the sector; needs dtype='complex'.
+    /// Evolve by `exp(-iHt)` within the sector; needs a complex dtype.
     fn evolve(&mut self, py: Python<'_>, hamiltonian: Observable, time: f64) -> PyResult<()> {
         let sum = hamiltonian.into_sum()?;
         match &mut self.state {
             Kind::Complex(s) => py.detach(|| s.evolve(&sum, time)).map_err(to_py_err),
-            Kind::Real(_) => Err(PyValueError::new_err(
-                "exp(-iHt) is complex; evolve needs dtype='complex'",
+            Kind::Complex32(s) => py.detach(|| s.evolve(&sum, time)).map_err(to_py_err),
+            Kind::Real(_) | Kind::Real32(_) => Err(PyValueError::new_err(
+                "exp(-iHt) is complex; evolve needs dtype='complex' or 'complex64'",
             )),
         }
     }
@@ -271,7 +289,7 @@ impl PySectorStatevector {
     /// Draw `shots` full basis-state indices.
     fn sample<'py>(&mut self, py: Python<'py>, shots: usize) -> Bound<'py, PyArray1<usize>> {
         let rng = &mut self.rng;
-        PyArray1::from_vec(py, dispatch!(&self.state, s => s.sample(shots, rng)))
+        PyArray1::from_vec(py, dispatch!(Kind, &self.state, s => s.sample(shots, rng)))
     }
 
     /// Counts keyed by bitstring, most significant qubit first.
@@ -282,7 +300,7 @@ impl PySectorStatevector {
     ) -> PyResult<Bound<'py, PyDict>> {
         let n = self.n_qubits();
         let rng = &mut self.rng;
-        let counts = dispatch!(&self.state, s => s.sample_counts(shots, rng));
+        let counts = dispatch!(Kind, &self.state, s => s.sample_counts(shots, rng));
         let dict = PyDict::new(py);
         for (index, count) in counts {
             dict.set_item(format!("{index:0n$b}"), count)?;

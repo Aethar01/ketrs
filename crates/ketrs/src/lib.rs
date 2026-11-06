@@ -37,9 +37,12 @@ pub use gate::Gate;
 #[cfg(feature = "gpu")]
 pub use gpu::{GpuContext, GpuStatevector};
 pub use mps::{DmrgOptions, DmrgResult, Mps, MpsOptions};
-pub use num_complex::Complex64;
+pub use num_complex::{Complex32, Complex64};
 pub use observable::{Pauli, PauliString, PauliSum};
 pub use parameter::{Angle, Parameter};
-pub use scalar::Scalar;
-pub use sector::{RealSectorStatevector, SectorBasis, SectorState, SectorStatevector};
-pub use statevector::{DenseState, RealStatevector, Statevector};
+pub use scalar::{ComplexScalar, Scalar};
+pub use sector::{
+    RealSectorStatevector, RealSectorStatevector32, SectorBasis, SectorState, SectorStatevector,
+    SectorStatevector32,
+};
+pub use statevector::{DenseState, RealStatevector, RealStatevector32, Statevector, Statevector32};
