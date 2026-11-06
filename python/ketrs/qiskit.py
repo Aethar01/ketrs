@@ -47,8 +47,8 @@ def from_qiskit(qc: QuantumCircuit) -> Circuit:
     linear in one parameter, such as ``2*θ + 1``.
 
     Measurements, resets, ``if_test`` and ``while_loop`` blocks (conditioned
-    on a bit, a register or a classical expression on them), ``break_loop``
-    and ``continue_loop`` are converted; ``for_loop`` blocks are unrolled,
+    on a bit, a register or a classical expression on them), ``break_loop``,
+    ``continue_loop`` and ``store`` into a classical bit are converted; ``for_loop`` blocks are unrolled,
     or kept as one body per pass when they break or continue. ``switch``
     raises ``NotImplementedError``. Instructions whose
     name starts with ``save_`` (Aer's ``save_statevector`` and friends) are
@@ -105,6 +105,9 @@ def _append(circ: Circuit, op: Instruction, qubits: list[int], clbits: list[int]
     if name == "reset":
         circ.reset(qubits[0])
         return 0.0
+    if name == "store":
+        _append_store(circ, op, context)
+        return 0.0
     if name == "if_else":
         _append_if_else(circ, op, qubits, clbits, context)
         return 0.0
@@ -156,6 +159,18 @@ def _append_if_else(circ: Circuit, op: Instruction, qubits: list[int], clbits: l
     then = _block(circ, true_body, qubits, clbits, parameters)
     otherwise = None if false_body is None else _block(circ, false_body, qubits, clbits, parameters)
     circ.if_expr(_condition(op.condition, context), then, otherwise)
+
+
+def _append_store(circ: Circuit, op: Instruction, context) -> None:
+    """A ``store`` into a classical bit: ``qc.store(clbit, expression)``."""
+    from qiskit.circuit import Clbit
+    from qiskit.circuit.classical import expr
+
+    qc, clbit_map, _ = context
+    target = op.lvalue.var if isinstance(op.lvalue, expr.Var) else None
+    if not isinstance(target, Clbit):
+        raise NotImplementedError(f"can only store into single classical bits, not {op.lvalue!r}")
+    circ.assign(clbit_map[qc.find_bit(target).index], _condition(op.rvalue, context))
 
 
 def _block(circ: Circuit, body: QuantumCircuit, qubits: list[int], clbits: list[int], parameters) -> Circuit:

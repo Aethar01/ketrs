@@ -222,6 +222,34 @@ def test_assign_drives_repeat_until_success():
     assert counts == {"01": 50}
 
 
+def test_qiskit_store_into_clbits():
+    from qiskit import ClassicalRegister
+    from qiskit.circuit.classical import expr
+
+    # done = False; while not done: done = measure(|+>); then a compound
+    # store in a branch, and stores into a register or variable are refused.
+    qc = QuantumCircuit(2, 3)
+    qc.store(qc.clbits[0], False)
+    with qc.while_loop(expr.logic_not(qc.clbits[0])):
+        qc.reset(0)
+        qc.h(0)
+        qc.measure(0, 0)
+    qc.h(1)
+    qc.measure(1, 1)
+    with qc.if_test((qc.clbits[0], 1)) as otherwise:
+        qc.store(qc.clbits[2], expr.logic_and(qc.clbits[0], expr.logic_not(qc.clbits[1])))
+    with otherwise:
+        qc.store(qc.clbits[2], True)
+    counts = ketrs.Statevector(2, seed=4).sample_circuit(from_qiskit(qc), 400)
+    assert set(counts) == {"101", "011"}
+
+    c = ClassicalRegister(2, "c")
+    qc = QuantumCircuit(c)
+    qc.store(c, 3)
+    with pytest.raises(NotImplementedError, match="single classical bits"):
+        from_qiskit(qc)
+
+
 def test_nonlinear_parameter_is_rejected():
     from qiskit.circuit import Parameter
 

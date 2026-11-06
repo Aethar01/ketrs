@@ -61,12 +61,14 @@ basis-state index, and Pauli labels have qubit 0 rightmost.
   registers, inputs as parameters, the standard gates and `qelib1.inc`,
   `gate` definitions and `def` subroutines, `inv`/`ctrl(n)`/`negctrl(n)`/`pow`
   modifiers, measurement, reset, classical assignments (`c[k] = …;`,
-  `bit b = …;`), `if`, `while` and `for` with `break` and `continue`. `Circuit.to_qasm()` writes OpenQASM 3 with standard gates
-  only, which Qiskit's `qasm3.loads` reads.
+  `bit b = …;`), `if`, `while` and `for` with `break` and `continue`.
+  `Circuit.to_qasm()` writes OpenQASM 3 with standard gates only, which
+  Qiskit's `qasm3.loads` reads.
 - `ketrs.qiskit.from_qiskit` converts Qiskit circuits, including parametric
   ones, measurements, resets, `if_test`, `while_loop` and `for_loop` blocks
-  with `break_loop`/`continue_loop`, and classical expressions; controlled
-  gates become native multi-controlled ones, and other unsupported gates are
+  with `break_loop`/`continue_loop`, classical expressions, and `store`
+  into classical bits; controlled gates become native multi-controlled
+  ones, and other unsupported gates are
   expanded through their Qiskit definitions.
 
 ## Performance

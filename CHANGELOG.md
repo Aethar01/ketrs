@@ -11,6 +11,8 @@
   once, applying leading assignments along the way.
 - OpenQASM 3 import and export of classical assignments: `c[k] = <expr>;`
   and `bit b = <expr>;` (and `bit b = measure q;`).
+- `from_qiskit` converts `store` into a classical bit (`qc.store(clbit,
+  expr)`) to an assignment.
 
 ## 0.1.0 (2026-11-06)
 
