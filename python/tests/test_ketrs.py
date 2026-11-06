@@ -380,6 +380,22 @@ def test_mps_large_ghz_and_amplitudes():
     assert mps.expectation([("Z" + "I" * (n - 2) + "Z", 1.0)]) == pytest.approx(1.0)
 
 
+def test_mps_tdvp_matches_exact_evolution():
+    # Long-range couplings, from a state with full bond dimension.
+    n = 6
+    terms = [("ZZ", [i, j], 1.0 / (j - i)) for i in range(n) for j in range(i + 1, n)]
+    terms += [("X", [q], 0.7) for q in range(n)]
+    op = SparsePauliOp.from_sparse_list(terms, num_qubits=n)
+    h = pauli_sum_from_qiskit(op)
+    mps = ketrs.MPS.from_circuit(from_qiskit(efficient_su2(n, reps=3).assign_parameters(
+        np.random.default_rng(4).uniform(-2, 2, efficient_su2(n, reps=3).num_parameters)
+    )), max_bond=64)
+    want = ketrs.Statevector.from_amplitudes(mps.to_statevector().amplitudes())
+    mps.tdvp(h, 0.7, steps=4)
+    want.evolve(h, 0.7)
+    np.testing.assert_allclose(mps.to_statevector().amplitudes(), want.amplitudes(), atol=1e-9)
+
+
 def test_mps_tebd_matches_trotter_statevector():
     n = 8
     h = pauli_sum_from_qiskit(heisenberg_op(n))

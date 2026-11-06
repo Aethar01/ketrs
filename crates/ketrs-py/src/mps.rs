@@ -217,6 +217,24 @@ impl PyMps {
             .map_err(to_py_err)
     }
 
+    /// Evolve by exp(-iHt) with `steps` steps of two-site TDVP, for
+    /// Hamiltonians of any range (TEBD routes long-range terms with swaps).
+    /// From a weakly entangled start such as a product state, accuracy is
+    /// lost while bonds grow; take more steps, or start with more bond
+    /// dimension.
+    #[pyo3(signature = (hamiltonian, time, steps=1))]
+    fn tdvp(
+        &mut self,
+        py: Python<'_>,
+        hamiltonian: Observable,
+        time: f64,
+        steps: usize,
+    ) -> PyResult<()> {
+        let sum = hamiltonian.into_sum()?;
+        let mps = &mut self.inner;
+        py.detach(|| mps.tdvp(&sum, time, steps)).map_err(to_py_err)
+    }
+
     /// `⟨ψ|H|ψ⟩ / ⟨ψ|ψ⟩`.
     fn expectation(&self, py: Python<'_>, observable: Observable) -> PyResult<f64> {
         let sum = observable.into_sum()?;

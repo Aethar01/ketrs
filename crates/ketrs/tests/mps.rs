@@ -281,3 +281,105 @@ fn dmrg_on_a_long_critical_chain() {
         assert!(w[1] <= w[0] + 1e-9, "{:?}", result.sweep_energies);
     }
 }
+
+/// All-to-all ZZ and XX couplings decaying as 1/r^1.5, and a field.
+fn long_range(n: usize) -> PauliSum {
+    let mut h = PauliSum::new();
+    for i in 0..n {
+        for j in i + 1..n {
+            let c = 1.0 / ((j - i) as f64).powf(1.5);
+            h.add(c, PauliString::new([(i, Pauli::Z), (j, Pauli::Z)]).unwrap());
+            h.add(
+                0.5 * c,
+                PauliString::new([(i, Pauli::X), (j, Pauli::X)]).unwrap(),
+            );
+        }
+        h.add(0.8, PauliString::new([(i, Pauli::X)]).unwrap());
+    }
+    h.add(0.3, PauliString::identity());
+    h
+}
+
+fn tdvp_error(n: usize, time: f64, steps: usize) -> f64 {
+    let h = long_range(n);
+    let neel: Vec<bool> = (0..n).map(|q| q % 2 == 0).collect();
+    let mut mps = Mps::basis(n, &neel, exact());
+    mps.tdvp(&h, time, steps).unwrap();
+    let start = neel
+        .iter()
+        .enumerate()
+        .map(|(q, &b)| (b as usize) << q)
+        .sum();
+    let mut want = Statevector::basis(n, start);
+    want.evolve(&h, time).unwrap();
+    let got = mps.to_amplitudes();
+    got.iter()
+        .zip(want.amplitudes())
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0, f64::max)
+}
+
+fn tdvp_error_full(n: usize, time: f64, steps: usize) -> f64 {
+    let h = long_range(n);
+    let mut mps = Mps::random(n, 1 << (n / 2), 3, exact());
+    let mut want = Statevector::from_amplitudes(mps.to_amplitudes()).unwrap();
+    mps.tdvp(&h, time, steps).unwrap();
+    want.evolve(&h, time).unwrap();
+    mps.to_amplitudes()
+        .iter()
+        .zip(want.amplitudes())
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn tdvp_is_exact_with_full_bonds() {
+    // With every bond at full dimension the projection is exact, so only
+    // the local Krylov exponentials contribute error.
+    for steps in [1, 5] {
+        let error = tdvp_error_full(8, 1.0, steps);
+        assert!(error < 1e-11, "{steps} steps: {error}");
+    }
+}
+
+#[test]
+fn tdvp_from_a_product_state_converges() {
+    // Bonds must grow from 1, which costs accuracy in the first steps;
+    // smaller steps shrink that error.
+    let coarse = tdvp_error(8, 1.0, 10);
+    let fine = tdvp_error(8, 1.0, 40);
+    assert!(fine < 5e-4, "{fine}");
+    assert!(fine < 0.5 * coarse, "{coarse} -> {fine}");
+}
+
+#[test]
+fn tdvp_conserves_norm_and_energy_under_truncation() {
+    let n = 16;
+    let h = long_range(n);
+    let neel: Vec<bool> = (0..n).map(|q| q % 2 == 0).collect();
+    let options = MpsOptions {
+        max_bond: 8,
+        cutoff: 1e-12,
+    };
+    let mut mps = Mps::basis(n, &neel, options);
+    let e0 = mps.expectation(&h).unwrap();
+    mps.tdvp(&h, 1.0, 10).unwrap();
+    assert!(mps.bond_dimensions().iter().all(|&d| d <= 8));
+    assert!(mps.truncation_error() > 1e-6, "χ = 8 should truncate");
+    assert!((mps.norm_sqr() - 1.0).abs() < 1e-10);
+    let e1 = mps.expectation(&h).unwrap();
+    assert!(((e1 - e0) / e0).abs() < 2e-3, "{e0} -> {e1}");
+}
+
+#[test]
+fn tdvp_rejects_bad_arguments() {
+    let h = long_range(3);
+    assert!(Mps::zero(3, exact()).tdvp(&h, 1.0, 0).is_err());
+    assert!(
+        Mps::zero(1, exact())
+            .tdvp(&PauliSum::from_list([("X", 1.0)]).unwrap(), 1.0, 1)
+            .is_err()
+    );
+    // Terms beyond the chain are rejected.
+    assert!(Mps::zero(2, exact()).tdvp(&h, 1.0, 1).is_err());
+}

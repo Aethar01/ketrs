@@ -1,0 +1,196 @@
+//! Real-time evolution by the time-dependent variational principle (TDVP).
+//!
+//! TEBD needs the Hamiltonian as nearest-neighbour gates, routing anything
+//! longer-ranged with swaps. TDVP instead evolves under the Hamiltonian's
+//! MPO directly, so couplings of any range cost only MPO bond dimension.
+//! This is the two-site, second-order projector-splitting integrator
+//! (Haegeman et al., Phys. Rev. B 94, 2016): a sweep right with half steps
+//! evolves each two-site tensor forward under its effective Hamiltonian,
+//! splits it by truncated SVD and evolves the new centre site backward;
+//! a sweep left does the same in reverse. Each local exponential is taken
+//! by Krylov iteration, as for statevectors. The bond dimension grows as
+//! the state needs, up to `max_bond`.
+
+use super::dmrg::{Env, TwoSite, two_site_vector, update_left, update_right};
+use super::linalg::{matmul, matmul_add};
+use super::mpo::{Mpo, MpoSite, pauli_entry};
+use super::{Absorb, Mps};
+use crate::error::Error;
+use crate::observable::PauliSum;
+use crate::statevector::evolve::krylov_evolve;
+use crate::statevector::krylov::LinearOperator;
+use faer::{Mat, MatRef};
+use num_complex::Complex64 as C64;
+
+impl Mps {
+    /// Evolve by `exp(-iHt)` with `steps` steps of two-site TDVP.
+    ///
+    /// Works for Hamiltonians of any range, with the error of each step
+    /// third order in `t / steps` plus the truncation set by this state's
+    /// [`options`](Self::options) (counted in
+    /// [`truncation_error`](Self::truncation_error)). Norm and, without
+    /// truncation, energy are conserved.
+    ///
+    /// TDVP only moves within states of the current bond dimensions (two-site
+    /// TDVP grows them as it goes), so from a weakly entangled start, such
+    /// as a product state, the first steps miss couplings the bonds can't
+    /// yet carry: the error then falls only linearly with the step size
+    /// until the bonds have grown. With bonds already large enough, steps
+    /// are exact up to the Krylov tolerance.
+    pub fn tdvp(&mut self, hamiltonian: &PauliSum, time: f64, steps: usize) -> Result<(), Error> {
+        let n = self.n_qubits();
+        if n < 2 {
+            return Err(Error::InvalidArgument(
+                "TDVP needs at least two qubits".into(),
+            ));
+        }
+        if steps == 0 {
+            return Err(Error::InvalidArgument(
+                "TDVP needs at least one step".into(),
+            ));
+        }
+        let mpo = Mpo::new(hamiltonian, n)?;
+        let half = time / steps as f64 / 2.0;
+
+        self.move_center(0);
+        // left[i]: sites < i; right[i]: sites > i.
+        let mut left: Vec<Option<Env>> = (0..n).map(|_| None).collect();
+        let mut right: Vec<Option<Env>> = (0..n).map(|_| None).collect();
+        left[0] = Some(Env::boundary());
+        right[n - 1] = Some(Env::boundary());
+        for i in (0..n - 1).rev() {
+            right[i] = Some(update_right(
+                right[i + 1].as_ref().unwrap(),
+                &self.tensors[i + 1],
+                &mpo.sites[i + 1],
+            ));
+        }
+
+        for _ in 0..steps {
+            // Sweep right: the centre starts at site 0.
+            for i in 0..n - 1 {
+                self.evolve_pair(i, &mpo, &left, &right, half, Absorb::Right)?;
+                left[i + 1] = Some(update_left(
+                    left[i].as_ref().unwrap(),
+                    &self.tensors[i],
+                    &mpo.sites[i],
+                ));
+                if i + 1 < n - 1 {
+                    self.evolve_site(i + 1, &mpo, &left, &right, -half)?;
+                }
+            }
+            // Sweep left: the centre starts at site n − 1.
+            for i in (0..n - 1).rev() {
+                self.evolve_pair(i, &mpo, &left, &right, half, Absorb::Left)?;
+                right[i] = Some(update_right(
+                    right[i + 1].as_ref().unwrap(),
+                    &self.tensors[i + 1],
+                    &mpo.sites[i + 1],
+                ));
+                if i > 0 {
+                    self.evolve_site(i, &mpo, &left, &right, -half)?;
+                }
+            }
+        }
+        if mpo.shift != 0.0 {
+            let phase = C64::cis(-mpo.shift * time);
+            self.tensors[self.center]
+                .data
+                .iter_mut()
+                .for_each(|a| *a *= phase);
+        }
+        Ok(())
+    }
+
+    /// Evolve sites `i` and `i + 1` by `exp(-iH t)` under their effective
+    /// Hamiltonian and split them again, the centre going to `absorb`.
+    fn evolve_pair(
+        &mut self,
+        i: usize,
+        mpo: &Mpo,
+        left: &[Option<Env>],
+        right: &[Option<Env>],
+        t: f64,
+        absorb: Absorb,
+    ) -> Result<(), Error> {
+        let (l, r) = (self.tensors[i].left, self.tensors[i + 1].right);
+        let mut x = two_site_vector(&self.tensors[i], &self.tensors[i + 1]);
+        let op = TwoSite::new(
+            left[i].as_ref().unwrap(),
+            right[i + 1].as_ref().unwrap(),
+            &mpo.sites[i],
+            &mpo.sites[i + 1],
+            l,
+            r,
+        );
+        krylov_evolve(&op, &mut x, t, true)?;
+        self.split(i, MatRef::from_row_major_slice(&x, l * 2, 2 * r), absorb);
+        Ok(())
+    }
+
+    /// Evolve site `i`, the centre, by `exp(-iH t)` under its effective
+    /// Hamiltonian.
+    fn evolve_site(
+        &mut self,
+        i: usize,
+        mpo: &Mpo,
+        left: &[Option<Env>],
+        right: &[Option<Env>],
+        t: f64,
+    ) -> Result<(), Error> {
+        let op = OneSite {
+            left: left[i].as_ref().unwrap(),
+            right: right[i].as_ref().unwrap(),
+            site: &mpo.sites[i],
+            l: self.tensors[i].left,
+            r: self.tensors[i].right,
+        };
+        krylov_evolve(&op, &mut self.tensors[i].data, t, true)
+    }
+}
+
+/// The effective Hamiltonian on one site, between the environments of the
+/// sites either side.
+struct OneSite<'a> {
+    left: &'a Env,
+    right: &'a Env,
+    site: &'a MpoSite,
+    l: usize,
+    r: usize,
+}
+
+impl LinearOperator<C64> for OneSite<'_> {
+    fn apply(&self, x: &[C64], out: &mut [C64]) {
+        let (l, r) = (self.l, self.r);
+        let a = MatRef::from_row_major_slice(x, l, 2 * r);
+        // y_a[l, (p, r')] = Σ_l' L_a[l, l'] A[l', p, r']
+        let y: Vec<Mat<C64>> = self
+            .left
+            .blocks
+            .iter()
+            .map(|e| matmul(e.as_ref(), a))
+            .collect();
+        let mut z = vec![Mat::<C64>::zeros(l * 2, r); self.right.blocks.len()];
+        for &(ai, bi, p, coeff) in &self.site.entries {
+            for p_out in 0..2 {
+                let (p_in, v) = pauli_entry(p, p_out);
+                let f = coeff * v;
+                for row in 0..l {
+                    for col in 0..r {
+                        z[bi][(2 * row + p_out, col)] += f * y[ai][(row, p_in * r + col)];
+                    }
+                }
+            }
+        }
+        // out[(l, p), r] = Σ_b Σ_r' z_b[(l, p), r'] R_b[r, r']
+        let mut result = Mat::<C64>::zeros(l * 2, r);
+        for (zb, rb) in z.iter().zip(&self.right.blocks) {
+            matmul_add(&mut result, zb.as_ref(), rb.transpose());
+        }
+        for row in 0..l * 2 {
+            for col in 0..r {
+                out[row * r + col] = result[(row, col)];
+            }
+        }
+    }
+}

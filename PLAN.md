@@ -107,6 +107,10 @@ Added along the way (from the Schwinger project's optimisations):
   form (right-orthonormal tensors plus bond singular values, no inverses).
   Trotter circuits pack runs of commuting terms into layers on disjoint
   qubits, exactly. MPS TEBD went from 1.5–2.5× to 9–34× faster than Aer.
+- **TDVP**: two-site, second-order projector-splitting TDVP on the MPO, for
+  real-time dynamics with couplings of any range. Exact to 1e-14 when bonds
+  are full; from product states, accuracy is lost while bonds grow (a
+  subspace-expansion start would fix that).
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
@@ -117,8 +121,6 @@ Added along the way (from the Schwinger project's optimisations):
 
 ## Later
 
-- MPS: TDVP for long-range real-time dynamics (TEBD routes long-range gates
-  with swaps).
 - GPU: gradients and Hamiltonian evolution on the GPU; a single-precision
   option for GPUs without f64; more than 8 state buffers (beyond 30 qubits
   needs a GPU with more than 16 GB anyway).

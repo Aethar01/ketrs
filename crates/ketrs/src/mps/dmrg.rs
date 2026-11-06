@@ -60,12 +60,12 @@ pub struct DmrgResult {
 
 /// An environment: for each MPO bond index, a matrix with rows on the bra
 /// bond and columns on the ket bond.
-struct Env {
-    blocks: Vec<Mat<C64>>,
+pub(super) struct Env {
+    pub(super) blocks: Vec<Mat<C64>>,
 }
 
 impl Env {
-    fn boundary() -> Env {
+    pub(super) fn boundary() -> Env {
         Env {
             blocks: vec![Mat::identity(1, 1)],
         }
@@ -168,15 +168,7 @@ impl Mps {
         absorb: Absorb,
     ) -> Result<f64, Error> {
         let (l, r) = (self.tensors[i].left, self.tensors[i + 1].right);
-        let theta = matmul(
-            self.tensors[i].as_left_matrix(),
-            self.tensors[i + 1].as_right_matrix(),
-        );
-        // Row-major (l, p, q, r), matching the operator's layout.
-        let mut v0: Vec<C64> = (0..l * 2)
-            .flat_map(|row| (0..2 * r).map(move |col| (row, col)))
-            .map(|(row, col)| theta[(row, col)])
-            .collect();
+        let mut v0 = two_site_vector(&self.tensors[i], &self.tensors[i + 1]);
         let scale = 1.0 / norm(&v0);
         v0.iter_mut().for_each(|a| *a *= scale);
 
@@ -197,9 +189,19 @@ impl Mps {
     }
 }
 
+/// Two neighbouring sites contracted, row-major `(l, p, q, r)` to match
+/// [`TwoSite`].
+pub(super) fn two_site_vector(a: &Tensor, b: &Tensor) -> Vec<C64> {
+    let theta = matmul(a.as_left_matrix(), b.as_right_matrix());
+    (0..theta.nrows())
+        .flat_map(|row| (0..theta.ncols()).map(move |col| (row, col)))
+        .map(|(row, col)| theta[(row, col)])
+        .collect()
+}
+
 /// The environment of sites `< i + 1` from that of sites `< i`, site `i`'s
 /// tensor and its MPO site.
-fn update_left(env: &Env, a: &Tensor, w: &MpoSite) -> Env {
+pub(super) fn update_left(env: &Env, a: &Tensor, w: &MpoSite) -> Env {
     let (l, r) = (a.left, a.right);
     // x_a[l, (p, r')] = Σ_l' env_a[l, l'] A[l', p, r']
     let x: Vec<Mat<C64>> = env
@@ -227,7 +229,7 @@ fn update_left(env: &Env, a: &Tensor, w: &MpoSite) -> Env {
 
 /// The environment of sites `> i − 1` from that of sites `> i`, site `i`'s
 /// tensor and its MPO site.
-fn update_right(env: &Env, a: &Tensor, w: &MpoSite) -> Env {
+pub(super) fn update_right(env: &Env, a: &Tensor, w: &MpoSite) -> Env {
     let (l, r) = (a.left, a.right);
     // x_c[(l', p), r] = Σ_r' A[l', p, r'] env_c[r, r']
     let x: Vec<Mat<C64>> = env
@@ -254,7 +256,7 @@ fn update_right(env: &Env, a: &Tensor, w: &MpoSite) -> Env {
 }
 
 /// The effective Hamiltonian on two neighbouring sites.
-struct TwoSite<'a> {
+pub(super) struct TwoSite<'a> {
     left: &'a Env,
     right: &'a Env,
     /// `(a, c, P₁, P₂, coeff)`: the two MPO sites contracted over their
@@ -265,7 +267,14 @@ struct TwoSite<'a> {
 }
 
 impl<'a> TwoSite<'a> {
-    fn new(left: &'a Env, right: &'a Env, w1: &MpoSite, w2: &MpoSite, l: usize, r: usize) -> Self {
+    pub(super) fn new(
+        left: &'a Env,
+        right: &'a Env,
+        w1: &MpoSite,
+        w2: &MpoSite,
+        l: usize,
+        r: usize,
+    ) -> Self {
         let mut by_left = vec![Vec::new(); w2.left];
         for &(b, c, p, coeff) in &w2.entries {
             by_left[b].push((c, p, coeff));
