@@ -201,13 +201,7 @@ impl<T: Scalar> PairOp<T> {
     #[inline]
     fn apply(&self, lo: &mut [T], hi: &mut [T]) {
         match *self {
-            PairOp::General(m) => {
-                for (a, b) in lo.iter_mut().zip(hi) {
-                    let (x, y) = (*a, *b);
-                    *a = m[0][0] * x + m[0][1] * y;
-                    *b = m[1][0] * x + m[1][1] * y;
-                }
-            }
+            PairOp::General(m) => T::apply_pair(&m, lo, hi),
             PairOp::Diagonal(d0, d1) => {
                 scale(lo, d0);
                 scale(hi, d1);
@@ -574,7 +568,7 @@ fn extract(value: usize, mut mask: usize) -> usize {
 #[inline]
 fn scale<T: Scalar>(s: &mut [T], f: T) {
     if f != T::ONE {
-        s.iter_mut().for_each(|a| *a *= f);
+        T::scale_slice(s, f);
     }
 }
 
@@ -708,14 +702,7 @@ fn apply_quad<T: Scalar>(amps: &mut [T], op: &QuadOp<T>, q0: usize, q1: usize) {
 /// in full so the compiler keeps everything in registers.
 #[inline]
 fn mat4_apply<T: Scalar>(m: &[[T; 4]; 4], s0: &mut [T], s1: &mut [T], s2: &mut [T], s3: &mut [T]) {
-    let quads = s0.iter_mut().zip(s1.iter_mut()).zip(s2.iter_mut()).zip(s3);
-    for (((a0, a1), a2), a3) in quads {
-        let (v0, v1, v2, v3) = (*a0, *a1, *a2, *a3);
-        *a0 = m[0][0] * v0 + m[0][1] * v1 + m[0][2] * v2 + m[0][3] * v3;
-        *a1 = m[1][0] * v0 + m[1][1] * v1 + m[1][2] * v2 + m[1][3] * v3;
-        *a2 = m[2][0] * v0 + m[2][1] * v1 + m[2][2] * v2 + m[2][3] * v3;
-        *a3 = m[3][0] * v0 + m[3][1] * v1 + m[3][2] * v2 + m[3][3] * v3;
-    }
+    T::apply_quad(m, [s0, s1, s2, s3]);
 }
 
 /// `exp(-iθ/2 · P)` in one pass. With `P|j⟩ = s(j)|j ⊕ x⟩`, each pair

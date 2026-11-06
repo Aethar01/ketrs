@@ -129,6 +129,11 @@ Added along the way (from the Schwinger project's optimisations):
   superoperators, and each noisy gate fused with its noise into one, all
   through the tiled kernels. Matches Aer's density-matrix method to 1e-10;
   2.9–4.2× faster noiseless and 1.3–1.6× with noise at 8–13 qubits.
+- **SIMD kernels**: hand-written AVX2/FMA for complex doubles in the general
+  one- and two-qubit kernels and diagonal scaling (one `fmaddsub` per
+  complex multiply), chosen at run time with portable fallbacks
+  (`KETRS_NO_SIMD=1` forces them). Layered circuits 17–23% faster at 18–22
+  qubits; `target-cpu=native` auto-vectorisation gained only 6–12%.
 - **Symmetry sectors**: fixed Hamming weights on any qubit subsets (Lin
   two-table indexing); circuits, observables, evolution and eigenstates in
   the sector, with symmetry-breaking operations rejected.
@@ -142,8 +147,8 @@ Added along the way (from the Schwinger project's optimisations):
 ## Later
 
 - Noise on statevectors by quantum trajectories (for more qubits than a
-  density matrix allows); readout error; Aer noise-model import. SIMD
-  kernels, OpenQASM 3 parser.
+  density matrix allows); readout error; Aer noise-model import. OpenQASM 3
+  parser.
 
 ## Benchmarks
 
