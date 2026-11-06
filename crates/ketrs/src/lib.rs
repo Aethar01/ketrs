@@ -29,6 +29,7 @@ pub mod parameter;
 pub mod scalar;
 pub mod sector;
 pub mod statevector;
+mod trajectory;
 
 pub use circuit::{Circuit, Operation};
 pub use classical::{Condition, Instruction};

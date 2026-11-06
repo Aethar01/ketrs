@@ -443,6 +443,53 @@ fn label(n: usize, ops: &[(usize, char)]) -> String {
     l.into_iter().collect()
 }
 
+#[test]
+fn classical_control_on_gpu() {
+    use ketrs::Condition;
+    use rand::SeedableRng;
+    let Some(ctx) = gpu() else { return };
+    let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+    // Teleport Ry(θ)|0⟩ from qubit 0 to qubit 2.
+    let theta = 1.1;
+    let mut circ = Circuit::with_clbits(3, 3);
+    circ.ry(theta, 0).h(1).cx(1, 2).cx(0, 1).h(0);
+    circ.measure(0, 0).measure(1, 1);
+    let mut x = Circuit::with_clbits(3, 3);
+    x.x(2);
+    let mut z = Circuit::with_clbits(3, 3);
+    z.z(2);
+    let condition = |c| Condition {
+        clbits: vec![c],
+        value: 1,
+    };
+    circ.if_test(condition(1), x, None);
+    circ.if_test(condition(0), z, None);
+    circ.reset(0).measure(0, 0).measure(2, 2);
+    for precision in [GpuPrecision::Double, GpuPrecision::Single] {
+        let start = GpuStatevector::zero_with_precision(&ctx, 3, precision).unwrap();
+        let shots = 2_000;
+        let counts = start.sample_circuit(&circ, shots, &mut rng).unwrap();
+        let ones: usize = counts
+            .iter()
+            .filter(|(bits, _)| *bits >> 2 & 1 == 1)
+            .map(|(_, c)| c)
+            .sum();
+        let p = (theta / 2.0).sin().powi(2);
+        let sigma = (shots as f64 * p * (1.0 - p)).sqrt();
+        assert!((ones as f64 - shots as f64 * p).abs() < 5.0 * sigma);
+        // Reset leaves qubit 0 at 0.
+        assert!(counts.keys().all(|bits| bits & 1 == 0));
+    }
+    // A trajectory collapses the state.
+    let mut bell = Circuit::with_clbits(2, 1);
+    bell.h(0).cx(0, 1).measure(0, 0);
+    let mut state = GpuStatevector::zero(&ctx, 2).unwrap();
+    let bits = state.run_trajectory(&bell, &mut rng).unwrap();
+    let p1 = state.probability_one(1).unwrap();
+    assert!((p1 - if bits[0] { 1.0 } else { 0.0 }).abs() < 1e-12);
+    assert!((state.norm_sqr().unwrap() - 1.0).abs() < 1e-12);
+}
+
 /// A 28-qubit state (4 GiB, two buffers on most GPUs) without downloading
 /// it. Ignored by default for its memory; run with `--ignored`.
 #[test]

@@ -28,6 +28,8 @@ use crate::fusion::local_matrix;
 use crate::observable::PauliSum;
 use crate::statevector::Statevector;
 use crate::statevector::hamiltonian::{GroupedPauliSum, Imaginary};
+use crate::statevector::shots::pack;
+use crate::trajectory::{self, Trajectory};
 use ash::vk;
 use context::{Buffer, Kernel, MAX_CHUNKS, Memory, Push};
 use num_complex::Complex64 as C64;
@@ -502,6 +504,66 @@ impl GpuStatevector {
         Ok(partials.iter().sum())
     }
 
+    /// Probability that measuring `qubit` gives 1, computed on the GPU.
+    pub fn probability_one(&mut self, qubit: usize) -> Result<f64, Error> {
+        let (one, total) = self.qubit_weights(qubit)?;
+        Ok(one / total)
+    }
+
+    /// Measure `qubit`, collapsing the state on the GPU. Returns the
+    /// outcome.
+    pub fn measure(&mut self, qubit: usize, rng: &mut impl Rng) -> Result<bool, Error> {
+        let (one, total) = self.qubit_weights(qubit)?;
+        let outcome = rng.random::<f64>() * total < one;
+        let weight = if outcome { one } else { total - one };
+        let (keep, drop) = (C64::new(1.0 / weight.sqrt(), 0.0), C64::new(0.0, 0.0));
+        let (plus, minus) = if outcome { (drop, keep) } else { (keep, drop) };
+        self.run_ops(&[GpuOp::Phase {
+            z: 1 << qubit,
+            plus,
+            minus,
+        }])?;
+        Ok(outcome)
+    }
+
+    /// `(weight with qubit = 1, total weight)`.
+    fn qubit_weights(&mut self, qubit: usize) -> Result<(f64, f64), Error> {
+        if qubit >= self.n_qubits {
+            return Err(Error::QubitOutOfRange {
+                qubit,
+                n_qubits: self.n_qubits,
+            });
+        }
+        let one = C64::new(1.0, 0.0);
+        let total = self.reduce(&[(0, vec![(0, one)])])?.re;
+        let z = self.reduce(&[(0, vec![(1 << qubit, one)])])?.re;
+        Ok((((total - z) / 2.0).max(0.0), total))
+    }
+
+    /// Run `circuit`, including measurements, resets and classical
+    /// control, following one random history on the GPU. Returns the
+    /// classical bits.
+    pub fn run_trajectory(
+        &mut self,
+        circuit: &Circuit,
+        rng: &mut impl Rng,
+    ) -> Result<Vec<bool>, Error> {
+        trajectory::run_trajectory(self, circuit, rng)
+    }
+
+    /// Run `circuit` from this state `shots` times and count the final
+    /// classical bits (bit 0 least significant); see
+    /// [`DenseState::sample_circuit`](crate::DenseState::sample_circuit).
+    /// Each shot after the first measurement copies the state on the GPU.
+    pub fn sample_circuit(
+        &self,
+        circuit: &Circuit,
+        shots: usize,
+        rng: &mut impl Rng,
+    ) -> Result<BTreeMap<u64, usize>, Error> {
+        trajectory::sample_circuit(self, circuit, shots, rng)
+    }
+
     /// Draw `shots` basis-state indices from the Born distribution on the
     /// GPU, without changing the state. The GPU totals the probability of
     /// each block of amplitudes; only the blocks that are sampled come back.
@@ -628,7 +690,12 @@ impl GpuStatevector {
                 minus: phase,
             });
         }
-        let plan = Plan::new(&ops, self.n_qubits, self.ctx.tile_bits());
+        self.run_ops(&ops)
+    }
+
+    /// Plan and run `ops`.
+    fn run_ops(&mut self, ops: &[GpuOp]) -> Result<(), Error> {
+        let plan = Plan::new(ops, self.n_qubits, self.ctx.tile_bits());
         if plan.dispatches.is_empty() {
             return Ok(());
         }
@@ -709,6 +776,37 @@ impl GpuStatevector {
                 }
             }
         })
+    }
+}
+
+impl Trajectory for GpuStatevector {
+    fn n_qubits(&self) -> usize {
+        self.n_qubits
+    }
+
+    fn run_gates(&mut self, gates: &Circuit) -> Result<(), Error> {
+        self.run(gates)
+    }
+
+    fn measure_qubit<R: Rng>(&mut self, qubit: usize, rng: &mut R) -> Result<bool, Error> {
+        self.measure(qubit, rng)
+    }
+
+    fn duplicate(&self) -> Result<Self, Error> {
+        self.try_clone()
+    }
+
+    fn sample_qubits<R: Rng>(
+        &mut self,
+        shots: usize,
+        qubits: &[usize],
+        rng: &mut R,
+    ) -> Result<Vec<u64>, Error> {
+        Ok(self
+            .sample(shots, rng)?
+            .into_iter()
+            .map(|index| pack(qubits, |q| index >> q & 1 == 1))
+            .collect())
     }
 }
 

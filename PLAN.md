@@ -129,13 +129,13 @@ Added along the way (from the Schwinger project's optimisations):
   the sector, with symmetry-breaking operations rejected.
 - **Classical control**: `measure`, `reset` and `if_test` (else branches,
   register conditions, nesting) inside circuits; trajectories and counts on
-  the statevector engines; Qiskit import of all three. Fusion never crosses
-  an instruction.
+  every engine (statevector, sector-free MPS of any length, GPU) through one
+  shared driver; Qiskit import of all three. Fusion never crosses an
+  instruction.
 
 ## Later
 
-- Classical control on the MPS and GPU engines; Qiskit `while`/`for` loops
-  and expression conditions.
+- Qiskit `while`/`for` loops and expression conditions.
 - Density matrices and noise, SIMD kernels, OpenQASM 3 parser.
 
 ## Benchmarks

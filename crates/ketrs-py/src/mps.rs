@@ -1,6 +1,6 @@
 //! Python bindings for matrix product states.
 
-use super::{Observable, PyCircuit, PyStatevector, State, rng_from_seed, to_py_err};
+use super::{Observable, PyCircuit, PyStatevector, State, clbit_counts, rng_from_seed, to_py_err};
 use ketrs::{Complex64 as C64, DmrgOptions, Mps, MpsOptions, Statevector};
 use numpy::PyArray1;
 use pyo3::exceptions::PyValueError;
@@ -195,10 +195,42 @@ impl PyMps {
         )
     }
 
-    /// Apply `circuit`, which must have the same width.
-    fn run(&mut self, py: Python<'_>, circuit: PyRef<'_, PyCircuit>) -> PyResult<()> {
+    /// Apply `circuit`, which must have the same width. A circuit with
+    /// measurements, resets or classical control follows one random history
+    /// (using this state's generator) and returns its classical bits;
+    /// otherwise this returns None.
+    fn run(
+        &mut self,
+        py: Python<'_>,
+        circuit: PyRef<'_, PyCircuit>,
+    ) -> PyResult<Option<Vec<usize>>> {
         let (mps, circ) = (&mut self.inner, &circuit.inner);
-        py.detach(|| mps.run(circ)).map_err(to_py_err)
+        if circ.is_unitary() {
+            py.detach(|| mps.run(circ)).map_err(to_py_err)?;
+            return Ok(None);
+        }
+        let rng = &mut self.rng;
+        let bits = py
+            .detach(|| mps.run_trajectory(circ, rng))
+            .map_err(to_py_err)?;
+        Ok(Some(bits.into_iter().map(usize::from).collect()))
+    }
+
+    /// Run `circuit` from this state `shots` times and count the final
+    /// classical bits, as bitstrings with bit 0 rightmost (as in Qiskit's
+    /// counts). The state itself is unchanged.
+    fn sample_circuit<'py>(
+        &mut self,
+        py: Python<'py>,
+        circuit: PyRef<'_, PyCircuit>,
+        shots: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let (mps, circ) = (&self.inner, &circuit.inner);
+        let rng = &mut self.rng;
+        let counts = py
+            .detach(|| mps.sample_circuit(circ, shots, rng))
+            .map_err(to_py_err)?;
+        clbit_counts(py, counts, circ.n_clbits())
     }
 
     /// TEBD: `steps` Trotter–Suzuki steps of the given order for exp(-iHt).

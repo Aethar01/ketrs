@@ -1,6 +1,6 @@
 //! Python bindings for GPU statevectors.
 
-use super::{Observable, PyCircuit, PyStatevector, State, rng_from_seed, to_py_err};
+use super::{Observable, PyCircuit, PyStatevector, State, clbit_counts, rng_from_seed, to_py_err};
 use ketrs::{Circuit, Complex64 as C64, GpuContext, GpuPrecision, GpuStatevector};
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -139,10 +139,42 @@ impl PyGpuStatevector {
         )
     }
 
-    /// Apply `circuit`, which must have the same width.
-    fn run(&mut self, py: Python<'_>, circuit: PyRef<'_, PyCircuit>) -> PyResult<()> {
+    /// Apply `circuit`, which must have the same width. A circuit with
+    /// measurements, resets or classical control follows one random history
+    /// (using this state's generator) and returns its classical bits;
+    /// otherwise this returns None.
+    fn run(
+        &mut self,
+        py: Python<'_>,
+        circuit: PyRef<'_, PyCircuit>,
+    ) -> PyResult<Option<Vec<usize>>> {
         let (state, circ) = (&mut self.inner, &circuit.inner);
-        py.detach(|| state.run(circ)).map_err(to_py_err)
+        if circ.is_unitary() {
+            py.detach(|| state.run(circ)).map_err(to_py_err)?;
+            return Ok(None);
+        }
+        let rng = &mut self.rng;
+        let bits = py
+            .detach(|| state.run_trajectory(circ, rng))
+            .map_err(to_py_err)?;
+        Ok(Some(bits.into_iter().map(usize::from).collect()))
+    }
+
+    /// Run `circuit` from this state `shots` times and count the final
+    /// classical bits, as bitstrings with bit 0 rightmost (as in Qiskit's
+    /// counts). The state itself is unchanged.
+    fn sample_circuit<'py>(
+        &mut self,
+        py: Python<'py>,
+        circuit: PyRef<'_, PyCircuit>,
+        shots: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let (state, circ) = (&self.inner, &circuit.inner);
+        let rng = &mut self.rng;
+        let counts = py
+            .detach(|| state.sample_circuit(circ, shots, rng))
+            .map_err(to_py_err)?;
+        clbit_counts(py, counts, circ.n_clbits())
     }
 
     /// Download the amplitudes as a complex128 array.

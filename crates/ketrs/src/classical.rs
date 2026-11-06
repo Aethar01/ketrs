@@ -4,9 +4,11 @@
 //! non-unitary [`Instruction`]s sit between them, each at a position in the
 //! gate list (see [`Circuit::instructions`](crate::Circuit::instructions)).
 //! Engines' `run` methods take only unitary circuits; circuits with
-//! instructions run one random history at a time with
-//! [`run_trajectory`](crate::DenseState::run_trajectory), or many with
-//! [`sample_circuit`](crate::DenseState::sample_circuit).
+//! instructions run one random history at a time with `run_trajectory`, or
+//! many with `sample_circuit`, on statevectors
+//! ([`DenseState::run_trajectory`](crate::DenseState::run_trajectory)),
+//! MPS ([`Mps::run_trajectory`](crate::Mps::run_trajectory)) and GPU
+//! states alike.
 
 use crate::circuit::Circuit;
 

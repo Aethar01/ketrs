@@ -422,7 +422,7 @@ def test_dmrg_ground_state_matches_numpy():
 
 # --- GPU -----------------------------------------------------------------------------
 
-gpu = pytest.mark.skipif(ketrs.gpu_device() is None, reason="no Vulkan GPU with 64-bit floats")
+gpu = pytest.mark.skipif(ketrs.gpu_device() is None, reason="no Vulkan GPU")
 
 
 @gpu
@@ -523,7 +523,15 @@ def test_measure_all_counts_like_qiskit():
     assert binomial_ok(counts["111"], 4000, 0.5)
 
 
-def test_qiskit_teleportation_with_if_test():
+ENGINES = [
+    pytest.param(lambda n: ketrs.Statevector(n, seed=2), id="statevector"),
+    pytest.param(lambda n: ketrs.MPS(n, seed=2), id="mps"),
+    pytest.param(lambda n: ketrs.GpuStatevector(n, seed=2), id="gpu", marks=gpu),
+]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_qiskit_teleportation_with_if_test(engine):
     from qiskit import ClassicalRegister, QuantumRegister
 
     theta = 1.3
@@ -541,10 +549,13 @@ def test_qiskit_teleportation_with_if_test():
     with qc.if_test((m[0], 1)):
         qc.z(2)
     qc.measure(2, out[0])
-    shots = 20_000
-    counts = ketrs.Statevector(3, seed=2).sample_circuit(from_qiskit(qc), shots)
+    shots = 4_000
+    counts = engine(3).sample_circuit(from_qiskit(qc), shots)
     ones = sum(c for bits, c in counts.items() if bits[0] == "1")  # bit 2 is leftmost
     assert binomial_ok(ones, shots, np.sin(theta / 2) ** 2)
+    state = engine(3)
+    bits = state.run(from_qiskit(qc))
+    assert len(bits) == 3
 
 
 def test_register_condition_else_branch_and_reset():

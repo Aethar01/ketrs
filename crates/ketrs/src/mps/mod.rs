@@ -31,6 +31,8 @@ use crate::circuit::{Circuit, Operation};
 use crate::error::Error;
 use crate::gate::Gate;
 use crate::observable::{Pauli, PauliString, PauliSum};
+use crate::statevector::shots::pack;
+use crate::trajectory::{self, Trajectory};
 use faer::{Mat, MatRef};
 use num_complex::Complex64 as C64;
 use rand::Rng;
@@ -475,6 +477,19 @@ impl Mps {
             self.n_qubits() <= usize::BITS as usize,
             "too many qubits to index"
         );
+        self.sample_bits(shots, rng)
+            .into_iter()
+            .map(|bits| {
+                bits.iter()
+                    .enumerate()
+                    .fold(0, |acc, (q, &b)| acc | (b as usize) << q)
+            })
+            .collect()
+    }
+
+    /// Draw `shots` samples of every qubit, as one bit per qubit: works for
+    /// chains of any length.
+    pub fn sample_bits(&mut self, shots: usize, rng: &mut impl Rng) -> Vec<Vec<bool>> {
         self.move_center(0);
         let norm = self.norm_sqr();
         (0..shots)
@@ -482,8 +497,8 @@ impl Mps {
                 // With everything right of the centre right-orthonormal, the
                 // marginal of each next qubit is the norm of the projected row.
                 let mut row = vec![C64::new(1.0 / norm.sqrt(), 0.0)];
-                let mut index = 0;
-                for (q, t) in self.tensors.iter().enumerate() {
+                let mut bits = Vec::with_capacity(self.n_qubits());
+                for t in &self.tensors {
                     let project = |p: usize| -> Vec<C64> {
                         (0..t.right)
                             .map(|r| {
@@ -502,15 +517,80 @@ impl Mps {
                     } else {
                         (zero, p0)
                     };
-                    if one_out {
-                        index |= 1 << q;
-                    }
+                    bits.push(one_out);
                     let scale = 1.0 / prob.sqrt();
                     row = chosen.into_iter().map(|a| a * scale).collect();
                 }
-                index
+                bits
             })
             .collect()
+    }
+
+    /// Probability that measuring `qubit` gives 1.
+    pub fn probability_one(&mut self, qubit: usize) -> Result<f64, Error> {
+        let (one, total) = self.qubit_weights(qubit)?;
+        Ok(one / total)
+    }
+
+    /// Measure `qubit`, collapsing the state. Returns the outcome.
+    pub fn measure(&mut self, qubit: usize, rng: &mut impl Rng) -> Result<bool, Error> {
+        let (one, total) = self.qubit_weights(qubit)?;
+        let outcome = rng.random::<f64>() * total < one;
+        // The centre is at `qubit`: project its physical index and
+        // renormalise; the rest stays orthonormal.
+        let weight = if outcome { one } else { total - one };
+        let scale = (total / weight).sqrt();
+        let t = &mut self.tensors[qubit];
+        let r = t.right;
+        for (i, a) in t.data.iter_mut().enumerate() {
+            let bit = (i / r) % 2 == 1;
+            *a = if bit == outcome { *a * scale } else { ZERO };
+        }
+        Ok(outcome)
+    }
+
+    /// `(weight with qubit = 1, total weight)`, moving the centre there.
+    fn qubit_weights(&mut self, qubit: usize) -> Result<(f64, f64), Error> {
+        if qubit >= self.n_qubits() {
+            return Err(Error::QubitOutOfRange {
+                qubit,
+                n_qubits: self.n_qubits(),
+            });
+        }
+        self.move_center(qubit);
+        let t = &self.tensors[qubit];
+        let r = t.right;
+        let (mut one, mut total) = (0.0, 0.0);
+        for (i, a) in t.data.iter().enumerate() {
+            let w = a.norm_sqr();
+            total += w;
+            if (i / r) % 2 == 1 {
+                one += w;
+            }
+        }
+        Ok((one, total))
+    }
+
+    /// Run `circuit`, including measurements, resets and classical
+    /// control, following one random history. Returns the classical bits.
+    pub fn run_trajectory(
+        &mut self,
+        circuit: &Circuit,
+        rng: &mut impl Rng,
+    ) -> Result<Vec<bool>, Error> {
+        trajectory::run_trajectory(self, circuit, rng)
+    }
+
+    /// Run `circuit` from this state `shots` times and count the final
+    /// classical bits (bit 0 least significant); see
+    /// [`DenseState::sample_circuit`](crate::DenseState::sample_circuit).
+    pub fn sample_circuit(
+        &self,
+        circuit: &Circuit,
+        shots: usize,
+        rng: &mut impl Rng,
+    ) -> Result<BTreeMap<u64, usize>, Error> {
+        trajectory::sample_circuit(self, circuit, shots, rng)
     }
 
     /// As [`sample`](Self::sample), tallied by basis state.
@@ -534,6 +614,37 @@ impl Mps {
         let mut circuit = Circuit::new(self.n_qubits());
         circuit.pauli_evolution(hamiltonian, time, steps, order)?;
         self.run(&circuit)
+    }
+}
+
+impl Trajectory for Mps {
+    fn n_qubits(&self) -> usize {
+        self.tensors.len()
+    }
+
+    fn run_gates(&mut self, gates: &Circuit) -> Result<(), Error> {
+        self.run(gates)
+    }
+
+    fn measure_qubit<R: Rng>(&mut self, qubit: usize, rng: &mut R) -> Result<bool, Error> {
+        self.measure(qubit, rng)
+    }
+
+    fn duplicate(&self) -> Result<Self, Error> {
+        Ok(self.clone())
+    }
+
+    fn sample_qubits<R: Rng>(
+        &mut self,
+        shots: usize,
+        qubits: &[usize],
+        rng: &mut R,
+    ) -> Result<Vec<u64>, Error> {
+        Ok(self
+            .sample_bits(shots, rng)
+            .into_iter()
+            .map(|bits| pack(qubits, |q| bits[q]))
+            .collect())
     }
 }
 

@@ -3,6 +3,19 @@
 //! The Python-facing API mirrors the Rust one; `python/ketrs` re-exports it.
 
 use ketrs::gate::{Matrix2, Matrix4};
+/// Counts of classical-bit values as a dict of bitstrings, bit 0 rightmost.
+pub(crate) fn clbit_counts(
+    py: Python<'_>,
+    counts: std::collections::BTreeMap<u64, usize>,
+    n_clbits: usize,
+) -> PyResult<Bound<'_, PyDict>> {
+    let dict = PyDict::new(py);
+    for (bits, count) in counts {
+        dict.set_item(format!("{bits:0n_clbits$b}"), count)?;
+    }
+    Ok(dict)
+}
+
 /// Run `$body` with `$s` bound to the state of whatever dtype `$state`
 /// holds, for a dtype enum `$kind` (`State` or the sector `Kind`).
 macro_rules! dispatch {
@@ -933,11 +946,7 @@ impl PyStatevector {
         let counts =
             dispatch!(State, &self.state, s => py.detach(|| s.sample_circuit(circ, shots, rng)))
                 .map_err(to_py_err)?;
-        let dict = PyDict::new(py);
-        for (bits, count) in counts {
-            dict.set_item(format!("{bits:0n$b}"), count)?;
-        }
-        Ok(dict)
+        clbit_counts(py, counts, n)
     }
 
     /// A copy of the amplitudes, as an array of the state's dtype.

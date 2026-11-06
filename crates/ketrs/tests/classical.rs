@@ -208,6 +208,70 @@ fn fusion_never_crosses_instructions() {
 }
 
 #[test]
+fn teleportation_on_mps() {
+    let theta = 1.1;
+    let circ = teleportation(theta);
+    let shots = 20_000;
+    let counts = ketrs::Mps::zero(3, ketrs::MpsOptions::default())
+        .sample_circuit(&circ, shots, &mut rng(10))
+        .unwrap();
+    let ones: usize = counts
+        .iter()
+        .filter(|(bits, _)| *bits >> 2 & 1 == 1)
+        .map(|(_, c)| c)
+        .sum();
+    assert_binomial(ones, shots, (theta / 2.0).sin().powi(2));
+}
+
+#[test]
+fn mps_trajectories_on_long_chains() {
+    // An 80-qubit GHZ state: too long to index, but MPS measures it bit by
+    // bit. Measuring the middle fixes every qubit; an X on qubit 0 when
+    // it read 1 then leaves qubit 0 at 0.
+    let n = 80;
+    let mut circ = Circuit::with_clbits(n, 3);
+    circ.h(0);
+    for q in 0..n - 1 {
+        circ.cx(q, q + 1);
+    }
+    circ.measure(40, 0);
+    let mut flip = Circuit::with_clbits(n, 3);
+    flip.x(0);
+    circ.if_test(
+        Condition {
+            clbits: vec![0],
+            value: 1,
+        },
+        flip,
+        None,
+    );
+    circ.measure(0, 1).measure(n - 1, 2);
+    let counts = ketrs::Mps::zero(n, ketrs::MpsOptions::default())
+        .sample_circuit(&circ, 400, &mut rng(11))
+        .unwrap();
+    // Bit 1 (qubit 0) is always 0; bits 0 and 2 agree.
+    assert_eq!(counts.keys().copied().collect::<Vec<_>>(), [0b000, 0b101]);
+    assert_binomial(counts[&0b101], 400, 0.5);
+
+    // Terminal measurements of a long chain sample directly.
+    let mut ghz = Circuit::with_clbits(n, 2);
+    ghz.h(0);
+    for q in 0..n - 1 {
+        ghz.cx(q, q + 1);
+    }
+    ghz.measure(0, 0).measure(n - 1, 1);
+    let counts = ketrs::Mps::zero(n, ketrs::MpsOptions::default())
+        .sample_circuit(&ghz, 400, &mut rng(12))
+        .unwrap();
+    assert_eq!(counts.keys().copied().collect::<Vec<_>>(), [0b00, 0b11]);
+
+    let mut mps = ketrs::Mps::zero(n, ketrs::MpsOptions::default());
+    let bits = mps.run_trajectory(&circ, &mut rng(13)).unwrap();
+    assert!(!bits[1] && bits[0] == bits[2]);
+    assert!(mps.probability_one(0).unwrap() < 1e-12);
+}
+
+#[test]
 fn engines_reject_non_unitary_circuits() {
     let mut circ = Circuit::new(1);
     circ.h(0).measure_all();
