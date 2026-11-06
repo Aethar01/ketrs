@@ -188,6 +188,7 @@ impl<T: Scalar> DenseState<T> {
         })?;
         // Circuit operations are validated on insertion, so only the width
         // needed checking.
+        let circuit = relabel_swaps(circuit);
         let prepared = if fuses(self.n_qubits) {
             // Gates on low qubits are already cheap through cache blocking,
             // so only fuse gates that need a full pass over memory.
@@ -244,6 +245,41 @@ impl<T: Scalar> DenseState<T> {
         }
         Ok(())
     }
+}
+
+/// `circuit` with each swap made by relabelling the qubits of everything
+/// after it, followed by the swaps that put the qubits back: at most one
+/// per qubit, never more than the circuit had, and they join batches of
+/// other gates wherever they fit. The global phase is left out.
+fn relabel_swaps(circuit: &Circuit) -> Circuit {
+    let n = circuit.n_qubits();
+    // Logical qubit q is held in physical qubit at[q]; holder is inverse.
+    let mut at: Vec<usize> = (0..n).collect();
+    let mut holder = at.clone();
+    let mut out = Circuit::new(n);
+    let push = |out: &mut Circuit, op: Operation| {
+        out.push(op).expect("a permutation of valid qubits");
+    };
+    for op in circuit.ops() {
+        match *op {
+            Operation::Swap(a, b) => {
+                at.swap(a, b);
+                (holder[at[a]], holder[at[b]]) = (a, b);
+            }
+            _ => push(&mut out, op.remapped(&at)),
+        }
+    }
+    for p in 0..n {
+        let q = holder[p];
+        if q != p {
+            // Move logical p into physical p, and q to where p was.
+            let from = at[p];
+            push(&mut out, Operation::Swap(p, from));
+            (at[q], holder[from]) = (from, q);
+            (at[p], holder[p]) = (p, p);
+        }
+    }
+    out
 }
 
 fn prepare<T: Scalar>(ops: &[Operation]) -> Result<Vec<Prepared<T>>, Error> {

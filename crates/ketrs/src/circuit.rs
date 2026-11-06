@@ -206,6 +206,50 @@ impl Operation {
         }
     }
 
+    /// The same operation with each qubit `q` moved to `map[q]`, a
+    /// permutation of at least as many qubits as it uses.
+    pub(crate) fn remapped(&self, map: &[usize]) -> Operation {
+        let m = |q: &usize| map[*q];
+        match self {
+            Operation::Gate { gate, target } => Operation::Gate {
+                gate: *gate,
+                target: m(target),
+            },
+            Operation::Controlled {
+                gate,
+                control,
+                target,
+            } => Operation::Controlled {
+                gate: *gate,
+                control: m(control),
+                target: m(target),
+            },
+            Operation::MultiControlled {
+                gate,
+                controls,
+                target,
+            } => Operation::MultiControlled {
+                gate: *gate,
+                controls: controls.iter().map(m).collect(),
+                target: m(target),
+            },
+            Operation::Swap(a, b) => Operation::Swap(m(a), m(b)),
+            Operation::ControlledSwap { controls, a, b } => Operation::ControlledSwap {
+                controls: controls.iter().map(m).collect(),
+                a: m(a),
+                b: m(b),
+            },
+            Operation::Unitary2 { matrix, qubits } => Operation::Unitary2 {
+                matrix: *matrix,
+                qubits: qubits.map(|q| map[q]),
+            },
+            Operation::PauliRotation { pauli, theta } => Operation::PauliRotation {
+                pauli: pauli.remap(map).expect("map covers every qubit"),
+                theta: *theta,
+            },
+        }
+    }
+
     /// The highest qubit index this operation acts on, or 0 if it acts on
     /// none (an identity Pauli rotation, which is a global phase).
     pub fn max_qubit(&self) -> usize {
