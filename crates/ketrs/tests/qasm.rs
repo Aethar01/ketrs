@@ -399,3 +399,204 @@ fn errors_name_the_line() {
         }
     }
 }
+
+/// The 4×4 matrix of a two-qubit circuit, column `j` the image of `|j⟩`.
+fn matrix_of(circ: &Circuit) -> [[C64; 4]; 4] {
+    let columns: Vec<Statevector> = (0..4)
+        .map(|j| {
+            let mut s = Statevector::basis(2, j);
+            s.run(circ).unwrap();
+            s
+        })
+        .collect();
+    std::array::from_fn(|i| std::array::from_fn(|j| columns[j].amplitudes()[i]))
+}
+
+fn round_trip(circ: &Circuit) -> Circuit {
+    let source = circ.to_qasm().unwrap();
+    qasm::parse(&source).unwrap_or_else(|e| panic!("{e}\n{source}"))
+}
+
+#[test]
+fn export_round_trips_every_operation() {
+    let mut body = Circuit::new(2);
+    body.h(0).ry(0.7, 1).cx(0, 1).t(1).rzx(0.4, 0, 1).s(0);
+    body.set_global_phase(0.9);
+    let u2 = matrix_of(&body);
+    let mut circ = Circuit::new(5);
+    let p = circ.parameters(2);
+    circ.set_global_phase(-0.3);
+    circ.h(0).x(1).y(2).z(3).s(4).sdg(0).t(1).tdg(2);
+    circ.rx(p[0], 0)
+        .ry(2.0 * p[1] - 0.5, 1)
+        .rz(0.3, 2)
+        .p(-0.25 * p[0], 3);
+    circ.u(0.1, 0.2, 0.3, 4);
+    circ.unitary(
+        [
+            [C64::new(0.0, 0.6), C64::new(0.8, 0.0)],
+            [C64::new(0.8, 0.0), C64::new(0.0, 0.6)],
+        ],
+        0,
+    );
+    circ.cx(0, 1)
+        .cy(1, 2)
+        .cz(2, 3)
+        .controlled(ketrs::Gate::H, 3, 4);
+    circ.crx(p[1], 4, 0)
+        .cry(0.2, 0, 2)
+        .crz(0.4, 1, 3)
+        .cp(p[0], 2, 4);
+    circ.controlled(ketrs::Gate::T, 0, 4).controlled(
+        ketrs::Gate::U {
+            theta: 0.5,
+            phi: -0.1,
+            lambda: 0.7,
+        },
+        3,
+        1,
+    );
+    circ.ccx(0, 1, 2)
+        .mcx(&[4, 3, 1], 0)
+        .cswap(0, 3, 4)
+        .controlled_swap(&[1, 2], 0, 4);
+    circ.multi_controlled(ketrs::Gate::Ry(0.6), &[0, 1], 3);
+    circ.multi_controlled(
+        ketrs::Gate::Unitary([
+            [C64::new(0.0, 0.6), C64::new(0.8, 0.0)],
+            [C64::new(0.8, 0.0), C64::new(0.0, 0.6)],
+        ]),
+        &[2, 4, 0],
+        1,
+    );
+    circ.swap(1, 3).rzz(p[1], 0, 2).rxx(0.3, 1, 4);
+    circ.pauli_rotation(0.8, ketrs::PauliString::from_label("YZXI").unwrap());
+    circ.pauli_rotation(p[0], ketrs::PauliString::identity());
+    circ.push(ketrs::Operation::Unitary2 {
+        matrix: u2,
+        qubits: [3, 1],
+    })
+    .unwrap();
+    let back = round_trip(&circ);
+    assert_eq!(back.n_parameters(), 2);
+    for values in [[0.3, -0.7], [1.9, 0.4]] {
+        assert_state_eq(
+            &Statevector::from_circuit(&back.bind(&values).unwrap()),
+            Statevector::from_circuit(&circ.bind(&values).unwrap()).amplitudes(),
+        );
+    }
+}
+
+#[test]
+fn two_qubit_unitaries_decompose_exactly() {
+    // Generic, diagonal, permutation and single-column cases, on both
+    // qubit orders and under a control.
+    let mut generic = Circuit::new(2);
+    generic
+        .h(0)
+        .ry(1.1, 1)
+        .cx(1, 0)
+        .rz(0.4, 0)
+        .cy(0, 1)
+        .u(0.3, 0.9, -0.2, 1);
+    let mut diagonal = Circuit::new(2);
+    diagonal.rz(0.3, 0).cp(0.8, 0, 1).p(-0.4, 1);
+    let mut permutation = Circuit::new(2);
+    permutation.swap(0, 1).cx(0, 1).x(1);
+    for body in [generic, diagonal, permutation] {
+        let m = matrix_of(&body);
+        for qubits in [[0, 2], [2, 0]] {
+            let mut circ = Circuit::new(3);
+            circ.h(0).ry(0.4, 1).ry(1.3, 2);
+            circ.push(ketrs::Operation::Unitary2 { matrix: m, qubits })
+                .unwrap();
+            assert_state_eq(
+                &Statevector::from_circuit(&round_trip(&circ)),
+                Statevector::from_circuit(&circ).amplitudes(),
+            );
+            // Controlled on qubit 1, against applying it only on |1⟩.
+            let mut inner = Circuit::new(3);
+            inner
+                .push(ketrs::Operation::Unitary2 { matrix: m, qubits })
+                .unwrap();
+            for c in [false, true] {
+                let mut prep = Circuit::new(3);
+                prep.h(0).ry(1.3, 2);
+                if c {
+                    prep.x(1);
+                }
+                let mut got = prep.clone();
+                got.extend(&inner.control(&[1]).unwrap()).unwrap();
+                let mut want = prep.clone();
+                if c {
+                    want.extend(&inner).unwrap();
+                }
+                assert_state_eq(
+                    &Statevector::from_circuit(&got),
+                    Statevector::from_circuit(&want).amplitudes(),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn export_round_trips_classical_control() {
+    use ketrs::{BinaryOp, Condition, Expr};
+    let mut circ = Circuit::with_clbits(3, 3);
+    circ.h(0).measure(0, 0);
+    let mut fix = Circuit::with_clbits(3, 3);
+    fix.reset(0).h(0).measure(0, 0);
+    circ.while_loop(Expr::Not(Box::new(Expr::Bit(0))), fix);
+    circ.h(1).measure(1, 1);
+    let mut then = Circuit::with_clbits(3, 3);
+    then.x(2);
+    then.set_global_phase(0.2);
+    let mut otherwise = Circuit::with_clbits(3, 3);
+    otherwise.h(2);
+    // A partial register, written bit by bit, and a whole one.
+    circ.if_test(
+        Condition {
+            clbits: vec![0, 1],
+            value: 3,
+        },
+        then,
+        Some(otherwise),
+    );
+    let mut flip = Circuit::with_clbits(3, 3);
+    flip.z(2);
+    circ.if_test(
+        Expr::binary(
+            BinaryOp::Or,
+            Expr::binary(
+                BinaryOp::Less,
+                Expr::Register(vec![0, 1, 2]),
+                Expr::Value(2),
+            ),
+            Expr::binary(
+                BinaryOp::NotEqual,
+                Expr::Register(vec![1, 2]),
+                Expr::Value(1),
+            ),
+        ),
+        flip,
+        None,
+    );
+    circ.measure(2, 2);
+    let back = round_trip(&circ);
+    let counts = |c: &Circuit| {
+        Statevector::zero(3)
+            .sample_circuit(c, 400, &mut StdRng::seed_from_u64(9))
+            .unwrap()
+    };
+    assert_eq!(counts(&back), counts(&circ));
+
+    // Other uses of partial registers can't be written.
+    let mut bad = Circuit::with_clbits(1, 2);
+    bad.if_test(
+        Expr::binary(BinaryOp::Less, Expr::Register(vec![1]), Expr::Value(1)),
+        Circuit::with_clbits(1, 2),
+        None,
+    );
+    assert!(bad.to_qasm().is_err());
+}

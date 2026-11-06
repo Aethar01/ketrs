@@ -570,6 +570,22 @@ def test_qasm2_from_qiskit_round_trips():
     )
 
 
+def test_to_qasm_round_trips_and_qiskit_reads_it():
+    qc = random_circuit(5, depth=6, max_operands=3, seed=40)
+    qc.mcx([0, 1, 2], 4)
+    qc.cswap(3, 0, 1)
+    qc.rzz(0.3, 1, 2)
+    circ = from_qiskit(qc)
+    source = circ.to_qasm()
+    want = ketrs.Statevector.from_circuit(circ).amplitudes()
+    back = ketrs.from_qasm(source)
+    np.testing.assert_allclose(ketrs.Statevector.from_circuit(back).amplitudes(), want, atol=1e-10)
+    pytest.importorskip("qiskit_qasm3_import")
+    from qiskit import qasm3
+
+    np.testing.assert_allclose(QiskitStatevector(qasm3.loads(source)).data, want, atol=1e-10)
+
+
 def test_qasm3_parameters_and_control_flow():
     from qiskit import qasm3
 

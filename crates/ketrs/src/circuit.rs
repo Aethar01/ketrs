@@ -5,6 +5,7 @@ use crate::error::Error;
 use crate::gate::{Gate, Matrix2, Matrix4, adjoint};
 use crate::observable::{Pauli, PauliString, PauliSum};
 use crate::parameter::{Angle, Parameter};
+use num_complex::Complex64 as C64;
 
 /// One step of a circuit.
 #[derive(Clone, Debug, PartialEq)]
@@ -708,6 +709,11 @@ impl Circuit {
         }
     }
 
+    /// The circuit as an OpenQASM 3 program; see [`qasm::dumps`](crate::qasm::dumps).
+    pub fn to_qasm(&self) -> Result<String, Error> {
+        crate::qasm::dumps(self)
+    }
+
     /// This circuit applied only where every one of `controls` is `|1⟩`,
     /// as in Qiskit's `QuantumCircuit.control` but on qubits of the same
     /// register. Gates and swaps gain the controls; Pauli rotations keep
@@ -715,9 +721,8 @@ impl Circuit {
     /// `Rz`; the global phase becomes a controlled phase. Parameters carry
     /// over.
     ///
-    /// Fails for circuits with measurements or classical control, controls
-    /// the circuit acts on or out of range, and arbitrary two-qubit
-    /// unitaries.
+    /// Fails for circuits with measurements or classical control, and for
+    /// controls the circuit acts on or out of range.
     pub fn control(&self, controls: &[usize]) -> Result<Circuit, Error> {
         self.check_unitary()?;
         for (i, &c) in controls.iter().enumerate() {
@@ -812,10 +817,10 @@ impl Circuit {
                         });
                     }
                 }
-                Operation::Unitary2 { .. } => {
-                    return Err(Error::InvalidArgument(
-                        "can't control an arbitrary two-qubit unitary".into(),
-                    ));
+                Operation::Unitary2 { matrix, qubits } => {
+                    let mut parts = Circuit::new(self.n_qubits);
+                    parts.ops = decompose_unitary2(matrix, *qubits);
+                    out.ops.extend(parts.control(controls)?.ops);
                 }
             }
         }
@@ -1211,6 +1216,85 @@ pub(crate) fn decompose_pauli_rotation(pauli: &PauliString, theta: f64) -> Vec<O
     });
     out.extend(ladder.into_iter().rev());
     out.extend(after);
+    out
+}
+
+/// A two-qubit unitary (index `2·b₁ + b₀` for `qubits = [q₀, q₁]`) as
+/// gates on at most two qubits: Givens rotations on pairs of basis states
+/// adjacent in Gray order (`00, 01, 11, 10`, so each pair differs in one
+/// bit) reduce it to a diagonal, column by column. Each rotation is then a
+/// single-qubit gate controlled by the other qubit (negated by `X`s when
+/// that bit is 0), and the diagonal is two phases, a controlled phase and
+/// a global phase (an identity Pauli rotation).
+pub(crate) fn decompose_unitary2(matrix: &Matrix4, qubits: [usize; 2]) -> Vec<Operation> {
+    const GRAY: [usize; 4] = [0, 1, 3, 2];
+    let mut m = *matrix;
+    // Each rotation G on rows (r0, r1), so that G_K ⋯ G_1 · U = D.
+    let mut rotations = Vec::new();
+    for (j, &col) in GRAY.iter().enumerate().take(3) {
+        for k in (j + 1..4).rev() {
+            let (r0, r1) = (GRAY[k - 1], GRAY[k]);
+            let (a, b) = (m[r0][col], m[r1][col]);
+            let norm = (a.norm_sqr() + b.norm_sqr()).sqrt();
+            if b.norm() < 1e-15 * norm.max(1.0) {
+                continue;
+            }
+            let g = [[a.conj() / norm, b.conj() / norm], [-b / norm, a / norm]];
+            let (x, y) = (m[r0], m[r1]);
+            m[r0] = std::array::from_fn(|c| g[0][0] * x[c] + g[0][1] * y[c]);
+            m[r1] = std::array::from_fn(|c| g[1][0] * x[c] + g[1][1] * y[c]);
+            rotations.push((r0, r1, g));
+        }
+    }
+    let d: [C64; 4] = std::array::from_fn(|i| m[i][i]);
+    let phase = d[0].arg();
+    let mut out = vec![
+        // exp(-iθ/2) with θ = -2·phase.
+        Operation::PauliRotation {
+            pauli: PauliString::identity(),
+            theta: -2.0 * phase,
+        },
+        Operation::Gate {
+            gate: Gate::Phase((d[1] / d[0]).arg()),
+            target: qubits[0],
+        },
+        Operation::Gate {
+            gate: Gate::Phase((d[2] / d[0]).arg()),
+            target: qubits[1],
+        },
+        Operation::Controlled {
+            gate: Gate::Phase((d[3] * d[0] / (d[1] * d[2])).arg()),
+            control: qubits[0],
+            target: qubits[1],
+        },
+    ];
+    // U = G_1† ⋯ G_K† · D: D first, then G_K†, …, G_1†.
+    for (r0, r1, g) in rotations.into_iter().rev() {
+        let bit = (r0 ^ r1).trailing_zeros() as usize;
+        let (target, control) = (qubits[bit], qubits[1 - bit]);
+        let negated = r0 >> (1 - bit) & 1 == 0;
+        // In the target's own basis, |0⟩ first.
+        let g = if r0 >> bit & 1 == 0 {
+            g
+        } else {
+            [[g[1][1], g[1][0]], [g[0][1], g[0][0]]]
+        };
+        let flip = Operation::Gate {
+            gate: Gate::X,
+            target: control,
+        };
+        if negated {
+            out.push(flip.clone());
+        }
+        out.push(Operation::Controlled {
+            gate: Gate::Unitary(adjoint(&g)),
+            control,
+            target,
+        });
+        if negated {
+            out.push(flip);
+        }
+    }
     out
 }
 

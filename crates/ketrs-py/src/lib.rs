@@ -508,6 +508,13 @@ impl PyCircuit {
         }
     }
 
+    /// The circuit as an OpenQASM 3 program (qubits `q`, bits `c`,
+    /// parameters `input float[64] p0;` …), readable by `from_qasm` and by
+    /// Qiskit's `qasm3.loads`.
+    fn to_qasm(&self) -> PyResult<String> {
+        self.inner.to_qasm().map_err(to_py_err)
+    }
+
     /// This circuit applied only where every one of `controls` (qubits it
     /// doesn't act on) is `|1⟩`. Parameters carry over.
     fn control(&self, controls: Vec<usize>) -> PyResult<Self> {
@@ -1343,8 +1350,9 @@ fn eigenstates<T: Scalar>(
 
 /// Read an OpenQASM 3 (or 2) program into a `Circuit`: registers, inputs
 /// (as parameters, in declaration order), the standard gates, `gate`
-/// definitions, `inv`/`ctrl`/`pow` modifiers, measurement, reset, `if`,
-/// `while` and `for`. Errors name the line.
+/// definitions and `def` subroutines, `inv`/`ctrl`/`negctrl`/`pow`
+/// modifiers, measurement, reset, `if`, `while` and `for`. Errors name the
+/// line.
 #[pyfunction]
 fn from_qasm(source: &str) -> PyResult<PyCircuit> {
     Ok(PyCircuit {

@@ -36,6 +36,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y glslc
       - uses: astral-sh/setup-uv@v6
       - run: uv venv --python 3.13
-      - run: uv pip install maturin pytest qiskit numpy
+      - run: uv pip install maturin pytest qiskit qiskit-aer qiskit-qasm3-import numpy scipy
       - run: uv run --no-project maturin develop --release --features gpu
       - run: uv run --no-project pytest

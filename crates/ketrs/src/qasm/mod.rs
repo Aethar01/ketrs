@@ -1,4 +1,5 @@
-//! OpenQASM 3 import (and the OpenQASM 2 forms still in common use).
+//! OpenQASM 3 import (and the OpenQASM 2 forms still in common use), and
+//! export with [`dumps`].
 //!
 //! [`parse`] reads a program into a [`Circuit`]:
 //!
@@ -20,6 +21,10 @@
 //! Angles may use `pi`, `π`, `tau`, `euler`, arithmetic and the usual
 //! functions. Other statements (`let`, `switch`, `break`, timing, …) are
 //! errors naming the line.
+
+mod export;
+
+pub use export::dumps;
 
 use crate::circuit::Circuit;
 use crate::classical::{BinaryOp, Expr};
@@ -1107,7 +1112,11 @@ impl Lowering {
                     circ.set_global_phase(total);
                     Ok(())
                 }
-                _ => Err(error(line, "gphase must not depend on a parameter")),
+                // e^{iφ} = exp(-iθ/2 · I) with θ = -2φ.
+                phase => {
+                    circ.pauli_rotation(-2.0 * phase, crate::PauliString::identity());
+                    Ok(())
+                }
             },
         }
     }
