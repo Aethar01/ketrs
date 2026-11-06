@@ -663,6 +663,52 @@ def test_noisy_circuits_match_aer():
     np.testing.assert_allclose(rho.to_matrix(), np.asarray(want), atol=1e-10)
 
 
+def test_noise_trajectories_and_aer_import_match_aer():
+    from qiskit_aer import AerSimulator
+    from qiskit_aer.noise import NoiseModel as AerNoiseModel
+    from qiskit_aer.noise import ReadoutError, amplitude_damping_error, depolarizing_error
+
+    from ketrs.qiskit import noise_model_from_aer
+
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.ry(0.4, 2)
+    qc.cx(1, 2)
+    qc.h(2)
+    qc.measure([0, 1, 2], [0, 1, 2])
+    aer_noise = AerNoiseModel()
+    aer_noise.add_all_qubit_quantum_error(
+        depolarizing_error(0.03, 1).compose(amplitude_damping_error(0.05)), ["h", "ry"]
+    )
+    aer_noise.add_all_qubit_quantum_error(depolarizing_error(0.06, 2), ["cx"])
+    aer_noise.add_all_qubit_readout_error(ReadoutError([[0.95, 0.05], [0.1, 0.9]]))
+    noise = noise_model_from_aer(aer_noise)
+
+    # The density matrix agrees exactly before measurement.
+    unitary = qc.remove_final_measurements(inplace=False)
+    aer_qc = unitary.copy()
+    aer_qc.save_density_matrix()
+    want = AerSimulator(method="density_matrix", noise_model=aer_noise).run(aer_qc).result()
+    rho = ketrs.DensityMatrix(3)
+    rho.run_noisy(from_qiskit(unitary), noise)
+    np.testing.assert_allclose(rho.to_matrix(), np.asarray(want.data()["density_matrix"]), atol=1e-10)
+
+    # Trajectory counts, readout error included, match Aer's within noise.
+    shots = 20000
+    aer_counts = AerSimulator(noise_model=aer_noise, seed_simulator=1).run(qc, shots=shots).result().get_counts()
+    psi = ketrs.Statevector(3, seed=2)
+    counts = psi.sample_circuit(from_qiskit(qc), shots, noise=noise)
+    for key in set(aer_counts) | set(counts):
+        a, b = aer_counts.get(key, 0) / shots, counts.get(key, 0) / shots
+        assert abs(a - b) < 0.02, (key, a, b)
+
+    bad = AerNoiseModel()
+    bad.add_quantum_error(depolarizing_error(0.1, 1), ["h"], [0])
+    with pytest.raises(NotImplementedError):
+        noise_model_from_aer(bad)
+
+
 # --- GPU -----------------------------------------------------------------------------
 
 gpu = pytest.mark.skipif(ketrs.gpu_device() is None, reason="no Vulkan GPU")

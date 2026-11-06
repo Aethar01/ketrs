@@ -251,6 +251,7 @@ fn noise_models_apply_after_every_gate() {
     let noise = NoiseModel {
         one_qubit: Some(Channel::depolarizing(0.01, 1).unwrap()),
         two_qubit: Some(Channel::depolarizing(0.05, 2).unwrap()),
+        ..Default::default()
     };
     let mut noisy = DensityMatrix::zero(n);
     noisy.run_noisy(&circ, &noise).unwrap();
@@ -297,6 +298,7 @@ fn noisy_runs_on_larger_states_match_step_by_step() {
         let noise = NoiseModel {
             one_qubit: Some(Channel::amplitude_damping(0.05).unwrap()),
             two_qubit: Some(Channel::depolarizing(0.03, 2).unwrap()),
+            ..Default::default()
         };
         let mut fast = DensityMatrix::zero(n);
         fast.run_noisy(&circ, &noise).unwrap();

@@ -11,6 +11,7 @@ pub(crate) mod hamiltonian;
 pub(crate) mod kernels;
 pub(crate) mod krylov;
 mod measure;
+mod noise;
 pub(crate) mod shots;
 
 pub use eigen::{EigenOptions, Eigenstate};

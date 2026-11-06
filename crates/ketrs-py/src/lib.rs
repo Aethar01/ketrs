@@ -1076,13 +1076,24 @@ impl PyStatevector {
     /// Apply `circuit`, which must have the same width. A circuit with
     /// measurements, resets or classical control follows one random history
     /// (using this state's generator) and returns its classical bits;
-    /// otherwise this returns None.
+    /// otherwise this returns None. With `noise` (a `NoiseModel`), the
+    /// history is a noisy trajectory: channels after every gate pick one of
+    /// their Kraus operators at random, and readout errors flip measured
+    /// bits.
+    #[pyo3(signature = (circuit, noise=None))]
     fn run(
         &mut self,
         py: Python<'_>,
         circuit: PyRef<'_, PyCircuit>,
+        noise: Option<PyRef<'_, density::PyNoiseModel>>,
     ) -> PyResult<Option<Vec<usize>>> {
         let circ = &circuit.inner;
+        if let Some(noise) = noise {
+            let (noise, rng) = (&noise.inner, &mut self.rng);
+            let bits = dispatch!(State, &mut self.state, s => py.detach(|| s.run_noisy_trajectory(circ, noise, rng)))
+                .map_err(to_py_err)?;
+            return Ok((!circ.is_unitary()).then(|| bits.into_iter().map(usize::from).collect()));
+        }
         if circ.is_unitary() {
             dispatch!(State, &mut self.state, s => py.detach(|| s.run(circ))).map_err(to_py_err)?;
             return Ok(None);
@@ -1096,19 +1107,29 @@ impl PyStatevector {
 
     /// Run `circuit` from this state `shots` times and count the final
     /// classical bits, as bitstrings with bit 0 rightmost (as in Qiskit's
-    /// counts). The state itself is unchanged.
+    /// counts). The state itself is unchanged. With `noise`, each shot is a
+    /// noisy trajectory (see `run`).
+    #[pyo3(signature = (circuit, shots, noise=None))]
     fn sample_circuit<'py>(
         &mut self,
         py: Python<'py>,
         circuit: PyRef<'_, PyCircuit>,
         shots: usize,
+        noise: Option<PyRef<'_, density::PyNoiseModel>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let circ = &circuit.inner;
         let n = circ.n_clbits();
         let rng = &mut self.rng;
-        let counts =
-            dispatch!(State, &self.state, s => py.detach(|| s.sample_circuit(circ, shots, rng)))
-                .map_err(to_py_err)?;
+        let counts = match noise {
+            Some(noise) => {
+                let noise = &noise.inner;
+                dispatch!(State, &self.state, s => py.detach(|| s.sample_noisy(circ, noise, shots, rng)))
+            }
+            None => {
+                dispatch!(State, &self.state, s => py.detach(|| s.sample_circuit(circ, shots, rng)))
+            }
+        }
+        .map_err(to_py_err)?;
         clbit_counts(py, counts, n)
     }
 

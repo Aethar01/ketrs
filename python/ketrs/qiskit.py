@@ -16,12 +16,13 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ketrs import Circuit, Parameter, PauliSum
+from ketrs import Channel, Circuit, NoiseModel, Parameter, PauliSum
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
     from qiskit.circuit import Instruction
     from qiskit.quantum_info import SparsePauliOp
+    from qiskit_aer.noise import NoiseModel as AerNoiseModel
 
 # Gate name -> number of parameters, for gates whose ketrs builder method has
 # the same name and takes (params..., qubits...).
@@ -217,6 +218,57 @@ def pauli_sum_from_qiskit(
     return PauliSum(terms)
 
 
+def noise_model_from_aer(noise_model: AerNoiseModel) -> NoiseModel:
+    """Convert a Qiskit Aer ``NoiseModel`` with the same noise on every
+    qubit to a ketrs ``NoiseModel``.
+
+    All one-qubit gate errors must be the same channel, as must all
+    two-qubit ones, and the readout error must be one for all qubits.
+    ketrs applies the one-qubit channel after every gate (on each of its
+    qubits) and the two-qubit one after every two-qubit gate, where Aer
+    applies them only after the instructions they were added for, so the
+    two agree on circuits made of those instructions (for example,
+    transpiled to the model's basis gates). Raises ``NotImplementedError``
+    for qubit-specific errors and for differing errors on different gates.
+    """
+    from qiskit.quantum_info import Kraus
+
+    # Aer keeps these as attributes without public accessors.
+    if noise_model._local_quantum_errors or noise_model._local_readout_errors:
+        raise NotImplementedError("qubit-specific errors are not supported")
+    channels = {}
+    for name, error in noise_model._default_quantum_errors.items():
+        kraus = Kraus(error)
+        k = error.num_qubits
+        if k not in (1, 2):
+            raise NotImplementedError(f"the error on {name!r} acts on {k} qubits")
+        if k in channels and not _same_channel(channels[k][1], kraus):
+            raise NotImplementedError(
+                f"{name!r} and {channels[k][0]!r} have different {k}-qubit errors; "
+                "ketrs applies one per gate size"
+            )
+        channels.setdefault(k, (name, kraus))
+
+    def channel(k):
+        if k not in channels:
+            return None
+        return Channel.from_kraus([np.asarray(m, dtype=complex) for m in channels[k][1].data])
+
+    readout = None
+    if noise_model._default_readout_error is not None:
+        p = np.asarray(noise_model._default_readout_error.probabilities)
+        if p.shape != (2, 2):
+            raise NotImplementedError("only one-qubit readout errors are supported")
+        readout = (float(p[0, 1]), float(p[1, 0]))
+    return NoiseModel(one_qubit=channel(1), two_qubit=channel(2), readout=readout)
+
+
+def _same_channel(a, b) -> bool:
+    from qiskit.quantum_info import SuperOp
+
+    return np.allclose(SuperOp(a).data, SuperOp(b).data, atol=1e-12)
+
+
 def _append_controlled(circ: Circuit, op: Instruction, qubits: list[int]) -> bool:
     """Append a bound gate controlled on all ones (a ``ControlledGate``, or
     an ``AnnotatedOperation`` with one control modifier) as a ketrs
@@ -277,6 +329,7 @@ def _append_pauli_evolution(circ: Circuit, op: Instruction, qubits: list[int]) -
     for that, use ``ketrs.Statevector.evolve``.)
     """
     from qiskit.quantum_info import SparsePauliOp
+    from qiskit_aer.noise import NoiseModel as AerNoiseModel
     from qiskit.synthesis import SuzukiTrotter
 
     synthesis = op.synthesis

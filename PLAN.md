@@ -151,6 +151,13 @@ Added along the way (from the Schwinger project's optimisations):
   counts on statevectors, MPS of any length and the GPU through one shared
   driver. Qiskit import of all of these, with `for_loop`s unrolled. Fusion
   never crosses an instruction.
+- **Noisy trajectories**: noise models on statevectors, one Kraus operator
+  per channel per shot, for twice the qubits a density matrix allows.
+  Pauli mixtures are drawn up front and run with the gates as one batch
+  through the tiled kernels; other channels sample from their qubits'
+  reduced density matrix. Readout error flips recorded bits. Aer noise
+  models with the same errors on every qubit convert directly; counts
+  match Aer's within shot noise.
 - **Multi-controlled operations**: gates and swaps with any number of
   controls, applied directly on statevectors and density matrices; the GPU
   pair kernel takes the control mask, and MPS decomposes them exactly
@@ -161,8 +168,6 @@ Added along the way (from the Schwinger project's optimisations):
 
 ## Later
 
-- Noise on statevectors by quantum trajectories (for more qubits than a
-  density matrix allows); readout error; Aer noise-model import.
 - OpenQASM `break`/`continue`, which need loop control in the classical
   driver.
 

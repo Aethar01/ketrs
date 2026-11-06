@@ -20,9 +20,22 @@ const MAX_LOOP_PASSES: usize = 1_000_000;
 
 /// What an engine needs to follow a circuit's random history.
 pub(crate) trait Trajectory: Sized {
+    /// Whether running gates is deterministic, so that a shared prefix or a
+    /// final state can serve every shot. Not so for noisy trajectories.
+    const DETERMINISTIC: bool = true;
+
     fn n_qubits(&self) -> usize;
     /// Run a circuit of gates only.
     fn run_gates(&mut self, gates: &Circuit) -> Result<(), Error>;
+    /// Run the circuit's gates as part of a trajectory, with any noise.
+    fn run_gates_in<R: Rng>(&mut self, gates: &Circuit, _rng: &mut R) -> Result<(), Error> {
+        self.run_gates(gates)
+    }
+    /// The bit recorded for a measurement with `outcome`: the outcome
+    /// itself unless reading it out can fail.
+    fn record<R: Rng>(&self, outcome: bool, _rng: &mut R) -> bool {
+        outcome
+    }
     /// Measure `qubit`, collapsing the state, and return the outcome.
     fn measure_qubit<R: Rng>(&mut self, qubit: usize, rng: &mut R) -> Result<bool, Error>;
     /// An independent copy, for another shot.
@@ -65,6 +78,15 @@ pub(crate) fn sample_circuit<E: Trajectory, R: Rng>(
         ));
     }
     let mut counts = BTreeMap::new();
+    if !E::DETERMINISTIC {
+        for _ in 0..shots {
+            let mut state = engine.duplicate()?;
+            let mut clbits = vec![false; circuit.n_clbits()];
+            follow(&mut state, &circuit.pieces(), &mut clbits, rng)?;
+            *counts.entry(pack_bits(&clbits)).or_insert(0) += 1;
+        }
+        return Ok(counts);
+    }
     if let Some(measured) = terminal_measurements(circuit).filter(|m| m.len() <= 64) {
         // Simulate once, then read each sample's measured qubits into their
         // classical bits (a later measurement into the same bit wins).
@@ -94,13 +116,17 @@ pub(crate) fn sample_circuit<E: Trajectory, R: Rng>(
         let mut state = start.duplicate()?;
         let mut clbits = vec![false; circuit.n_clbits()];
         follow(&mut state, rest, &mut clbits, rng)?;
-        let bits = clbits
-            .iter()
-            .enumerate()
-            .fold(0u64, |acc, (c, &b)| acc | (b as u64) << c);
-        *counts.entry(bits).or_insert(0) += 1;
+        *counts.entry(pack_bits(&clbits)).or_insert(0) += 1;
     }
     Ok(counts)
+}
+
+/// Classical bits as an integer, bit 0 least significant.
+fn pack_bits(clbits: &[bool]) -> u64 {
+    clbits
+        .iter()
+        .enumerate()
+        .fold(0u64, |acc, (c, &b)| acc | (b as u64) << c)
 }
 
 fn check_runnable<E: Trajectory>(engine: &E, circuit: &Circuit) -> Result<(), Error> {
@@ -127,9 +153,10 @@ fn follow<E: Trajectory, R: Rng>(
 ) -> Result<(), Error> {
     for piece in pieces {
         match piece {
-            Piece::Gates(gates) => engine.run_gates(gates)?,
+            Piece::Gates(gates) => engine.run_gates_in(gates, rng)?,
             Piece::Instruction(Instruction::Measure { qubit, clbit }) => {
-                clbits[*clbit] = engine.measure_qubit(*qubit, rng)?;
+                let outcome = engine.measure_qubit(*qubit, rng)?;
+                clbits[*clbit] = engine.record(outcome, rng);
             }
             Piece::Instruction(Instruction::Reset { qubit }) => {
                 if engine.measure_qubit(*qubit, rng)? {

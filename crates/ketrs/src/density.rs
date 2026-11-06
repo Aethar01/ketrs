@@ -155,6 +155,32 @@ impl Channel {
         self.n_qubits
     }
 
+    /// The channel as a mixture of unitaries `(pᵢ, Uᵢ)`, if every Kraus
+    /// operator is one scaled (`Kᵢ†Kᵢ = pᵢ·1`), as for Pauli channels.
+    /// Terms with `pᵢ = 0` are dropped.
+    pub(crate) fn as_mixture(&self) -> Option<Vec<(f64, Vec<C64>)>> {
+        let dim = 1 << self.n_qubits;
+        let mut terms = Vec::new();
+        for k in &self.kraus {
+            let p = (0..dim).map(|m| k[m * dim].norm_sqr()).sum::<f64>();
+            for r in 0..dim {
+                for c in 0..dim {
+                    let kk: C64 = (0..dim)
+                        .map(|m| k[m * dim + r].conj() * k[m * dim + c])
+                        .sum();
+                    let want = if r == c { p } else { 0.0 };
+                    if (kk - want).norm() > 1e-12 {
+                        return None;
+                    }
+                }
+            }
+            if p > 1e-15 {
+                terms.push((p, scaled(k, 1.0 / p)));
+            }
+        }
+        Some(terms)
+    }
+
     /// The Kraus operators, each `2^k × 2^k` row-major.
     pub fn kraus(&self) -> &[Vec<C64>] {
         &self.kraus
@@ -199,13 +225,43 @@ fn pauli_matrix(n_qubits: usize, string: &PauliString) -> Vec<C64> {
 
 /// Noise applied after every gate: `one_qubit` on each qubit of a gate
 /// that isn't a two-qubit gate with `two_qubit` set, and `two_qubit` on
-/// the pair of a two-qubit gate.
+/// the pair of a two-qubit gate; and readout error on measurements.
 #[derive(Clone, Debug, Default)]
 pub struct NoiseModel {
     /// A one-qubit channel after every gate, on each of its qubits.
     pub one_qubit: Option<Channel>,
     /// A two-qubit channel after every two-qubit gate.
     pub two_qubit: Option<Channel>,
+    /// `[P(read 1 | 0), P(read 0 | 1)]`: the chance that a measurement
+    /// records the wrong bit (the state collapses to the true outcome).
+    /// Used by noisy trajectories; density matrices don't measure.
+    pub readout: Option<[f64; 2]>,
+}
+
+impl NoiseModel {
+    /// The channels after `op`, each with the qubits it acts on.
+    pub(crate) fn channels_after(&self, op: &Operation) -> Vec<(&Channel, Vec<usize>)> {
+        let qubits = op.qubits();
+        match (&self.two_qubit, qubits.len()) {
+            (Some(channel), 2) => vec![(channel, qubits)],
+            _ => match &self.one_qubit {
+                Some(channel) => qubits.iter().map(|&q| (channel, vec![q])).collect(),
+                None => Vec::new(),
+            },
+        }
+    }
+
+    /// Fail unless the readout probabilities are probabilities.
+    pub(crate) fn check(&self) -> Result<(), Error> {
+        if let Some(p) = self.readout
+            && p.iter().any(|p| !(0.0..=1.0).contains(p))
+        {
+            return Err(Error::InvalidArgument(format!(
+                "readout error probabilities {p:?} must lie in [0, 1]"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// A mixed state of `n` qubits as a density matrix.
@@ -371,14 +427,7 @@ impl DensityMatrix {
         let n = self.n_qubits;
         let mut steps = Vec::new();
         for op in circuit.ops() {
-            let qubits = op.qubits();
-            let channels: Vec<(&Channel, Vec<usize>)> = match (&noise.two_qubit, qubits.len()) {
-                (Some(channel), 2) => vec![(channel, qubits.clone())],
-                _ => match &noise.one_qubit {
-                    Some(channel) => qubits.iter().map(|&q| (channel, vec![q])).collect(),
-                    None => Vec::new(),
-                },
-            };
+            let channels = noise.channels_after(op);
             match local_matrix(op) {
                 Some((local, u)) if !channels.is_empty() => {
                     steps.push(superoperator_step(

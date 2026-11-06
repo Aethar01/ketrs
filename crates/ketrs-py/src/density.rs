@@ -111,19 +111,22 @@ impl PyChannel {
 
 /// Noise after every gate: `one_qubit` (a 1-qubit `Channel`) on each qubit
 /// of a gate, except that two-qubit gates get `two_qubit` on the pair when
-/// it is given.
+/// it is given. `readout = (p10, p01)` gives the chances that a measurement
+/// records 1 for outcome 0 and 0 for outcome 1; statevector trajectories
+/// (`Statevector.run`/`sample_circuit` with `noise=`) apply it.
 #[pyclass(name = "NoiseModel", module = "ketrs", frozen)]
 pub(crate) struct PyNoiseModel {
-    inner: NoiseModel,
+    pub(crate) inner: NoiseModel,
 }
 
 #[pymethods]
 impl PyNoiseModel {
     #[new]
-    #[pyo3(signature = (one_qubit=None, two_qubit=None))]
+    #[pyo3(signature = (one_qubit=None, two_qubit=None, readout=None))]
     fn new(
         one_qubit: Option<PyRef<'_, PyChannel>>,
         two_qubit: Option<PyRef<'_, PyChannel>>,
+        readout: Option<(f64, f64)>,
     ) -> PyResult<Self> {
         let check = |c: &Option<PyRef<'_, PyChannel>>, k: usize| match c {
             Some(c) if c.inner.n_qubits() != k => Err(PyValueError::new_err(format!(
@@ -134,10 +137,18 @@ impl PyNoiseModel {
         };
         check(&one_qubit, 1)?;
         check(&two_qubit, 2)?;
+        if let Some((a, b)) = readout
+            && !((0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b))
+        {
+            return Err(PyValueError::new_err(
+                "readout error probabilities must lie in [0, 1]",
+            ));
+        }
         Ok(PyNoiseModel {
             inner: NoiseModel {
                 one_qubit: one_qubit.map(|c| c.inner.clone()),
                 two_qubit: two_qubit.map(|c| c.inner.clone()),
+                readout: readout.map(|(a, b)| [a, b]),
             },
         })
     }
