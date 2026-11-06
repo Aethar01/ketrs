@@ -81,6 +81,40 @@ pub trait Scalar:
     fn scale_slice(s: &mut [Self], f: Self) {
         s.iter_mut().for_each(|a| *a *= f);
     }
+
+    /// Multiply `s` elementwise by `pattern` repeated, for diagonal gates
+    /// on low qubits. `s.len()` is a multiple of `pattern.len()`.
+    #[inline]
+    fn scale_pattern(s: &mut [Self], pattern: &[Self]) {
+        for chunk in s.chunks_exact_mut(pattern.len()) {
+            chunk.iter_mut().zip(pattern).for_each(|(a, &f)| *a *= f);
+        }
+    }
+
+    /// [`apply_pair`](Self::apply_pair) on every pair `(s[i], s[i + stride])`
+    /// of a block whose length is a multiple of `2·stride`: gates on low
+    /// qubits, whose pairs are too short to hand out one run at a time.
+    #[inline]
+    fn apply_pair_strided(m: &[[Self; 2]; 2], s: &mut [Self], stride: usize) {
+        for chunk in s.chunks_exact_mut(2 * stride) {
+            let (lo, hi) = chunk.split_at_mut(stride);
+            Self::apply_pair(m, lo, hi);
+        }
+    }
+
+    /// [`apply_quad`](Self::apply_quad) on matching slices `lo` and `hi`
+    /// (the high qubit clear and set) whose low qubit has stride `half`:
+    /// every `(lo[i], lo[i + half], hi[i], hi[i + half])`. Lengths are
+    /// multiples of `2·half`.
+    #[inline]
+    fn apply_quad_strided(m: &[[Self; 4]; 4], lo: &mut [Self], hi: &mut [Self], half: usize) {
+        let pairs = lo.chunks_exact_mut(2 * half).zip(hi.chunks_exact_mut(2 * half));
+        for (l, h) in pairs {
+            let (s00, s01) = l.split_at_mut(half);
+            let (s10, s11) = h.split_at_mut(half);
+            Self::apply_quad(m, [s00, s01, s10, s11]);
+        }
+    }
 }
 
 /// A complex amplitude type, which can hold any state or operator.
@@ -176,6 +210,58 @@ impl Scalar for C64 {
         }
         s.iter_mut().for_each(|a| *a *= f);
     }
+
+    #[inline]
+    fn scale_pattern(s: &mut [Self], pattern: &[Self]) {
+        #[cfg(target_arch = "x86_64")]
+        if simd::avx2_fma() && (2..=simd::MAX_PATTERN).contains(&pattern.len()) {
+            // SAFETY: the CPU supports AVX2 and FMA.
+            unsafe { simd::scale_pattern_avx2(s, pattern) };
+            return;
+        }
+        for chunk in s.chunks_exact_mut(pattern.len()) {
+            chunk.iter_mut().zip(pattern).for_each(|(a, &f)| *a *= f);
+        }
+    }
+
+    #[inline]
+    fn apply_pair_strided(m: &[[Self; 2]; 2], s: &mut [Self], stride: usize) {
+        #[cfg(target_arch = "x86_64")]
+        if simd::avx2_fma() {
+            // SAFETY: the CPU supports AVX2 and FMA.
+            unsafe { simd::apply_pair_strided_avx2(m, s, stride) };
+            return;
+        }
+        for chunk in s.chunks_exact_mut(2 * stride) {
+            let (lo, hi) = chunk.split_at_mut(stride);
+            for (a, b) in lo.iter_mut().zip(hi) {
+                let (x, y) = (*a, *b);
+                *a = m[0][0] * x + m[0][1] * y;
+                *b = m[1][0] * x + m[1][1] * y;
+            }
+        }
+    }
+
+    #[inline]
+    fn apply_quad_strided(m: &[[Self; 4]; 4], lo: &mut [Self], hi: &mut [Self], half: usize) {
+        #[cfg(target_arch = "x86_64")]
+        if simd::avx2_fma() {
+            // SAFETY: the CPU supports AVX2 and FMA.
+            unsafe { simd::apply_quad_strided_avx2(m, lo, hi, half) };
+            return;
+        }
+        let pairs = lo.chunks_exact_mut(2 * half).zip(hi.chunks_exact_mut(2 * half));
+        for (l, h) in pairs {
+            let (s00, s01) = l.split_at_mut(half);
+            let (s10, s11) = h.split_at_mut(half);
+            let quads = s00.iter_mut().zip(s01.iter_mut()).zip(s10.iter_mut()).zip(s11);
+            for (((a0, a1), a2), a3) in quads {
+                let v = [*a0, *a1, *a2, *a3];
+                let row = |r: usize| (0..4).map(|c| m[r][c] * v[c]).sum::<C64>();
+                (*a0, *a1, *a2, *a3) = (row(0), row(1), row(2), row(3));
+            }
+        }
+    }
 }
 
 impl Scalar for f32 {
@@ -256,6 +342,7 @@ mod simd {
     ///
     /// # Safety
     /// The CPU must support AVX2 and FMA.
+    #[inline]
     #[target_feature(enable = "avx2,fma")]
     pub(super) unsafe fn apply_pair_avx2(m: &[[C64; 2]; 2], lo: &mut [C64], hi: &mut [C64]) {
         let n = lo.len().min(hi.len());
@@ -264,6 +351,21 @@ mod simd {
         let ((r10, i10), (r11, i11)) = (split(m[1][0]), split(m[1][1]));
         let (lo_ptr, hi_ptr) = (lo.as_mut_ptr().cast::<f64>(), hi.as_mut_ptr().cast::<f64>());
         let mut k = 0;
+        if m.iter().flatten().all(|c| c.im == 0.0) {
+            // Real matrices (Ry, H) need no cross terms: half the work.
+            while k + 2 <= n {
+                // SAFETY: as below.
+                unsafe {
+                    let x = _mm256_loadu_pd(lo_ptr.add(2 * k));
+                    let y = _mm256_loadu_pd(hi_ptr.add(2 * k));
+                    let a = _mm256_fmadd_pd(r01, y, _mm256_mul_pd(r00, x));
+                    let b = _mm256_fmadd_pd(r11, y, _mm256_mul_pd(r10, x));
+                    _mm256_storeu_pd(lo_ptr.add(2 * k), a);
+                    _mm256_storeu_pd(hi_ptr.add(2 * k), b);
+                }
+                k += 2;
+            }
+        }
         while k + 2 <= n {
             // SAFETY: k + 2 ≤ n, so four f64s from 2k are in bounds;
             // Complex64 is two f64s with no padding.
@@ -289,6 +391,7 @@ mod simd {
     ///
     /// # Safety
     /// The CPU must support AVX2 and FMA.
+    #[inline]
     #[target_feature(enable = "avx2,fma")]
     pub(super) unsafe fn apply_quad_avx2(m: &[[C64; 4]; 4], s: [&mut [C64]; 4]) {
         let n = s.iter().map(|x| x.len()).min().unwrap_or(0);
@@ -345,6 +448,139 @@ mod simd {
         }
         for a in &mut s[k..] {
             *a *= f;
+        }
+    }
+
+    /// The longest pattern [`scale_pattern_avx2`] takes.
+    pub(super) const MAX_PATTERN: usize = 16;
+
+    /// [`Scalar::scale_pattern`](super::Scalar::scale_pattern) for complex
+    /// doubles, with an even pattern of at most `MAX_PATTERN` factors held
+    /// in registers.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2 and FMA.
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn scale_pattern_avx2(s: &mut [C64], pattern: &[C64]) {
+        let len = pattern.len();
+        assert!(len.is_multiple_of(2) && len <= MAX_PATTERN && s.len().is_multiple_of(len));
+        let factors: [_; MAX_PATTERN / 2] = std::array::from_fn(|j| {
+            let (a, b) = (pattern.get(2 * j), pattern.get(2 * j + 1));
+            column(a.copied().unwrap_or_default(), b.copied().unwrap_or_default())
+        });
+        let ptr = s.as_mut_ptr().cast::<f64>();
+        for chunk in 0..s.len() / len {
+            for (j, &(re, im)) in factors[..len / 2].iter().enumerate() {
+                // SAFETY: amplitudes chunk·len + 2j and the next are in
+                // bounds, as len divides s.len().
+                unsafe {
+                    let p = ptr.add(2 * (chunk * len + 2 * j));
+                    _mm256_storeu_pd(p, cmul(re, im, _mm256_loadu_pd(p)));
+                }
+            }
+        }
+    }
+
+    /// Broadcast the low (`HIGH = false`) or high complex number of `v`
+    /// to both halves.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn broadcast<const HIGH: bool>(v: __m256d) -> __m256d {
+        if HIGH {
+            _mm256_permute2f128_pd::<0x11>(v, v)
+        } else {
+            _mm256_permute2f128_pd::<0x00>(v, v)
+        }
+    }
+
+    /// `(a, b)` as a register's `(re, re, re, re)` and `(im, im, im, im)`
+    /// parts, `a` in the low half: one column of a matrix applied to
+    /// adjacent amplitudes.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn column(a: C64, b: C64) -> (__m256d, __m256d) {
+        (
+            _mm256_setr_pd(a.re, a.re, b.re, b.re),
+            _mm256_setr_pd(a.im, a.im, b.im, b.im),
+        )
+    }
+
+    /// [`Scalar::apply_pair_strided`](super::Scalar::apply_pair_strided)
+    /// for complex doubles. At stride 1 each pair fills one register.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2 and FMA.
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn apply_pair_strided_avx2(m: &[[C64; 2]; 2], s: &mut [C64], stride: usize) {
+        if stride > 1 {
+            for chunk in s.chunks_exact_mut(2 * stride) {
+                let (lo, hi) = chunk.split_at_mut(stride);
+                // SAFETY: the CPU supports AVX2 and FMA.
+                unsafe { apply_pair_avx2(m, lo, hi) };
+            }
+            return;
+        }
+        let (c0, c1) = (column(m[0][0], m[1][0]), column(m[0][1], m[1][1]));
+        let ptr = s.as_mut_ptr().cast::<f64>();
+        for k in 0..s.len() / 2 {
+            // SAFETY: amplitudes 2k and 2k + 1 are in bounds.
+            unsafe {
+                let v = _mm256_loadu_pd(ptr.add(4 * k));
+                let (x, y) = (broadcast::<false>(v), broadcast::<true>(v));
+                let out = _mm256_add_pd(cmul(c0.0, c0.1, x), cmul(c1.0, c1.1, y));
+                _mm256_storeu_pd(ptr.add(4 * k), out);
+            }
+        }
+    }
+
+    /// [`Scalar::apply_quad_strided`](super::Scalar::apply_quad_strided)
+    /// for complex doubles. At `half = 1` each half of a quad fills one
+    /// register.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2 and FMA.
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn apply_quad_strided_avx2(
+        m: &[[C64; 4]; 4],
+        lo: &mut [C64],
+        hi: &mut [C64],
+        half: usize,
+    ) {
+        if half > 1 {
+            let pairs = lo.chunks_exact_mut(2 * half).zip(hi.chunks_exact_mut(2 * half));
+            for (l, h) in pairs {
+                let (s00, s01) = l.split_at_mut(half);
+                let (s10, s11) = h.split_at_mut(half);
+                // SAFETY: the CPU supports AVX2 and FMA.
+                unsafe { apply_quad_avx2(m, [s00, s01, s10, s11]) };
+            }
+            return;
+        }
+        // Columns of the top (rows 0, 1) and bottom (rows 2, 3) halves.
+        let top: [_; 4] = std::array::from_fn(|c| column(m[0][c], m[1][c]));
+        let bottom: [_; 4] = std::array::from_fn(|c| column(m[2][c], m[3][c]));
+        let n = lo.len().min(hi.len()) / 2;
+        let (lo_ptr, hi_ptr) = (lo.as_mut_ptr().cast::<f64>(), hi.as_mut_ptr().cast::<f64>());
+        for k in 0..n {
+            // SAFETY: amplitudes 2k and 2k + 1 of both slices are in bounds.
+            unsafe {
+                let (l, h) = (_mm256_loadu_pd(lo_ptr.add(4 * k)), _mm256_loadu_pd(hi_ptr.add(4 * k)));
+                let v = [
+                    broadcast::<false>(l),
+                    broadcast::<true>(l),
+                    broadcast::<false>(h),
+                    broadcast::<true>(h),
+                ];
+                let half_of = |cols: &[(__m256d, __m256d); 4]| {
+                    let mut acc = cmul(cols[0].0, cols[0].1, v[0]);
+                    for c in 1..4 {
+                        acc = _mm256_add_pd(acc, cmul(cols[c].0, cols[c].1, v[c]));
+                    }
+                    acc
+                };
+                _mm256_storeu_pd(lo_ptr.add(4 * k), half_of(&top));
+                _mm256_storeu_pd(hi_ptr.add(4 * k), half_of(&bottom));
+            }
         }
     }
 }

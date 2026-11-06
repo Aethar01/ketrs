@@ -32,6 +32,14 @@ pub(super) const CACHE_BLOCK_QUBITS: usize = 14;
 /// Amplitudes handed to each parallel task.
 pub(super) const BLOCK: usize = 1 << 12;
 
+/// Gates on qubits below this have runs too short to hand to the kernels
+/// one at a time, so they go to strided kernels that walk whole blocks.
+const LOW_QUBITS: usize = 3;
+
+/// Diagonal gates whose qubits are all below this are applied as one
+/// repeating pattern of `2^PATTERN_QUBITS` factors at most.
+const PATTERN_QUBITS: usize = 4;
+
 /// An operation ready to apply to amplitudes of type `T`.
 #[derive(Clone)]
 pub(super) enum Prepared<T> {
@@ -199,6 +207,16 @@ impl<T: Scalar> Prepared<T> {
     /// Apply to `amps`; qubits must be valid for its length.
     pub(super) fn apply(&self, amps: &mut [T]) {
         match self {
+            Prepared::Pair { op, target } if *target < LOW_QUBITS => {
+                let stride = 1 << target;
+                if let PairOp::Diagonal(d0, d1) = *op {
+                    let p = pattern(stride, d0, d1);
+                    for_each_block(amps, |block| T::scale_pattern(block, &p))
+                } else {
+                    let m = op.matrix();
+                    for_each_block(amps, |block| T::apply_pair_strided(&m, block, stride))
+                }
+            }
             Prepared::Pair { op, target } => {
                 for_each_pair(amps, *target, 1, |_, lo, hi| op.apply(lo, hi))
             }
@@ -251,6 +269,15 @@ impl<T: Scalar> PairOp<T> {
         } else {
             PairOp::General(m)
         })
+    }
+
+    /// The matrix.
+    fn matrix(&self) -> [[T; 2]; 2] {
+        match *self {
+            PairOp::General(m) => m,
+            PairOp::Diagonal(d0, d1) => [[d0, T::ZERO], [T::ZERO, d1]],
+            PairOp::Flip => [[T::ZERO, T::ONE], [T::ONE, T::ZERO]],
+        }
     }
 
     #[inline]
@@ -748,10 +775,97 @@ where
     });
 }
 
+/// Call `f(block)` on blocks of at most `BLOCK` amplitudes covering the
+/// state, in parallel if it is large.
+fn for_each_block<T: Scalar>(amps: &mut [T], f: impl Fn(&mut [T]) + Sync) {
+    if amps.len() >= PARALLEL_THRESHOLD {
+        amps.par_chunks_mut(BLOCK).for_each(&f);
+    } else {
+        amps.chunks_mut(BLOCK).for_each(f);
+    }
+}
+
+/// `half` copies of `a` then `half` of `b`: the factors of a diagonal
+/// gate on the qubit with stride `half`.
+fn pattern<T: Scalar>(half: usize, a: T, b: T) -> Vec<T> {
+    [a, b].iter().flat_map(|&x| std::iter::repeat_n(x, half)).collect()
+}
+
+/// Multiply by `pattern` repeated, unless it is all ones.
+fn scale_by<T: Scalar>(s: &mut [T], pattern: &[T]) {
+    if pattern.iter().any(|&f| f != T::ONE) {
+        T::scale_pattern(s, pattern);
+    }
+}
+
+/// `m` with its middle basis states (`01` and `10`) swapped: the same
+/// operation with its two qubits exchanged.
+fn swap_middle<T: Copy>(m: &[[T; 4]; 4]) -> [[T; 4]; 4] {
+    let p = [0, 2, 1, 3];
+    std::array::from_fn(|r| std::array::from_fn(|c| m[p[r]][p[c]]))
+}
+
+/// A diagonal two-qubit gate, factors `d[2·b(high) + b(low)]`, with
+/// `low < LOW_QUBITS`.
+fn scale_quad_low<T: Scalar>(amps: &mut [T], d: [T; 4], low: usize, high: usize) {
+    if high < PATTERN_QUBITS {
+        // Both qubits low: one short pattern covers every block.
+        let p: Vec<T> = (0..2 << high)
+            .map(|i| d[2 * (i >> high & 1) + (i >> low & 1)])
+            .collect();
+        return for_each_block(amps, |block| scale_by(block, &p));
+    }
+    let half = 1 << low;
+    let (p0, p1) = (pattern(half, d[0], d[1]), pattern(half, d[2], d[3]));
+    for_each_pair(amps, high, 2 * half, |_, lo, hi| {
+        scale_by(lo, &p0);
+        scale_by(hi, &p1);
+    });
+}
+
+/// Swap `lo[i]` and `hi[j]` for every `i` with bit `low` equal to
+/// `lo_bit` and `j = i` with that bit set to `hi_bit`. Lengths are
+/// multiples of `2^(low+1)`.
+fn swap_low<T>(lo: &mut [T], hi: &mut [T], low: usize, lo_bit: bool, hi_bit: bool) {
+    let half = 1 << low;
+    let (a, b) = (if lo_bit { half } else { 0 }, if hi_bit { half } else { 0 });
+    for (l, h) in lo.chunks_exact_mut(2 * half).zip(hi.chunks_exact_mut(2 * half)) {
+        for i in 0..half {
+            std::mem::swap(&mut l[a + i], &mut h[b + i]);
+        }
+    }
+}
+
 /// Apply `op` to `target` where `control` is set.
 fn apply_controlled<T: Scalar>(amps: &mut [T], op: &PairOp<T>, control: usize, target: usize) {
     let (low, high) = (control.min(target), control.max(target));
     let control_is_high = control > target;
+    if low < LOW_QUBITS {
+        let stride = 1 << target;
+        match *op {
+            PairOp::Diagonal(d0, d1) => {
+                let d = if control_is_high {
+                    [T::ONE, T::ONE, d0, d1]
+                } else {
+                    [T::ONE, d0, T::ONE, d1]
+                };
+                return scale_quad_low(amps, d, low, high);
+            }
+            PairOp::Flip if !control_is_high => {
+                return for_each_pair(amps, high, 2 << low, |_, lo, hi| {
+                    swap_low(lo, hi, low, true, true)
+                });
+            }
+            _ if control_is_high => {
+                let m = op.matrix();
+                return for_each_pair(amps, control, 2 * stride, |_, _, hi| {
+                    T::apply_pair_strided(&m, hi, stride)
+                });
+            }
+            // A general gate under a low control is rare: use the kernels below.
+            _ => {}
+        }
+    }
     for_each_quad(amps, low, high, |_, s01, s10, s11| {
         if control_is_high {
             op.apply(s10, s11);
@@ -763,12 +877,35 @@ fn apply_controlled<T: Scalar>(amps: &mut [T], op: &PairOp<T>, control: usize, t
 
 fn apply_swap<T: Scalar>(amps: &mut [T], a: usize, b: usize) {
     let (low, high) = (a.min(b), a.max(b));
+    if low < LOW_QUBITS {
+        return for_each_pair(amps, high, 2 << low, |_, lo, hi| {
+            swap_low(lo, hi, low, true, false)
+        });
+    }
     for_each_quad(amps, low, high, |_, s01, s10, _| s01.swap_with_slice(s10));
 }
 
 fn apply_quad<T: Scalar>(amps: &mut [T], op: &QuadOp<T>, q0: usize, q1: usize) {
     let (low, high) = (q0.min(q1), q0.max(q1));
     let q0_is_low = q0 < q1;
+    if low < LOW_QUBITS {
+        let half = 1 << low;
+        match op {
+            QuadOp::Diagonal(d) => {
+                let mut d = *d;
+                if !q0_is_low {
+                    d.swap(1, 2);
+                }
+                return scale_quad_low(amps, d, low, high);
+            }
+            QuadOp::General(m) => {
+                let m = if q0_is_low { *m } else { swap_middle(m) };
+                return for_each_pair(amps, high, 2 * half, |_, lo, hi| {
+                    T::apply_quad_strided(&m, lo, hi, half)
+                });
+            }
+        }
+    }
     match op {
         QuadOp::Diagonal(d) => {
             let mut d = *d;
