@@ -96,7 +96,7 @@ def main() -> None:
     results = []
     gpu = ketrs.gpu_device()
     print(f"GPU: {gpu or 'none'}")
-    print("| circuit | qubits | ketrs | ketrs GPU | Aer | Aer (no fusion) | NumPy | vs best Aer | GPU vs best Aer | vs NumPy |")
+    print("| circuit | qubits | ketrs | ketrs GPU | Aer | Aer (no fusion) | NumPy | vs best Aer | GPU vs ketrs CPU | vs NumPy |")
     print("|---|---|---|---|---|---|---|---|---|---|")
     for name, build in [("qft", qft), ("layered_d10", layered)]:
         for n in sizes:
@@ -117,7 +117,7 @@ def main() -> None:
             numpy_cell = fmt(row["numpy"]) if row["numpy"] else "–"
             vs_numpy = f"{row['numpy'] / row['ketrs']:.1f}×" if row["numpy"] else "–"
             gpu_cell = fmt(row["ketrs_gpu"]) if row["ketrs_gpu"] else "–"
-            gpu_vs = f"{best_aer / row['ketrs_gpu']:.2f}×" if row["ketrs_gpu"] else "–"
+            gpu_vs = f"{row['ketrs'] / row['ketrs_gpu']:.2f}×" if row["ketrs_gpu"] else "–"
             print(
                 f"| {name} | {n} | {fmt(row['ketrs'])} | {gpu_cell} | {fmt(row['aer'])} "
                 f"| {fmt(row['aer_no_fusion'])} | {numpy_cell} "
