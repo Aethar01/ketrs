@@ -130,8 +130,7 @@ Added along the way (from the Schwinger project's optimisations):
 ## Later
 
 - GPU: a single-precision
-  option for GPUs without f64; more than 8 state buffers (beyond 30 qubits
-  needs a GPU with more than 16 GB anyway).
+  option for GPUs without f64.
 - Classical control on the MPS and GPU engines; Qiskit `while`/`for` loops
   and expression conditions.
 - Density matrices and noise, SIMD kernels, OpenQASM 3 parser.

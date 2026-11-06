@@ -16,7 +16,7 @@
 
 layout(local_size_x = 256) in;
 
-#define MAX_CHUNKS 8
+#define MAX_CHUNKS 16
 
 // Binding 3 is a second state of the same size, the "partner", for kernels
 // that combine two states (overlaps, H|ψ⟩); otherwise it repeats binding 0.

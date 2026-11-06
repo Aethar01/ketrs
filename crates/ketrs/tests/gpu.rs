@@ -160,7 +160,8 @@ fn hamiltonian(n: usize, seed: u64) -> PauliSum {
 fn chunked_states_match_cpu() {
     let Some(ctx) = gpu() else { return };
     let n = 12;
-    for chunk_bits in [9, 10, 11] {
+    // chunk_bits 8 uses all sixteen buffers.
+    for chunk_bits in [8, 9, 10, 11] {
         let circ = random_circuit(n, 80, chunk_bits as u64);
         let mut gpu_state = GpuStatevector::zero_with_chunk_bits(&ctx, n, chunk_bits).unwrap();
         gpu_state.run(&circ).unwrap();
@@ -343,6 +344,16 @@ fn evolution_on_gpu_matches_cpu() {
         assert_close(&gpu_state.amplitudes().unwrap(), cpu.amplitudes());
         assert!((gpu_state.norm_sqr().unwrap() - 1.0).abs() < 1e-10);
     }
+}
+
+#[test]
+fn too_many_buffers_are_rejected() {
+    let Some(ctx) = gpu() else { return };
+    // 12 qubits in buffers of 2⁷ would need 32 buffers.
+    assert!(matches!(
+        GpuStatevector::zero_with_chunk_bits(&ctx, 12, 7),
+        Err(Error::Gpu(_))
+    ));
 }
 
 /// A 28-qubit state (4 GiB, two buffers on most GPUs) without downloading

@@ -10,10 +10,10 @@
 //! single parameter buffer.
 //!
 //! Amplitudes are complex doubles, `16 · 2ⁿ` bytes in all. A state larger
-//! than one storage buffer (usually 4 GiB, so 27 qubits) is split over up to
-//! eight buffers, which kernels index per amplitude; that needs Vulkan 1.2's
-//! non-uniform descriptor indexing and allows up to 30 qubits, memory
-//! permitting. Expectation values and sampling run on the GPU, downloading
+//! than one storage buffer (4 GiB or just under, so 27 or 28 qubits) is
+//! split over up to sixteen buffers, which kernels index per amplitude;
+//! that needs Vulkan 1.2's non-uniform descriptor indexing and allows up to
+//! 31 qubits, memory permitting. Expectation values and sampling run on the GPU, downloading
 //! only partial sums and the sampled blocks.
 
 mod context;

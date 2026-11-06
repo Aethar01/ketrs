@@ -74,7 +74,7 @@ const TILE_SHADERS: [(u32, [&[u8]; 2]); 3] = [
 
 /// State buffers a chunked kernel can address (`MAX_CHUNKS` in
 /// `shaders/common.glsl`).
-pub(crate) const MAX_CHUNKS: usize = 8;
+pub(crate) const MAX_CHUNKS: usize = 16;
 
 /// Workgroups in an expectation-value dispatch, so each one writes at most
 /// this many partial sums.
@@ -285,7 +285,13 @@ impl GpuContext {
             else {
                 continue;
             };
-            if features.shader_float64 != vk::TRUE || props.api_version < vk::API_VERSION_1_2 {
+            // Bindings 0 and 3 hold MAX_CHUNKS state buffers each.
+            let buffers = 2 * MAX_CHUNKS as u32 + 2;
+            if features.shader_float64 != vk::TRUE
+                || props.api_version < vk::API_VERSION_1_2
+                || props.limits.max_per_stage_descriptor_storage_buffers < buffers
+                || props.limits.max_descriptor_set_storage_buffers < buffers
+            {
                 continue;
             }
             let rank = match props.device_type {

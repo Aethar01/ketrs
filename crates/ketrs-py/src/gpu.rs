@@ -37,7 +37,7 @@ struct PyGpuStatevector {
 #[pymethods]
 impl PyGpuStatevector {
     /// `|0…0⟩` on `n_qubits` qubits. States over one GPU buffer (usually
-    /// 27 qubits) are split across several, up to 30 qubits.
+    /// 27 qubits) are split across several, up to 31 qubits.
     #[new]
     #[pyo3(signature = (n_qubits, seed=None))]
     fn new(n_qubits: usize, seed: Option<u64>) -> PyResult<Self> {
