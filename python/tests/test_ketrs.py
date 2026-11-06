@@ -213,6 +213,15 @@ def test_qiskit_break_and_continue():
     assert counts == {"11": 50}
 
 
+def test_assign_drives_repeat_until_success():
+    body = ketrs.Circuit(1, 2).reset(0).h(0).measure(0, 0)
+    circ = ketrs.Circuit(1, 2).assign(0, ("value", 0))
+    circ.while_loop(("==", ("bit", 0), ("value", 0)), body)
+    circ.assign(1, ("not", ("bit", 0)))
+    counts = ketrs.Statevector(1, seed=3).sample_circuit(circ, 50)
+    assert counts == {"01": 50}
+
+
 def test_nonlinear_parameter_is_rejected():
     from qiskit.circuit import Parameter
 

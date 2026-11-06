@@ -427,6 +427,22 @@ impl PyCircuit {
         Ok(slf)
     }
 
+    /// Set classical bit `clbit` to whether the classical expression `value`
+    /// (see `if_expr`) is nonzero.
+    fn assign<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        clbit: usize,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner
+            .push_instruction(Instruction::Assign {
+                clbit,
+                value: parse_expr(value)?,
+            })
+            .map_err(to_py_err)?;
+        Ok(slf)
+    }
+
     /// Run `body` while the classical expression `condition` (see
     /// `if_expr`) is nonzero, testing before each pass. Runs that loop a
     /// million times raise.

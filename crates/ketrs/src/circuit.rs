@@ -435,6 +435,10 @@ impl Circuit {
                 clbit_ok(*clbit)?;
             }
             Instruction::Reset { qubit } => qubit_ok(*qubit)?,
+            Instruction::Assign { clbit, value } => {
+                clbit_ok(*clbit)?;
+                value.validate(self.n_clbits)?;
+            }
             Instruction::IfElse {
                 condition,
                 then,
@@ -491,6 +495,16 @@ impl Circuit {
             self.measure(q, q);
         }
         self
+    }
+
+    /// Set classical bit `clbit` to whether `value` (a
+    /// [`Condition`](crate::Condition) or any [`Expr`]) is nonzero, as
+    /// `c[clbit] = value;` in OpenQASM 3.
+    pub fn assign(&mut self, clbit: usize, value: impl Into<Expr>) -> &mut Self {
+        self.add_instruction(Instruction::Assign {
+            clbit,
+            value: value.into(),
+        })
     }
 
     /// Measure `qubit` and set it to `|0⟩`.

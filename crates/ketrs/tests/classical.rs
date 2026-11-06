@@ -422,3 +422,96 @@ fn expressions_are_validated() {
         .is_err()
     );
 }
+
+#[test]
+fn assignments_drive_repeat_until_success() {
+    // `done = false; while (!done) { … done = measure q; }`, with `done`
+    // first set by assignment (to 1 and then 0, so the assignment counts).
+    let mut circ = Circuit::with_clbits(1, 1);
+    circ.assign(0, Expr::Value(1)).assign(0, Expr::Value(0));
+    let mut body = Circuit::with_clbits(1, 1);
+    body.reset(0).h(0).measure(0, 0);
+    circ.while_loop(
+        Expr::binary(BinaryOp::Equal, Expr::Bit(0), Expr::Value(0)),
+        body,
+    );
+    let counts = Statevector::zero(1)
+        .sample_circuit(&circ, 500, &mut rng(30))
+        .unwrap();
+    assert_eq!(counts, BTreeMap::from([(1, 500)]));
+}
+
+#[test]
+fn compound_assignments_feed_later_branches() {
+    // c[2] = c[0] == 1 && c[1] == 0, then `if (c[2]) x q[2]` into c[3].
+    let mut circ = Circuit::with_clbits(3, 4);
+    circ.h(0).h(1).measure(0, 0).measure(1, 1);
+    circ.assign(
+        2,
+        Expr::binary(
+            BinaryOp::And,
+            Expr::binary(BinaryOp::Equal, Expr::Bit(0), Expr::Value(1)),
+            Expr::binary(BinaryOp::Equal, Expr::Bit(1), Expr::Value(0)),
+        ),
+    );
+    let mut flip = Circuit::with_clbits(3, 4);
+    flip.x(2);
+    circ.if_test(Expr::Bit(2), flip, None);
+    circ.measure(2, 3);
+    // Integers store whether they are nonzero.
+    let mut wide = circ.clone();
+    wide.assign(1, Expr::Value(6));
+    let counts = Statevector::zero(3)
+        .sample_circuit(&circ, 4_000, &mut rng(31))
+        .unwrap();
+    assert_eq!(counts.len(), 4);
+    for (&bits, &n) in &counts {
+        let marked = bits & 1 == 1 && bits >> 1 & 1 == 0;
+        assert_eq!(bits >> 2, if marked { 0b11 } else { 0 }, "{bits:04b}");
+        assert_binomial(n, 4_000, 0.25);
+    }
+    let wide = Statevector::zero(3)
+        .sample_circuit(&wide, 100, &mut rng(32))
+        .unwrap();
+    assert!(wide.keys().all(|bits| bits >> 1 & 1 == 1));
+}
+
+#[test]
+fn assignments_in_both_branches() {
+    // c[2] = 1; c[0] = measure; if (c[0]) { c[1] = 1; c[2] = 0 }
+    // else { c[1] = c[2] == 0 }: the else branch keeps c[2].
+    let mut circ = Circuit::with_clbits(1, 3);
+    circ.assign(2, Expr::Value(1)).h(0).measure(0, 0);
+    let mut then = Circuit::with_clbits(1, 3);
+    then.assign(1, Expr::Value(1)).assign(2, Expr::Value(0));
+    let mut otherwise = Circuit::with_clbits(1, 3);
+    otherwise.assign(
+        1,
+        Expr::binary(BinaryOp::Equal, Expr::Bit(2), Expr::Value(0)),
+    );
+    circ.if_test(Expr::Bit(0), then, Some(otherwise));
+    let counts = Statevector::zero(1)
+        .sample_circuit(&circ, 2_000, &mut rng(33))
+        .unwrap();
+    assert_eq!(counts.keys().copied().collect::<Vec<_>>(), [0b011, 0b100]);
+    assert_binomial(counts[&0b011], 2_000, 0.5);
+}
+
+#[test]
+fn assignments_are_validated() {
+    let mut circ = Circuit::with_clbits(1, 2);
+    assert!(
+        circ.push_instruction(Instruction::Assign {
+            clbit: 2,
+            value: Expr::Value(1),
+        })
+        .is_err()
+    );
+    assert!(
+        circ.push_instruction(Instruction::Assign {
+            clbit: 0,
+            value: Expr::Bit(5),
+        })
+        .is_err()
+    );
+}

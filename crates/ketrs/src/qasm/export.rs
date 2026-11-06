@@ -81,6 +81,20 @@ impl Writer {
                 self.line(depth, &format!("c[{clbit}] = measure q[{qubit}];"));
             }
             Instruction::Reset { qubit } => self.line(depth, &format!("reset q[{qubit}];")),
+            Instruction::Assign { clbit, value } => {
+                let value = match value {
+                    Expr::Value(0) => "false".into(),
+                    Expr::Value(1) => "true".into(),
+                    Expr::Bit(_) | Expr::Not(_) => self.expr(value)?,
+                    Expr::Binary { op, .. }
+                        if !matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) =>
+                    {
+                        self.expr(value)?
+                    }
+                    _ => format!("{} != 0", self.expr(value)?),
+                };
+                self.line(depth, &format!("c[{clbit}] = {value};"));
+            }
             Instruction::IfElse {
                 condition,
                 then,

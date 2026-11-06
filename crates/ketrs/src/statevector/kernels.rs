@@ -324,7 +324,9 @@ pub(super) fn run<T: Scalar>(amps: &mut [T], ops: &[Prepared<T>]) {
             CACHE_BLOCK_QUBITS,
             rest.iter().map(Prepared::qubit_mask),
         );
+        let __t = std::time::Instant::now();
         if count >= 2 {
+            if std::env::var_os("KETRS_TRACE").is_some() { eprint!("TILE k={} q={:#x} count={} ", tile.k(), tile.qubits(), count); }
             let (batch, tail) = rest.split_at(count);
             let local: Vec<_> = batch.iter().map(|op| op.localize(&tile)).collect();
             tile.for_each([amps], |_, [block]| {
@@ -334,9 +336,11 @@ pub(super) fn run<T: Scalar>(amps: &mut [T], ops: &[Prepared<T>]) {
             });
             rest = tail;
         } else {
+            if std::env::var_os("KETRS_TRACE").is_some() { eprint!("SINGLE mask={:#x} ", first.qubit_mask()); }
             first.apply(amps);
             rest = &rest[1..];
         }
+        if std::env::var_os("KETRS_TRACE").is_some() { eprintln!("{:.2}ms", __t.elapsed().as_secs_f64()*1e3); }
     }
 }
 

@@ -103,19 +103,26 @@ pub(crate) fn sample_circuit<E: Trajectory, R: Rng>(
         }
         return Ok(counts);
     }
+    // The state up to the first measurement or control flow is the same for
+    // every shot, and so are the bits that assignments there set.
     let pieces = circuit.pieces();
-    let (prefix, rest) = match pieces.split_first() {
-        Some((Piece::Gates(gates), rest)) => (Some(gates), rest),
-        _ => (None, &pieces[..]),
-    };
     let mut start = engine.duplicate()?;
-    if let Some(gates) = prefix {
-        start.run_gates(gates)?;
+    let mut initial = vec![false; circuit.n_clbits()];
+    let mut shared = 0;
+    for piece in &pieces {
+        match piece {
+            Piece::Gates(gates) => start.run_gates(gates)?,
+            Piece::Instruction(Instruction::Assign { clbit, value }) => {
+                initial[*clbit] = value.holds(&initial);
+            }
+            _ => break,
+        }
+        shared += 1;
     }
     for _ in 0..shots {
         let mut state = start.duplicate()?;
-        let mut clbits = vec![false; circuit.n_clbits()];
-        top_level(follow(&mut state, rest, &mut clbits, rng)?)?;
+        let mut clbits = initial.clone();
+        top_level(follow(&mut state, &pieces[shared..], &mut clbits, rng)?)?;
         *counts.entry(pack_bits(&clbits)).or_insert(0) += 1;
     }
     Ok(counts)
@@ -176,6 +183,9 @@ fn follow<E: Trajectory, R: Rng>(
             Piece::Instruction(Instruction::Measure { qubit, clbit }) => {
                 let outcome = engine.measure_qubit(*qubit, rng)?;
                 clbits[*clbit] = engine.record(outcome, rng);
+            }
+            Piece::Instruction(Instruction::Assign { clbit, value }) => {
+                clbits[*clbit] = value.holds(clbits);
             }
             Piece::Instruction(Instruction::Reset { qubit }) => {
                 if engine.measure_qubit(*qubit, rng)? {

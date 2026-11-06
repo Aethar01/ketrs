@@ -242,6 +242,8 @@ enum Kind {
     Bits {
         name: String,
         size: Option<Ex>,
+        /// `bit b = …;`: the assignment or measurement that sets it.
+        init: Option<Box<Kind>>,
     },
     Input {
         name: String,
@@ -257,6 +259,11 @@ enum Kind {
     Measure {
         source: Operand,
         target: Option<Operand>,
+    },
+    /// `target = value;` for a classical value.
+    Assign {
+        target: Operand,
+        value: Ex,
     },
     Reset(Vec<Operand>),
     If {
@@ -433,14 +440,20 @@ impl Parser {
                     None
                 };
                 let name = self.ident()?;
-                if word == "bit" && self.eat_sym("=") {
-                    return Err(error(self.line(), "initialised bits are not supported"));
-                }
-                self.expect_sym(";")?;
+                let init = if word == "bit" && self.eat_sym("=") {
+                    let target = Operand {
+                        name: name.clone(),
+                        index: None,
+                    };
+                    Some(Box::new(self.assigned(target)?))
+                } else {
+                    self.expect_sym(";")?;
+                    None
+                };
                 Ok(if word == "qubit" {
                     Kind::Qubits { name, size }
                 } else {
-                    Kind::Bits { name, size }
+                    Kind::Bits { name, size, init }
                 })
             }
             "qreg" | "creg" => {
@@ -453,7 +466,11 @@ impl Parser {
                 Ok(if word == "qreg" {
                     Kind::Qubits { name, size }
                 } else {
-                    Kind::Bits { name, size }
+                    Kind::Bits {
+                        name,
+                        size,
+                        init: None,
+                    }
                 })
             }
             "input" => {
@@ -645,24 +662,34 @@ impl Parser {
                 format!("`{word}` statements are not supported"),
             )),
             _ => {
-                // An assignment from a measurement, or a gate call.
+                // An assignment, or a gate call.
                 if matches!(self.peek_at(1), Tok::Sym("=" | "[")) && self.assignment_ahead() {
                     let target = self.operand()?;
                     self.expect_sym("=")?;
-                    if !self.is_word("measure") {
-                        return Err(error(self.line(), "only measurements can be assigned"));
-                    }
-                    self.next();
-                    let source = self.operand()?;
-                    self.expect_sym(";")?;
-                    return Ok(Kind::Measure {
-                        source,
-                        target: Some(target),
-                    });
+                    return self.assigned(target);
                 }
                 self.call()
             }
         }
+    }
+
+    /// The rest of `target = …;` after the `=`: a measurement or a
+    /// classical value.
+    fn assigned(&mut self, target: Operand) -> Result<Kind, Error> {
+        let kind = if self.is_word("measure") {
+            self.next();
+            Kind::Measure {
+                source: self.operand()?,
+                target: Some(target),
+            }
+        } else {
+            Kind::Assign {
+                target,
+                value: self.expr()?,
+            }
+        };
+        self.expect_sym(";")?;
+        Ok(kind)
     }
 
     /// Whether the statement ahead is `operand = …`.
@@ -942,7 +969,7 @@ impl Lowering {
         };
         for stmt in program {
             match &stmt.kind {
-                Kind::Qubits { name, size } | Kind::Bits { name, size } => {
+                Kind::Qubits { name, size } | Kind::Bits { name, size, .. } => {
                     let n = match size {
                         Some(size) => l.int(size, &Scope::default(), stmt.line)? as usize,
                         None => 1,
@@ -1009,7 +1036,17 @@ impl Lowering {
             Kind::Qubits { .. } | Kind::Bits { .. } if scope.nested => {
                 Err(error(line, "declarations must be at the top level"))
             }
-            Kind::Qubits { .. } | Kind::Bits { .. } => Ok(()),
+            Kind::Qubits { .. } | Kind::Bits { init: None, .. } => Ok(()),
+            Kind::Bits {
+                init: Some(init), ..
+            } => self.statement(
+                circ,
+                &Stmt {
+                    kind: (**init).clone(),
+                    line,
+                },
+                scope,
+            ),
             Kind::Call {
                 name,
                 modifiers,
@@ -1055,6 +1092,14 @@ impl Lowering {
                     )?;
                 }
                 Ok(())
+            }
+            Kind::Assign { target, value } => {
+                let clbit = match self.clbits(target, scope, line)?[..] {
+                    [clbit] => clbit,
+                    _ => return Err(error(line, "only single bits can be assigned values")),
+                };
+                let value = self.condition(value, scope, line)?;
+                instruction(circ.push_instruction(crate::Instruction::Assign { clbit, value }))
             }
             Kind::Reset(operands) => {
                 for operand in operands {

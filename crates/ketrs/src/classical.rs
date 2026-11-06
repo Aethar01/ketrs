@@ -198,6 +198,14 @@ pub enum Instruction {
         /// The classical bit written.
         clbit: usize,
     },
+    /// Set `clbit` to 1 if `value` is nonzero, else 0. Purely classical:
+    /// the state is untouched.
+    Assign {
+        /// The classical bit written.
+        clbit: usize,
+        /// The value stored, evaluated when the instruction runs.
+        value: Expr,
+    },
     /// Measure `qubit` and set it to `|0⟩`.
     Reset {
         /// The qubit reset.

@@ -388,6 +388,9 @@ fn errors_name_the_line() {
         ("input float t;\nqubit q;\nrx(t * t) q;", 3, "linear"),
         ("qubit[2] q;\ncx q[0] q[1];", 2, "expected `;`"),
         ("qubit q;\nif (true) { qubit r; }", 2, "top level"),
+        ("qubit q;\nbit[2] c;\nc = 1;", 3, "single bits"),
+        ("qubit q;\nbit[2] c = 1;", 2, "single bits"),
+        ("qubit q;\nbit b;\nb = 1.5 * 2;", 3, "arithmetic"),
     ];
     for (source, want_line, text) in cases {
         match qasm::parse(source) {
@@ -702,4 +705,65 @@ fn breaking_loops_from_the_circuit_api() {
             .run_trajectory(&stray, &mut StdRng::seed_from_u64(0))
             .is_err()
     );
+}
+
+#[test]
+fn classical_assignments() {
+    // Repeat-until-success on a declared, initialised bit, then compound
+    // assignments and a branch on them.
+    let source = r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit[3] q;
+        bit[3] c;
+        bit done = false;
+        while (!done) {
+            reset q[0];
+            h q[0];
+            done = measure q[0];
+        }
+        h q[1];
+        h q[2];
+        c[0] = measure q[1];
+        c[1] = measure q[2];
+        c[2] = c[0] == 1 && c[1] == 0;
+        bit copy = c[2];
+        if (copy) {
+            c[1] = true;
+        } else {
+            c[0] = false;
+        }
+    "#;
+    let circ = qasm::parse(source).unwrap();
+    let counts = Statevector::zero(3)
+        .sample_circuit(&circ, 2_000, &mut StdRng::seed_from_u64(40))
+        .unwrap();
+    // Bits: c[0..3], done, copy. c[0] and not c[1] gives 1 1 1; otherwise
+    // c[0] is cleared and c[1] kept.
+    let mut keys: Vec<u64> = counts.keys().copied().collect();
+    keys.sort();
+    assert_eq!(keys, [0b01000, 0b01010, 0b11111]);
+    assert_eq!(qasm::parse(&circ.to_qasm().unwrap()).unwrap(), circ);
+}
+
+#[test]
+fn export_round_trips_assignments() {
+    use ketrs::{BinaryOp, Expr};
+    let mut circ = Circuit::with_clbits(1, 4);
+    circ.h(0).measure(0, 0);
+    circ.assign(1, Expr::Value(1));
+    circ.assign(2, Expr::Value(5));
+    circ.assign(3, Expr::Not(Box::new(Expr::Bit(0))));
+    circ.assign(
+        1,
+        Expr::binary(BinaryOp::BitXor, Expr::Bit(0), Expr::Bit(3)),
+    );
+    circ.assign(2, Expr::Register(vec![0, 1, 2, 3]));
+    let back = round_trip(&circ);
+    let counts = |c: &Circuit| {
+        Statevector::zero(1)
+            .sample_circuit(c, 200, &mut StdRng::seed_from_u64(41))
+            .unwrap()
+    };
+    assert_eq!(counts(&back), counts(&circ));
 }

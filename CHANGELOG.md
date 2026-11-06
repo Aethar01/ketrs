@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Circuits
+
+- `Instruction::Assign { clbit, value }` and `Circuit::assign` (Python:
+  `Circuit.assign`) set a classical bit to whether a classical expression
+  is nonzero, anywhere in a circuit, including inside branches and loops.
+  `sample_circuit` still simulates the gates before the first measurement
+  once, applying leading assignments along the way.
+- OpenQASM 3 import and export of classical assignments: `c[k] = <expr>;`
+  and `bit b = <expr>;` (and `bit b = measure q;`).
+
 ## 0.1.0 (2026-11-06)
 
 First release.
