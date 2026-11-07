@@ -515,3 +515,144 @@ fn assignments_are_validated() {
         .is_err()
     );
 }
+
+/// Counts of `circ`'s bits over `shots` separate trajectories from |0…0⟩,
+/// the reference for `sample_circuit`, which follows shared histories once.
+fn per_shot(circ: &Circuit, shots: usize, seed: u64) -> BTreeMap<u64, usize> {
+    let mut r = rng(seed);
+    let mut counts = BTreeMap::new();
+    for _ in 0..shots {
+        let mut state = Statevector::zero(circ.n_qubits());
+        let bits = state.run_trajectory(circ, &mut r).unwrap();
+        let packed = bits
+            .iter()
+            .enumerate()
+            .fold(0u64, |acc, (c, &b)| acc | (b as u64) << c);
+        *counts.entry(packed).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Every outcome's count agrees between `a` and `b` within 5σ of their
+/// difference.
+fn assert_same_distribution(a: &BTreeMap<u64, usize>, b: &BTreeMap<u64, usize>, shots: usize) {
+    assert_eq!(a.values().sum::<usize>(), shots);
+    assert_eq!(b.values().sum::<usize>(), shots);
+    for key in a.keys().chain(b.keys()) {
+        let (x, y) = (*a.get(key).unwrap_or(&0), *b.get(key).unwrap_or(&0));
+        let p = (x + y) as f64 / (2 * shots) as f64;
+        let sigma = (2.0 * shots as f64 * p * (1.0 - p)).sqrt().max(1.0);
+        assert!(
+            (x as f64 - y as f64).abs() < 5.0 * sigma,
+            "outcome {key:b}: {x} vs {y} ± {sigma:.0}\n{a:?}\n{b:?}"
+        );
+    }
+}
+
+fn assert_matches_per_shot(circ: &Circuit, seed: u64) {
+    let shots = 4_000;
+    let branched = Statevector::zero(circ.n_qubits())
+        .sample_circuit(circ, shots, &mut rng(seed))
+        .unwrap();
+    assert_same_distribution(&branched, &per_shot(circ, shots, seed + 1), shots);
+}
+
+#[test]
+fn branching_matches_per_shot_teleportation() {
+    assert_matches_per_shot(&teleportation(1.1), 100);
+}
+
+#[test]
+fn branching_matches_per_shot_repeat_until_success() {
+    let mut circ = Circuit::with_clbits(2, 2);
+    circ.h(0).measure(0, 0);
+    let mut body = Circuit::with_clbits(2, 2);
+    body.reset(0).ry(1.2, 0).measure(0, 0).x(1);
+    circ.while_loop(Expr::Not(Box::new(Expr::Bit(0))), body);
+    circ.measure(1, 1);
+    assert_matches_per_shot(&circ, 102);
+}
+
+#[test]
+fn branching_matches_per_shot_mid_circuit_reset() {
+    // Resets of entangled qubits, followed by more gates and a reset of a
+    // qubit certain to read 0.
+    let mut circ = Circuit::with_clbits(3, 3);
+    circ.ry(1.1, 0).cx(0, 1).ry(0.7, 2).cx(2, 1);
+    circ.reset(1).cx(0, 1).h(2).reset(2).reset(2).ry(0.5, 2);
+    circ.measure(1, 0).reset(0).ry(0.3, 0).cx(2, 0);
+    circ.measure(0, 1).measure(2, 2);
+    assert_matches_per_shot(&circ, 104);
+}
+
+#[test]
+fn branching_matches_per_shot_through_break_and_continue() {
+    // Three passes of a `for` loop that each flip a biased coin: heads
+    // breaks out, tails continues past the rest of the body; a `while`
+    // loop inside counts with `continue`.
+    let mut pass = Circuit::with_clbits(3, 4);
+    pass.reset(0).ry(0.9, 0).measure(0, 0);
+    let mut leave = Circuit::with_clbits(3, 4);
+    leave.x(1).break_loop();
+    pass.if_test(Expr::Bit(0), leave, None);
+    pass.ry(0.6, 1).measure(1, 1);
+    let mut skip = Circuit::with_clbits(3, 4);
+    skip.continue_loop();
+    pass.if_test(Expr::Bit(1), skip, None);
+    let mut body = Circuit::with_clbits(3, 4);
+    body.reset(2).h(2).measure(2, 2);
+    let mut again = Circuit::with_clbits(3, 4);
+    again.continue_loop();
+    body.if_test(Expr::Not(Box::new(Expr::Bit(2))), again, None);
+    body.x(1);
+    pass.while_loop(Expr::Not(Box::new(Expr::Bit(2))), body);
+    let mut circ = Circuit::with_clbits(3, 4);
+    circ.for_loop(vec![pass.clone(), pass.clone(), pass]);
+    circ.measure(1, 3);
+    assert_matches_per_shot(&circ, 106);
+}
+
+#[test]
+fn branching_matches_per_shot_with_a_sampled_tail() {
+    // After the last control flow, measurements and assignments are
+    // sampled from each path's final state.
+    let mut circ = Circuit::with_clbits(3, 4);
+    circ.h(0).cx(0, 1).ry(0.8, 2).measure(0, 0);
+    let mut fix = Circuit::with_clbits(3, 4);
+    fix.x(1).h(2);
+    circ.if_test(Expr::Bit(0), fix, None);
+    circ.measure(1, 1).measure(2, 2);
+    circ.assign(
+        3,
+        Expr::binary(BinaryOp::BitXor, Expr::Bit(0), Expr::Bit(2)),
+    );
+    circ.measure(2, 1);
+    assert_matches_per_shot(&circ, 108);
+}
+
+#[test]
+fn branching_on_mps_matches_statevectors() {
+    let circ = teleportation(0.9);
+    let shots = 4_000;
+    let mps = ketrs::Mps::zero(3, ketrs::MpsOptions::default())
+        .sample_circuit(&circ, shots, &mut rng(110))
+        .unwrap();
+    let dense = Statevector::zero(3)
+        .sample_circuit(&circ, shots, &mut rng(111))
+        .unwrap();
+    assert_same_distribution(&mps, &dense, shots);
+}
+
+#[test]
+fn certain_outcomes_and_no_shots() {
+    let mut circ = Circuit::with_clbits(2, 2);
+    circ.x(0).measure(0, 0).reset(1).cx(0, 1).measure(1, 1);
+    let counts = Statevector::zero(2)
+        .sample_circuit(&circ, 300, &mut rng(112))
+        .unwrap();
+    assert_eq!(counts, BTreeMap::from([(0b11, 300)]));
+    let none = Statevector::zero(3)
+        .sample_circuit(&teleportation(0.4), 0, &mut rng(113))
+        .unwrap();
+    assert!(none.is_empty());
+}

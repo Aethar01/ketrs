@@ -104,7 +104,7 @@ impl<T: Scalar> DenseState<T> {
     }
 
     /// Project `qubit` onto `outcome` and renormalise.
-    fn collapse(&mut self, qubit: usize, outcome: bool) {
+    pub(crate) fn collapse(&mut self, qubit: usize, outcome: bool) {
         let mask = 1 << qubit;
         for (i, a) in self.amps.iter_mut().enumerate() {
             if (i & mask != 0) != outcome {

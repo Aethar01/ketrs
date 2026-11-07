@@ -3,16 +3,19 @@
 //!
 //! Each engine implements [`Trajectory`]: running a unitary piece,
 //! measuring a qubit, and sampling. [`run_trajectory`] follows one random
-//! history; [`sample_circuit`] counts outcomes over many, simulating the
-//! deterministic prefix once, or the whole circuit once when every
-//! measurement comes at the end.
+//! history; [`sample_circuit`] counts outcomes over many. On deterministic
+//! engines it follows each distinct history once with its share of the
+//! shots (see [`branch`]), sampling measurements after the last control
+//! flow from the final state.
 
 use crate::circuit::Circuit;
-use crate::classical::{Instruction, Piece};
+use crate::classical::{Expr, Instruction, Piece};
 use crate::error::Error;
 use crate::gate::Gate;
 use rand::Rng;
+use rand_distr::{Binomial, Distribution};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 /// Passes of one `while` loop after which a trajectory gives up, rather
 /// than hang on a condition that never fails.
@@ -20,8 +23,9 @@ const MAX_LOOP_PASSES: usize = 1_000_000;
 
 /// What an engine needs to follow a circuit's random history.
 pub(crate) trait Trajectory: Sized {
-    /// Whether running gates is deterministic, so that a shared prefix or a
-    /// final state can serve every shot. Not so for noisy trajectories.
+    /// Whether running gates is deterministic, so that shots can share
+    /// their simulation until their outcomes differ. Not so for noisy
+    /// trajectories.
     const DETERMINISTIC: bool = true;
 
     fn n_qubits(&self) -> usize;
@@ -38,6 +42,10 @@ pub(crate) trait Trajectory: Sized {
     }
     /// Measure `qubit`, collapsing the state, and return the outcome.
     fn measure_qubit<R: Rng>(&mut self, qubit: usize, rng: &mut R) -> Result<bool, Error>;
+    /// Probability that measuring `qubit` gives 1.
+    fn probability_one(&mut self, qubit: usize) -> Result<f64, Error>;
+    /// Project `qubit` onto `outcome` and renormalise.
+    fn collapse(&mut self, qubit: usize, outcome: bool) -> Result<(), Error>;
     /// An independent copy, for another shot.
     fn duplicate(&self) -> Result<Self, Error>;
     /// For each of `shots` samples of every qubit, the values of `qubits`
@@ -87,44 +95,23 @@ pub(crate) fn sample_circuit<E: Trajectory, R: Rng>(
         }
         return Ok(counts);
     }
-    if let Some(measured) = terminal_measurements(circuit).filter(|m| m.len() <= 64) {
-        // Simulate once, then read each sample's measured qubits into their
-        // classical bits (a later measurement into the same bit wins).
-        let mut state = engine.duplicate()?;
-        state.run_gates(&circuit.slice_with_phase(0, circuit.len()))?;
-        let qubits: Vec<usize> = measured.iter().map(|&(q, _)| q).collect();
-        for sample in state.sample_qubits(shots, &qubits, rng)? {
-            let mut bits = 0u64;
-            for (k, &(_, clbit)) in measured.iter().enumerate() {
-                let one = sample >> k & 1 == 1;
-                bits = (bits & !(1 << clbit)) | (one as u64) << clbit;
-            }
-            *counts.entry(bits).or_insert(0) += 1;
-        }
+    if shots == 0 {
         return Ok(counts);
     }
-    // The state up to the first measurement or control flow is the same for
-    // every shot, and so are the bits that assignments there set.
     let pieces = circuit.pieces();
-    let mut start = engine.duplicate()?;
-    let mut initial = vec![false; circuit.n_clbits()];
-    let mut shared = 0;
-    for piece in &pieces {
-        match piece {
-            Piece::Gates(gates) => start.run_gates(gates)?,
-            Piece::Instruction(Instruction::Assign { clbit, value }) => {
-                initial[*clbit] = value.holds(&initial);
-            }
-            _ => break,
-        }
-        shared += 1;
-    }
-    for _ in 0..shots {
-        let mut state = start.duplicate()?;
-        let mut clbits = initial.clone();
-        top_level(follow(&mut state, &pieces[shared..], &mut clbits, rng)?)?;
-        *counts.entry(pack_bits(&clbits)).or_insert(0) += 1;
-    }
+    let tail = tail_start(&pieces);
+    let mut frames = vec![Frame::block(pieces)];
+    let mut clbits = vec![false; circuit.n_clbits()];
+    let mut state = engine.duplicate()?;
+    branch(
+        &mut state,
+        &mut clbits,
+        &mut frames,
+        tail,
+        shots,
+        &mut counts,
+        rng,
+    )?;
     Ok(counts)
 }
 
@@ -214,9 +201,7 @@ fn follow<E: Trajectory, R: Rng>(
                 let mut passes = 0;
                 while condition.holds(clbits) {
                     if passes == MAX_LOOP_PASSES {
-                        return Err(Error::NotConverged(format!(
-                            "a while loop ran {MAX_LOOP_PASSES} times without its condition failing"
-                        )));
+                        return Err(runaway_loop());
                     }
                     passes += 1;
                     if follow(engine, &pieces, clbits, rng)? == Flow::Break {
@@ -238,17 +223,301 @@ fn follow<E: Trajectory, R: Rng>(
     Ok(Flow::Normal)
 }
 
-/// `(qubit, clbit)` for each measurement, if every instruction is a
-/// measurement after the last gate.
-fn terminal_measurements(circuit: &Circuit) -> Option<Vec<(usize, usize)>> {
-    circuit
-        .instructions()
-        .iter()
-        .map(|(position, instruction)| match instruction {
-            Instruction::Measure { qubit, clbit } if *position == circuit.len() => {
-                Some((*qubit, *clbit))
+/// A block of pieces a path is running, and where it is in it.
+#[derive(Clone)]
+struct Frame<'a> {
+    pieces: Rc<[Piece<'a>]>,
+    next: usize,
+    kind: Kind<'a>,
+}
+
+#[derive(Clone)]
+enum Kind<'a> {
+    /// A whole circuit or an `if` branch: done once its pieces are.
+    Block,
+    /// A `while` body on its `passes`th pass, tested again after each.
+    While { condition: &'a Expr, passes: usize },
+    /// A `for` body, with the passes still to come.
+    For { rest: &'a [Circuit] },
+}
+
+impl<'a> Frame<'a> {
+    fn new(pieces: Vec<Piece<'a>>, kind: Kind<'a>) -> Self {
+        Frame {
+            pieces: pieces.into(),
+            next: 0,
+            kind,
+        }
+    }
+
+    fn block(pieces: Vec<Piece<'a>>) -> Self {
+        Self::new(pieces, Kind::Block)
+    }
+
+    fn is_loop(&self) -> bool {
+        !matches!(self.kind, Kind::Block)
+    }
+}
+
+/// Follow `shots` shots from `state`, `clbits` and the position `frames`
+/// (innermost block last) to the end of the circuit, adding their final
+/// bits to `counts`. From the top-level piece `tail` on, the circuit only
+/// measures and assigns.
+///
+/// At a measurement or reset whose outcome is random, the shots split
+/// between its outcomes by a binomial draw, the same distribution as
+/// measuring each shot. The smaller share follows a copy of the state
+/// first, by recursion, and the larger then continues here, so at most
+/// `log₂ shots` copies live at once. Each outcome with shots is followed
+/// once, so no more paths are simulated than there are shots.
+fn branch<E: Trajectory, R: Rng>(
+    state: &mut E,
+    clbits: &mut [bool],
+    frames: &mut Vec<Frame<'_>>,
+    tail: usize,
+    mut shots: usize,
+    counts: &mut BTreeMap<u64, usize>,
+    rng: &mut R,
+) -> Result<(), Error> {
+    loop {
+        let top_level = frames.len() == 1;
+        let Some(frame) = frames.last_mut() else {
+            *counts.entry(pack_bits(clbits)).or_insert(0) += shots;
+            return Ok(());
+        };
+        if frame.next == frame.pieces.len() {
+            // The block ended normally: go round its loop again or leave.
+            match &mut frame.kind {
+                Kind::Block => {
+                    frames.pop();
+                }
+                Kind::While { condition, passes } => {
+                    if condition.holds(clbits) {
+                        if *passes == MAX_LOOP_PASSES {
+                            return Err(runaway_loop());
+                        }
+                        *passes += 1;
+                        frame.next = 0;
+                    } else {
+                        frames.pop();
+                    }
+                }
+                Kind::For { rest } => match rest.split_first() {
+                    Some((body, rest)) => *frame = Frame::new(body.pieces(), Kind::For { rest }),
+                    None => {
+                        frames.pop();
+                    }
+                },
             }
+            continue;
+        }
+        // Reached once per path, so the tail is scanned once per path.
+        if top_level
+            && frame.next == tail
+            && sample_tail(
+                state,
+                clbits,
+                &frame.pieces[frame.next..],
+                shots,
+                counts,
+                rng,
+            )?
+        {
+            return Ok(());
+        }
+        let pieces = Rc::clone(&frame.pieces);
+        frame.next += 1;
+        let instruction = match &pieces[frame.next - 1] {
+            Piece::Gates(gates) => {
+                state.run_gates(gates)?;
+                continue;
+            }
+            Piece::Instruction(instruction) => *instruction,
+        };
+        // A measurement records its outcome in a bit; a reset doesn't.
+        let measured = match instruction {
+            Instruction::Measure { qubit, clbit } => Some((*qubit, Some(*clbit))),
+            Instruction::Reset { qubit } => Some((*qubit, None)),
             _ => None,
+        };
+        if let Some((qubit, clbit)) = measured {
+            let ones = binomial(shots, state.probability_one(qubit)?, rng);
+            // Settle a path on `outcome`: collapse, record the bit or
+            // flip a reset qubit back to |0⟩.
+            let settle = |state: &mut E, clbits: &mut [bool], outcome: bool| {
+                state.collapse(qubit, outcome)?;
+                match clbit {
+                    Some(c) => clbits[c] = outcome,
+                    None if outcome => {
+                        let mut flip = Circuit::new(state.n_qubits());
+                        flip.gate(Gate::X, qubit);
+                        state.run_gates(&flip)?;
+                    }
+                    None => {}
+                }
+                Ok::<_, Error>(())
+            };
+            let zeros = shots - ones;
+            if ones > 0 && zeros > 0 {
+                let (fork, n_fork) = if ones <= zeros {
+                    (true, ones)
+                } else {
+                    (false, zeros)
+                };
+                let mut other = state.duplicate()?;
+                let mut other_bits = clbits.to_vec();
+                settle(&mut other, &mut other_bits, fork)?;
+                branch(
+                    &mut other,
+                    &mut other_bits,
+                    &mut frames.clone(),
+                    tail,
+                    n_fork,
+                    counts,
+                    rng,
+                )?;
+                drop(other);
+                shots -= n_fork;
+                settle(state, clbits, !fork)?;
+            } else {
+                settle(state, clbits, ones > 0)?;
+            }
+            continue;
+        }
+        match instruction {
+            Instruction::Measure { .. } | Instruction::Reset { .. } => {
+                unreachable!("handled above")
+            }
+            Instruction::Assign { clbit, value } => clbits[*clbit] = value.holds(clbits),
+            Instruction::IfElse {
+                condition,
+                then,
+                otherwise,
+            } => {
+                let taken = if condition.holds(clbits) {
+                    then
+                } else {
+                    otherwise
+                };
+                frames.push(Frame::block(taken.pieces()));
+            }
+            Instruction::While { condition, body } => {
+                if condition.holds(clbits) {
+                    frames.push(Frame::new(
+                        body.pieces(),
+                        Kind::While {
+                            condition,
+                            passes: 1,
+                        },
+                    ));
+                }
+            }
+            Instruction::For { passes } => {
+                if let Some((body, rest)) = passes.split_first() {
+                    frames.push(Frame::new(body.pieces(), Kind::For { rest }));
+                }
+            }
+            Instruction::Break => {
+                // Leave every block up to and including the innermost loop.
+                let depth = innermost_loop(frames)?;
+                frames.truncate(depth);
+            }
+            Instruction::Continue => {
+                // End the innermost loop's pass, as though its body ran out.
+                let depth = innermost_loop(frames)?;
+                frames.truncate(depth + 1);
+                let frame = &mut frames[depth];
+                frame.next = frame.pieces.len();
+            }
+        }
+    }
+}
+
+/// The index in `frames` of the innermost loop.
+fn innermost_loop(frames: &[Frame<'_>]) -> Result<usize, Error> {
+    frames
+        .iter()
+        .rposition(Frame::is_loop)
+        .ok_or_else(|| Error::InvalidArgument("`break` or `continue` outside a loop".into()))
+}
+
+fn runaway_loop() -> Error {
+    Error::NotConverged(format!(
+        "a while loop ran {MAX_LOOP_PASSES} times without its condition failing"
+    ))
+}
+
+/// How many of `n` shots measure 1 with probability `p`: a binomial draw,
+/// in constant time however many shots there are.
+fn binomial<R: Rng>(n: usize, p: f64, rng: &mut R) -> usize {
+    if p <= 0.0 {
+        0
+    } else if p >= 1.0 {
+        n
+    } else {
+        Binomial::new(n as u64, p).expect("0 < p < 1").sample(rng) as usize
+    }
+}
+
+/// Where the top-level `pieces` end in nothing but measurements and
+/// assignments.
+fn tail_start(pieces: &[Piece<'_>]) -> usize {
+    pieces
+        .iter()
+        .rposition(|piece| {
+            !matches!(
+                piece,
+                Piece::Instruction(Instruction::Measure { .. } | Instruction::Assign { .. })
+            )
         })
-        .collect()
+        .map_or(0, |last| last + 1)
+}
+
+/// If `rest`, the end of the whole circuit, only measures and assigns,
+/// finish the path's `shots` by sampling the measured qubits from `state`
+/// (unchanged by measuring them, since no gate follows) and return true.
+fn sample_tail<E: Trajectory, R: Rng>(
+    state: &mut E,
+    clbits: &[bool],
+    rest: &[Piece<'_>],
+    shots: usize,
+    counts: &mut BTreeMap<u64, usize>,
+    rng: &mut R,
+) -> Result<bool, Error> {
+    let mut qubits = Vec::new();
+    for piece in rest {
+        match piece {
+            Piece::Instruction(Instruction::Measure { qubit, .. }) => {
+                if !qubits.contains(qubit) {
+                    qubits.push(*qubit);
+                }
+            }
+            Piece::Instruction(Instruction::Assign { .. }) => {}
+            _ => return Ok(false),
+        }
+    }
+    if qubits.is_empty() || qubits.len() > 64 {
+        return Ok(false);
+    }
+    let mut samples = BTreeMap::new();
+    for sample in state.sample_qubits(shots, &qubits, rng)? {
+        *samples.entry(sample).or_insert(0) += 1;
+    }
+    for (sample, n) in samples {
+        let mut bits = clbits.to_vec();
+        for piece in rest {
+            match piece {
+                Piece::Instruction(Instruction::Measure { qubit, clbit }) => {
+                    let k = qubits.iter().position(|q| q == qubit).expect("listed");
+                    bits[*clbit] = sample >> k & 1 == 1;
+                }
+                Piece::Instruction(Instruction::Assign { clbit, value }) => {
+                    bits[*clbit] = value.holds(&bits);
+                }
+                _ => unreachable!("checked above"),
+            }
+        }
+        *counts.entry(pack_bits(&bits)).or_insert(0) += n;
+    }
+    Ok(true)
 }

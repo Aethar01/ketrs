@@ -25,10 +25,12 @@ impl<T: Scalar> DenseState<T> {
     /// final value of the classical bits occurred, as an integer with
     /// classical bit 0 least significant.
     ///
-    /// When every measurement comes at the end, the state is simulated once
-    /// and sampled. Otherwise the gates before the first measurement, reset
-    /// or classical control are simulated once, and each shot continues
-    /// from there.
+    /// Shots share their simulation until a measurement or reset whose
+    /// outcome is random, where they split between its outcomes by a
+    /// binomial draw, and each outcome is followed once with its share of
+    /// the shots. Measurements after the last control flow are sampled from
+    /// the final state of each such path. The counts have the same
+    /// distribution as running every shot separately.
     pub fn sample_circuit(
         &self,
         circuit: &Circuit,
@@ -50,6 +52,16 @@ impl<T: Scalar> Trajectory for DenseState<T> {
 
     fn measure_qubit<R: Rng>(&mut self, qubit: usize, rng: &mut R) -> Result<bool, Error> {
         self.measure(qubit, rng)
+    }
+
+    fn probability_one(&mut self, qubit: usize) -> Result<f64, Error> {
+        DenseState::probability_one(self, qubit)
+    }
+
+    fn collapse(&mut self, qubit: usize, outcome: bool) -> Result<(), Error> {
+        self.check_qubit(qubit)?;
+        DenseState::collapse(self, qubit, outcome);
+        Ok(())
     }
 
     fn duplicate(&self) -> Result<Self, Error> {

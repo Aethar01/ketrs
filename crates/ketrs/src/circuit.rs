@@ -443,13 +443,6 @@ impl Circuit {
         }
     }
 
-    /// As [`slice`](Self::slice), keeping the global phase.
-    pub(crate) fn slice_with_phase(&self, from: usize, to: usize) -> Circuit {
-        let mut run = self.slice(from, to);
-        run.set_global_phase(self.global_phase);
-        run
-    }
-
     /// Append a measurement, reset or classical control after checking its
     /// qubits and bits.
     pub fn push_instruction(&mut self, instruction: Instruction) -> Result<&mut Self, Error> {

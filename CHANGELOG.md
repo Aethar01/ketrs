@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Circuits
+
+- `sample_circuit` follows each distinct measurement history once instead
+  of every shot. At a measurement or reset whose outcome is random, the
+  shots still on that path split between its outcomes by a binomial draw,
+  and each outcome carries its share; measurements and assignments after
+  the last control flow are sampled from each path's final state. Counts
+  have the same distribution as before, but the random stream differs, so
+  seeded counts of circuits with mid-circuit measurement change. On 1000
+  shots, teleportation is 34× faster, and a 16-qubit circuit with
+  feed-forward 1100× (15.4 s to 14 ms). Statevectors, MPS and GPU states
+  all branch; noisy trajectories still run shot by shot.
+
 ## 0.1.1 (2026-11-06)
 
 ### Circuits

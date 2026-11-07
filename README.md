@@ -55,8 +55,9 @@ basis-state index, and Pauli labels have qubit 0 rightmost.
   bits, registers or classical expressions, and `assign` to set a bit to
   an expression's value) inside circuits, on every
   engine: `run_trajectory` samples one history, `sample_circuit` returns
-  counts, simulating the deterministic prefix once and sampling the final
-  state directly when all measurements are terminal.
+  counts, following each distinct measurement history once with its
+  binomial share of the shots and sampling measurements after the last
+  control flow from the final state.
 - `ketrs.from_qasm` (Rust: `ketrs::qasm::parse`) reads OpenQASM 3 and 2:
   registers, inputs as parameters, the standard gates and `qelib1.inc`,
   `gate` definitions and `def` subroutines, `inv`/`ctrl(n)`/`negctrl(n)`/`pow`

@@ -536,8 +536,21 @@ impl Mps {
     pub fn measure(&mut self, qubit: usize, rng: &mut impl Rng) -> Result<bool, Error> {
         let (one, total) = self.qubit_weights(qubit)?;
         let outcome = rng.random::<f64>() * total < one;
-        // The centre is at `qubit`: project its physical index and
-        // renormalise; the rest stays orthonormal.
+        self.project(qubit, outcome, one, total);
+        Ok(outcome)
+    }
+
+    /// Project `qubit` onto `outcome` and renormalise.
+    pub(crate) fn collapse(&mut self, qubit: usize, outcome: bool) -> Result<(), Error> {
+        let (one, total) = self.qubit_weights(qubit)?;
+        self.project(qubit, outcome, one, total);
+        Ok(())
+    }
+
+    /// With the centre at `qubit` and its weights `(one, total)`, project
+    /// its physical index onto `outcome` and renormalise; the rest stays
+    /// orthonormal.
+    fn project(&mut self, qubit: usize, outcome: bool, one: f64, total: f64) {
         let weight = if outcome { one } else { total - one };
         let scale = (total / weight).sqrt();
         let t = &mut self.tensors[qubit];
@@ -546,7 +559,6 @@ impl Mps {
             let bit = (i / r) % 2 == 1;
             *a = if bit == outcome { *a * scale } else { ZERO };
         }
-        Ok(outcome)
     }
 
     /// `(weight with qubit = 1, total weight)`, moving the centre there.
@@ -628,6 +640,14 @@ impl Trajectory for Mps {
 
     fn measure_qubit<R: Rng>(&mut self, qubit: usize, rng: &mut R) -> Result<bool, Error> {
         self.measure(qubit, rng)
+    }
+
+    fn probability_one(&mut self, qubit: usize) -> Result<f64, Error> {
+        Mps::probability_one(self, qubit)
+    }
+
+    fn collapse(&mut self, qubit: usize, outcome: bool) -> Result<(), Error> {
+        Mps::collapse(self, qubit, outcome)
     }
 
     fn duplicate(&self) -> Result<Self, Error> {

@@ -183,6 +183,14 @@ impl<T: Scalar> Trajectory for Noisy<'_, T> {
         self.state.measure(qubit, rng)
     }
 
+    fn probability_one(&mut self, qubit: usize) -> Result<f64, Error> {
+        Trajectory::probability_one(&mut self.state, qubit)
+    }
+
+    fn collapse(&mut self, qubit: usize, outcome: bool) -> Result<(), Error> {
+        Trajectory::collapse(&mut self.state, qubit, outcome)
+    }
+
     fn duplicate(&self) -> Result<Self, Error> {
         Ok(self.clone())
     }
