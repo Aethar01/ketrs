@@ -123,6 +123,9 @@ const TILE_SHADERS: [(u32, [[&[u8]; 2]; 2]); 3] = [
 /// `shaders/common.glsl`).
 pub(crate) const MAX_CHUNKS: usize = 16;
 
+/// Storage-buffer bindings in the descriptor set (see `create_objects`).
+const BINDINGS: u32 = 6;
+
 /// Workgroups in an expectation-value dispatch, so each one writes at most
 /// this many partial sums.
 pub(crate) const REDUCTION_GROUPS: u32 = 1024;
@@ -132,6 +135,14 @@ pub(crate) const REDUCTION_GROUPS: u32 = 1024;
 /// and 12 by 10–50%, and 10 fits Vulkan's guaranteed 16 KiB of shared
 /// memory, so every device can use it.
 const PREFERRED_TILE_BITS: u32 = 10;
+
+/// The preference on NVIDIA GPUs, where larger tiles (fewer passes) win:
+/// on an RTX 4090, 11-qubit tiles ran 28-qubit circuits 1.5–3× faster and
+/// 26-qubit ones up to 1.35× faster. 12 doesn't fit its 48 KiB.
+const NVIDIA_TILE_BITS: u32 = 11;
+
+/// PCI vendor ID of NVIDIA.
+const NVIDIA: u32 = 0x10de;
 
 /// Threads per workgroup, as declared in `shaders/common.glsl`.
 pub(crate) const WORKGROUP: u32 = 256;
@@ -205,7 +216,7 @@ pub struct GpuContext {
     memory: vk::PhysicalDeviceMemoryProperties,
     max_storage_range: u64,
     /// Whether kernels can index several state buffers, for states larger
-    /// than one buffer (Vulkan 1.2 non-uniform descriptor indexing).
+    /// than one buffer (Vulkan 1.2 buffer device addresses).
     chunks_supported: bool,
     /// Whether shaders may use 64-bit floats; otherwise only
     /// single-precision states are available.
@@ -282,10 +293,10 @@ impl GpuContext {
                     .get()
                     .get_physical_device_features2(physical, &mut all)
             };
-            v12.shader_storage_buffer_array_non_uniform_indexing == vk::TRUE
+            v12.buffer_device_address == vk::TRUE
         };
-        let mut v12 = vk::PhysicalDeviceVulkan12Features::default()
-            .shader_storage_buffer_array_non_uniform_indexing(chunks_supported);
+        let mut v12 =
+            vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(chunks_supported);
         // SAFETY: the chosen device supports these features and the family.
         let device = unsafe {
             instance.get().create_device(
@@ -310,7 +321,10 @@ impl GpuContext {
             max_storage_range: props.limits.max_storage_buffer_range as u64,
             chunks_supported,
             f64_supported,
-            tile_bits: choose_tile_bits(props.limits.max_compute_shared_memory_size),
+            tile_bits: choose_tile_bits(
+                props.limits.max_compute_shared_memory_size,
+                props.vendor_id,
+            ),
             name,
             command_pool: vk::CommandPool::null(),
             descriptor_layout: vk::DescriptorSetLayout::null(),
@@ -343,11 +357,9 @@ impl GpuContext {
             else {
                 continue;
             };
-            // Bindings 0 and 3 hold MAX_CHUNKS state buffers each.
-            let buffers = 2 * MAX_CHUNKS as u32 + 2;
             if props.api_version < vk::API_VERSION_1_2
-                || props.limits.max_per_stage_descriptor_storage_buffers < buffers
-                || props.limits.max_descriptor_set_storage_buffers < buffers
+                || props.limits.max_per_stage_descriptor_storage_buffers < BINDINGS
+                || props.limits.max_descriptor_set_storage_buffers < BINDINGS
             {
                 continue;
             }
@@ -379,17 +391,16 @@ impl GpuContext {
                 )
                 .map_err(gpu_err("creating command pool"))?;
 
-            // 0: state chunks (single-buffer kernels use the first);
-            // 1: parameters; 2: reduction output; 3: a partner state's
-            // chunks, for kernels combining two states.
-            let bindings: Vec<_> = [MAX_CHUNKS as u32, 1, 1, MAX_CHUNKS as u32]
-                .into_iter()
-                .enumerate()
-                .map(|(b, count)| {
+            // 0: the state (its first chunk); 1: parameters; 2: reduction
+            // output; 3: a partner state, for kernels combining two states;
+            // 4 and 5: the device addresses of the state's and partner's
+            // chunks, for chunked kernels.
+            let bindings: Vec<_> = (0..BINDINGS)
+                .map(|b| {
                     vk::DescriptorSetLayoutBinding::default()
-                        .binding(b as u32)
+                        .binding(b)
                         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count(count)
+                        .descriptor_count(1)
                         .stage_flags(vk::ShaderStageFlags::COMPUTE)
                 })
                 .collect();
@@ -453,7 +464,7 @@ impl GpuContext {
 
             let sizes = [vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count((2 * MAX_CHUNKS as u32 + 2) * 1024)];
+                .descriptor_count(BINDINGS * 1024)];
             self.descriptor_pool = d
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
@@ -600,13 +611,18 @@ impl GpuContext {
 }
 
 /// The largest compiled tile (16 bytes per amplitude) that fits the
-/// device's shared memory, up to [`PREFERRED_TILE_BITS`]. The environment
-/// variable `KETRS_GPU_TILE_BITS` overrides the preference, for tuning.
-fn choose_tile_bits(shared_memory: u32) -> u32 {
+/// device's shared memory, up to [`PREFERRED_TILE_BITS`] (or
+/// [`NVIDIA_TILE_BITS`]). The environment variable `KETRS_GPU_TILE_BITS`
+/// overrides the preference, for tuning.
+fn choose_tile_bits(shared_memory: u32, vendor: u32) -> u32 {
     let preferred = std::env::var("KETRS_GPU_TILE_BITS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(PREFERRED_TILE_BITS);
+        .unwrap_or(if vendor == NVIDIA {
+            NVIDIA_TILE_BITS
+        } else {
+            PREFERRED_TILE_BITS
+        });
     TILE_SHADERS
         .iter()
         .map(|(bits, _)| *bits)
@@ -704,12 +720,15 @@ impl Buffer {
                 d.destroy_buffer(buffer, None);
                 return Err(Error::Gpu("no suitable GPU memory type".into()));
             };
-            let device_memory = match d.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(req.size)
-                    .memory_type_index(kind),
-                None,
-            ) {
+            let mut flags = vk::MemoryAllocateFlagsInfo::default()
+                .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+            let mut info = vk::MemoryAllocateInfo::default()
+                .allocation_size(req.size)
+                .memory_type_index(kind);
+            if usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) {
+                info = info.push_next(&mut flags);
+            }
+            let device_memory = match d.allocate_memory(&info, None) {
                 Ok(m) => m,
                 Err(e) => {
                     d.destroy_buffer(buffer, None);
@@ -755,10 +774,11 @@ impl Buffer {
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()) };
     }
 
-    /// Copy the first `out.len()` bytes of a mapped buffer.
-    pub(crate) fn read(&self, out: &mut [u8]) -> Result<(), Error> {
+    /// The first `len` bytes of a mapped buffer, once the GPU has finished
+    /// writing it.
+    pub(crate) fn mapped(&self, len: usize) -> Result<&[u8], Error> {
         let ptr = self.mapped.expect("host-visible buffer");
-        assert!(out.len() as u64 <= self.size);
+        assert!(len as u64 <= self.size);
         if !self.coherent {
             let range = [vk::MappedMemoryRange::default()
                 .memory(self.memory)
@@ -767,9 +787,20 @@ impl Buffer {
             unsafe { self.ctx.device.invalidate_mapped_memory_ranges(&range) }
                 .map_err(gpu_err("reading GPU memory"))?;
         }
-        // SAFETY: as for `write`.
-        unsafe { std::ptr::copy_nonoverlapping(ptr, out.as_mut_ptr(), out.len()) };
-        Ok(())
+        // SAFETY: the mapping covers `size` bytes, no GPU work is running,
+        // and writes need `&mut self`.
+        Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
+    }
+
+    /// The buffer's GPU address, for a buffer created with
+    /// `SHADER_DEVICE_ADDRESS` usage.
+    pub(crate) fn device_address(&self) -> u64 {
+        // SAFETY: the buffer is live and was created with that usage.
+        unsafe {
+            self.ctx.device.get_buffer_device_address(
+                &vk::BufferDeviceAddressInfo::default().buffer(self.buffer),
+            )
+        }
     }
 }
 

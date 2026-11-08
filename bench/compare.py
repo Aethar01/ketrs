@@ -4,7 +4,10 @@ Each simulator runs the same gate sequence from |0…0⟩ and returns the final
 statevector. Reports the best of several runs; ketrs timings exclude the
 one-off Qiskit-to-ketrs conversion. Both ketrs and Aer use every core.
 
-    python bench/compare.py [--max-qubits 24] [--numpy-max-qubits 20]
+    python bench/compare.py [--max-qubits 24] [--numpy-max-qubits 20] [--gpu-max-qubits 30]
+
+When Aer has a GPU (CUDA), a first table compares ketrs on the GPU with Aer on
+the GPU at matching precision, and with cuStateVec if it is installed.
 """
 
 from __future__ import annotations
@@ -74,11 +77,30 @@ def run_ketrs_gpu(qc: QuantumCircuit):
     return lambda: ketrs.GpuStatevector.from_circuit(circ).amplitudes()
 
 
-def run_aer(qc: QuantumCircuit, fusion: bool):
-    sim = AerSimulator(method="statevector", fusion_enable=fusion)
+def run_ketrs_gpu32(qc: QuantumCircuit):
+    circ = from_qiskit(qc)
+    return lambda: ketrs.GpuStatevector.from_circuit(circ, dtype="complex64").amplitudes()
+
+
+def run_aer(qc: QuantumCircuit, fusion: bool, **options):
+    sim = AerSimulator(method="statevector", fusion_enable=fusion, **options)
     saved = qc.copy()
     saved.save_statevector()
     return lambda: sim.run(saved).result().get_statevector()
+
+
+def best_aer_gpu(qc: QuantumCircuit, repeats: int, precision: str, custatevec: bool = False):
+    """Aer on the GPU, fusion on or off, whichever is faster."""
+    options = {"device": "GPU", "precision": precision, "cuStateVec_enable": custatevec}
+    return min(best_time(run_aer(qc, fusion, **options), repeats) for fusion in (True, False))
+
+
+def has_custatevec() -> bool:
+    try:
+        run_aer(QuantumCircuit(2), True, device="GPU", cuStateVec_enable=True)()
+        return True
+    except Exception:
+        return False
 
 
 def run_numpy(qc: QuantumCircuit):
@@ -89,6 +111,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--max-qubits", type=int, default=24)
     parser.add_argument("--numpy-max-qubits", type=int, default=20)
+    # Sizes above --max-qubits and up to this one run the GPU columns only.
+    parser.add_argument("--gpu-max-qubits", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path(__file__).with_name("results.json"))
     args = parser.parse_args()
 
@@ -96,6 +120,11 @@ def main() -> None:
     results = []
     gpu = ketrs.gpu_device()
     print(f"GPU: {gpu or 'none'}")
+    aer_gpu = "GPU" in AerSimulator().available_devices()
+    if gpu and aer_gpu:
+        custatevec = has_custatevec()
+        print(f"Aer GPU: yes, cuStateVec: {'yes' if custatevec else 'no'}")
+        results.extend(gpu_table(sorted(set(sizes) | set(range(18, args.gpu_max_qubits + 1, 2))), custatevec))
     print("| circuit | qubits | ketrs | ketrs GPU | Aer | Aer (no fusion) | NumPy | vs best Aer | GPU vs ketrs CPU | vs NumPy |")
     print("|---|---|---|---|---|---|---|---|---|---|")
     for name, build in [("qft", qft), ("layered_d10", layered)]:
@@ -125,8 +154,46 @@ def main() -> None:
                 flush=True,
             )
 
-    meta = {"cpu": platform.processor() or platform.machine(), "python": platform.python_version()}
+    meta = {
+        "cpu": platform.processor() or platform.machine(),
+        "gpu": gpu,
+        "python": platform.python_version(),
+    }
     args.out.write_text(json.dumps({"meta": meta, "results": results}, indent=2))
+
+
+def gpu_table(sizes: list[int], custatevec: bool) -> list[dict]:
+    """ketrs GPU against Aer GPU at matching precision, end to end."""
+    cols = ["ketrs GPU", "Aer GPU", "vs Aer GPU", "ketrs GPU f32", "Aer GPU f32", "f32 vs Aer GPU"]
+    if custatevec:
+        cols += ["cuStateVec", "vs cuStateVec"]
+    print("| circuit | qubits | " + " | ".join(cols) + " |")
+    print("|---|---|" + "---|" * len(cols))
+    rows = []
+    for name, build in [("qft", qft), ("layered_d10", layered)]:
+        for n in sizes:
+            qc = build(n)
+            repeats = 5 if n <= 20 else 3
+            row = {"circuit": name, "qubits": n, "gates": qc.size(), "table": "gpu"}
+            row["ketrs_gpu"] = best_time(run_ketrs_gpu(qc), repeats)
+            row["aer_gpu"] = best_aer_gpu(qc, repeats, "double")
+            row["ketrs_gpu32"] = best_time(run_ketrs_gpu32(qc), repeats)
+            row["aer_gpu32"] = best_aer_gpu(qc, repeats, "single")
+            cells = [
+                fmt(row["ketrs_gpu"]),
+                fmt(row["aer_gpu"]),
+                f"{row['aer_gpu'] / row['ketrs_gpu']:.2f}×",
+                fmt(row["ketrs_gpu32"]),
+                fmt(row["aer_gpu32"]),
+                f"{row['aer_gpu32'] / row['ketrs_gpu32']:.2f}×",
+            ]
+            if custatevec:
+                row["custatevec"] = best_aer_gpu(qc, repeats, "double", custatevec=True)
+                cells += [fmt(row["custatevec"]), f"{row['custatevec'] / row['ketrs_gpu']:.2f}×"]
+            rows.append(row)
+            print(f"| {name} | {n} | " + " | ".join(cells) + " |", flush=True)
+    print()
+    return rows
 
 
 def fmt(seconds: float) -> str:
