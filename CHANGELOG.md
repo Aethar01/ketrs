@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 (2026-11-08)
 
 ### Circuits
 
@@ -19,6 +19,11 @@
 
 ### Statevectors
 
+- Faster gate kernels: gates on the lowest qubits run through block-level
+  kernels; tiles cover only the qubits gates mix, with commuting gates
+  batched together; runs of diagonal gates in a tile apply in one sweep;
+  swaps relabel qubits instead of moving amplitudes; and Rx-like gates
+  skip full complex multiplies.
 - Measurement, collapse and sampling each take one parallel pass over the
   state: measuring a qubit of a 20-qubit state takes 1.2 ms instead of
   12 ms, and drawing 1000 samples 0.7 ms instead of 2.9 ms. `sample` no
