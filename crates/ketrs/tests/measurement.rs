@@ -86,6 +86,55 @@ fn sampling_basis_state_is_deterministic() {
     assert!(state.sample(100, &mut rng).iter().all(|&i| i == 0b101));
 }
 
+/// A 17-qubit product state, large enough to sample and measure across
+/// many blocks in parallel, with `P(qubit q = 1) = sin²(θ_q/2)`.
+fn product_state() -> (Statevector, Vec<f64>) {
+    let n = 17;
+    let mut circ = Circuit::new(n);
+    let mut p1 = Vec::new();
+    for q in 0..n {
+        let theta = 0.3 + 0.17 * q as f64;
+        circ.ry(theta, q);
+        p1.push((theta / 2.0).sin().powi(2));
+    }
+    (Statevector::from_circuit(&circ), p1)
+}
+
+#[test]
+fn sampling_a_large_state() {
+    let (state, p1) = product_state();
+    let mut rng = StdRng::seed_from_u64(4);
+    let shots = 20_000;
+    let samples = state.sample(shots, &mut rng);
+    for (q, &p) in p1.iter().enumerate() {
+        let ones = samples.iter().filter(|&&i| i >> q & 1 == 1).count() as f64;
+        let sigma = (shots as f64 * p * (1.0 - p)).sqrt();
+        assert!(
+            (ones - shots as f64 * p).abs() < 5.0 * sigma,
+            "qubit {q}: {ones} vs {}",
+            shots as f64 * p
+        );
+        assert!((state.probability_one(q).unwrap() - p).abs() < TOL);
+    }
+    // Draws come back in the order drawn, not sorted.
+    assert!(samples.windows(2).any(|w| w[0] > w[1]));
+}
+
+#[test]
+fn measuring_a_large_state() {
+    let mut rng = StdRng::seed_from_u64(5);
+    for q in [0, 9, 16] {
+        let (mut state, p1) = product_state();
+        let outcome = state.measure(q, &mut rng).unwrap();
+        assert!((state.norm_sqr() - 1.0).abs() < TOL);
+        assert!((state.probability_one(q).unwrap() - outcome as u8 as f64).abs() < TOL);
+        // The other qubits are untouched.
+        for (other, &p) in p1.iter().enumerate().filter(|&(o, _)| o != q) {
+            assert!((state.probability_one(other).unwrap() - p).abs() < TOL);
+        }
+    }
+}
+
 #[test]
 fn measuring_one_half_of_bell_pair_fixes_the_other() {
     let mut rng = StdRng::seed_from_u64(3);

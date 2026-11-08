@@ -42,10 +42,12 @@ pub(crate) trait Trajectory: Sized {
     }
     /// Measure `qubit`, collapsing the state, and return the outcome.
     fn measure_qubit<R: Rng>(&mut self, qubit: usize, rng: &mut R) -> Result<bool, Error>;
-    /// Probability that measuring `qubit` gives 1.
-    fn probability_one(&mut self, qubit: usize) -> Result<f64, Error>;
-    /// Project `qubit` onto `outcome` and renormalise.
-    fn collapse(&mut self, qubit: usize, outcome: bool) -> Result<(), Error>;
+    /// `(weight with qubit = 1, total weight)`.
+    fn qubit_weights(&mut self, qubit: usize) -> Result<(f64, f64), Error>;
+    /// Project `qubit` onto `outcome` and renormalise, given its `weights`
+    /// from [`qubit_weights`](Self::qubit_weights) on this state or the one
+    /// it duplicates, unchanged since.
+    fn collapse(&mut self, qubit: usize, outcome: bool, weights: (f64, f64)) -> Result<(), Error>;
     /// An independent copy, for another shot.
     fn duplicate(&self) -> Result<Self, Error>;
     /// For each of `shots` samples of every qubit, the values of `qubits`
@@ -341,11 +343,12 @@ fn branch<E: Trajectory, R: Rng>(
             _ => None,
         };
         if let Some((qubit, clbit)) = measured {
-            let ones = binomial(shots, state.probability_one(qubit)?, rng);
+            let weights = state.qubit_weights(qubit)?;
+            let ones = binomial(shots, weights.0 / weights.1, rng);
             // Settle a path on `outcome`: collapse, record the bit or
             // flip a reset qubit back to |0⟩.
             let settle = |state: &mut E, clbits: &mut [bool], outcome: bool| {
-                state.collapse(qubit, outcome)?;
+                state.collapse(qubit, outcome, weights)?;
                 match clbit {
                     Some(c) => clbits[c] = outcome,
                     None if outcome => {

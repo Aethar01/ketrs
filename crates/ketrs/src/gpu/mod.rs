@@ -514,12 +514,6 @@ impl GpuStatevector {
         Ok(outcome)
     }
 
-    /// Project `qubit` onto `outcome` and renormalise, on the GPU.
-    pub(crate) fn collapse(&mut self, qubit: usize, outcome: bool) -> Result<(), Error> {
-        let (one, total) = self.qubit_weights(qubit)?;
-        self.project(qubit, outcome, one, total)
-    }
-
     /// Project `qubit` onto `outcome`, given its weights `(one, total)`.
     fn project(&mut self, qubit: usize, outcome: bool, one: f64, total: f64) -> Result<(), Error> {
         let weight = if outcome { one } else { total - one };
@@ -798,12 +792,17 @@ impl Trajectory for GpuStatevector {
         self.measure(qubit, rng)
     }
 
-    fn probability_one(&mut self, qubit: usize) -> Result<f64, Error> {
-        GpuStatevector::probability_one(self, qubit)
+    fn qubit_weights(&mut self, qubit: usize) -> Result<(f64, f64), Error> {
+        GpuStatevector::qubit_weights(self, qubit)
     }
 
-    fn collapse(&mut self, qubit: usize, outcome: bool) -> Result<(), Error> {
-        GpuStatevector::collapse(self, qubit, outcome)
+    fn collapse(
+        &mut self,
+        qubit: usize,
+        outcome: bool,
+        (one, total): (f64, f64),
+    ) -> Result<(), Error> {
+        self.project(qubit, outcome, one, total)
     }
 
     fn duplicate(&self) -> Result<Self, Error> {

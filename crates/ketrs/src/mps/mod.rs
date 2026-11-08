@@ -540,13 +540,6 @@ impl Mps {
         Ok(outcome)
     }
 
-    /// Project `qubit` onto `outcome` and renormalise.
-    pub(crate) fn collapse(&mut self, qubit: usize, outcome: bool) -> Result<(), Error> {
-        let (one, total) = self.qubit_weights(qubit)?;
-        self.project(qubit, outcome, one, total);
-        Ok(())
-    }
-
     /// With the centre at `qubit` and its weights `(one, total)`, project
     /// its physical index onto `outcome` and renormalise; the rest stays
     /// orthonormal.
@@ -642,12 +635,19 @@ impl Trajectory for Mps {
         self.measure(qubit, rng)
     }
 
-    fn probability_one(&mut self, qubit: usize) -> Result<f64, Error> {
-        Mps::probability_one(self, qubit)
+    fn qubit_weights(&mut self, qubit: usize) -> Result<(f64, f64), Error> {
+        Mps::qubit_weights(self, qubit)
     }
 
-    fn collapse(&mut self, qubit: usize, outcome: bool) -> Result<(), Error> {
-        Mps::collapse(self, qubit, outcome)
+    fn collapse(
+        &mut self,
+        qubit: usize,
+        outcome: bool,
+        (one, total): (f64, f64),
+    ) -> Result<(), Error> {
+        // `qubit_weights` left the centre at `qubit`, and cloning keeps it.
+        self.project(qubit, outcome, one, total);
+        Ok(())
     }
 
     fn duplicate(&self) -> Result<Self, Error> {

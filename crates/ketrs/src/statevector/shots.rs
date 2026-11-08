@@ -54,13 +54,18 @@ impl<T: Scalar> Trajectory for DenseState<T> {
         self.measure(qubit, rng)
     }
 
-    fn probability_one(&mut self, qubit: usize) -> Result<f64, Error> {
-        DenseState::probability_one(self, qubit)
+    fn qubit_weights(&mut self, qubit: usize) -> Result<(f64, f64), Error> {
+        DenseState::qubit_weights(self, qubit)
     }
 
-    fn collapse(&mut self, qubit: usize, outcome: bool) -> Result<(), Error> {
+    fn collapse(
+        &mut self,
+        qubit: usize,
+        outcome: bool,
+        (one, total): (f64, f64),
+    ) -> Result<(), Error> {
         self.check_qubit(qubit)?;
-        DenseState::collapse(self, qubit, outcome);
+        self.project(qubit, outcome, if outcome { one } else { total - one });
         Ok(())
     }
 
