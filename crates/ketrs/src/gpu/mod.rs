@@ -34,7 +34,9 @@ use ash::vk;
 use context::{Buffer, Kernel, MAX_CHUNKS, Memory, Push};
 use num_complex::Complex64 as C64;
 use rand::Rng;
+use rayon::prelude::*;
 use std::collections::BTreeMap;
+use std::mem::MaybeUninit;
 use std::sync::Arc;
 
 /// The amplitude type of a [`GpuStatevector`].
@@ -85,6 +87,9 @@ pub struct GpuStatevector {
     /// The amplitudes, `2^chunk_bits` per buffer, in index order.
     chunks: Vec<Buffer>,
     chunk_bits: u32,
+    /// The chunks' device addresses, for chunked kernels (binding 4, or 5
+    /// as a partner); unused for a single buffer.
+    addresses: Buffer,
     /// Gate parameters for the current circuit, bound at binding 1.
     params: Buffer,
     /// Partial sums from reductions, bound at binding 2.
@@ -197,22 +202,32 @@ impl GpuStatevector {
         }
         if n_chunks > 1 && !ctx.chunks_supported() {
             return Err(too_big(format!(
-                "{} can't split a state across buffers (no non-uniform descriptor indexing)",
+                "{} can't split a state across buffers (no buffer device addresses)",
                 ctx.device_name()
             )));
         }
+        let mut usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::TRANSFER_SRC
+            | vk::BufferUsageFlags::TRANSFER_DST;
+        if n_chunks > 1 {
+            usage |= vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+        }
         let chunks = (0..n_chunks)
-            .map(|_| {
-                Buffer::new(
-                    ctx,
-                    bytes << chunk_bits,
-                    vk::BufferUsageFlags::STORAGE_BUFFER
-                        | vk::BufferUsageFlags::TRANSFER_SRC
-                        | vk::BufferUsageFlags::TRANSFER_DST,
-                    Memory::Device,
-                )
-            })
+            .map(|_| Buffer::new(ctx, bytes << chunk_bits, usage, Memory::Device))
             .collect::<Result<Vec<_>, _>>()?;
+        let mut addresses = Buffer::new(
+            ctx,
+            8 * MAX_CHUNKS as u64,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            Memory::Upload,
+        )?;
+        if n_chunks > 1 {
+            let words: Vec<u8> = chunks
+                .iter()
+                .flat_map(|c| c.device_address().to_le_bytes())
+                .collect();
+            addresses.write(&words);
+        }
         let params = Buffer::new(
             ctx,
             256,
@@ -244,6 +259,7 @@ impl GpuStatevector {
             precision,
             chunks,
             chunk_bits,
+            addresses,
             params,
             output,
             set,
@@ -252,23 +268,18 @@ impl GpuStatevector {
         Ok(gpu)
     }
 
-    /// Point the descriptor set at the state chunks, parameters and output.
-    /// Unused chunk slots repeat the first chunk, so every slot is valid.
+    /// Point the descriptor set at the state, parameters and output, with
+    /// the state as its own partner.
     fn bind_buffers(&self) {
-        let info = |b: &Buffer| {
-            [vk::DescriptorBufferInfo::default()
-                .buffer(b.buffer)
-                .range(vk::WHOLE_SIZE)]
-        };
-        let chunks: Vec<_> = (0..MAX_CHUNKS)
-            .map(|i| info(&self.chunks[i % self.chunks.len()])[0])
-            .collect();
-        let (params, output) = (info(&self.params), info(&self.output));
+        let (state, addresses) = (buffer_info(&self.chunks[0]), buffer_info(&self.addresses));
+        let (params, output) = (buffer_info(&self.params), buffer_info(&self.output));
         let writes = [
-            write_set(self.set, 0, &chunks),
+            write_set(self.set, 0, &state),
             write_set(self.set, 1, &params),
             write_set(self.set, 2, &output),
-            write_set(self.set, 3, &chunks),
+            write_set(self.set, 3, &state),
+            write_set(self.set, 4, &addresses),
+            write_set(self.set, 5, &addresses),
         ];
         // SAFETY: the set isn't in use: every submission is waited on.
         unsafe { self.ctx.device.update_descriptor_sets(&writes, &[]) };
@@ -313,28 +324,40 @@ impl GpuStatevector {
     }
 
     /// The first `n` complex values in `buffer`, in this state's format.
-    /// Doubles are copied straight into place.
+    /// Large reads are copied (and widened from single precision) on every
+    /// core, straight into uninitialised memory: one thread copying into a
+    /// zeroed vector managed only about 2.5 GB/s.
     fn read_values(&self, buffer: &Buffer, n: usize) -> Result<Vec<C64>, Error> {
-        match self.precision {
-            GpuPrecision::Double => {
-                let mut out = vec![C64::new(0.0, 0.0); n];
-                buffer.read(bytes_of_mut(&mut out))?;
-                Ok(out)
+        const PIECE: usize = 1 << 16;
+        let bytes = self.amplitude_bytes() as usize;
+        let src = buffer.mapped(n * bytes)?;
+        let single = self.precision == GpuPrecision::Single;
+        let copy = |dst: &mut [MaybeUninit<C64>], src: &[u8]| {
+            for (d, s) in dst.iter_mut().zip(src.chunks_exact(bytes)) {
+                let value = if single {
+                    let re = f32::from_ne_bytes(s[..4].try_into().unwrap());
+                    let im = f32::from_ne_bytes(s[4..].try_into().unwrap());
+                    C64::new(re as f64, im as f64)
+                } else {
+                    let re = f64::from_ne_bytes(s[..8].try_into().unwrap());
+                    let im = f64::from_ne_bytes(s[8..].try_into().unwrap());
+                    C64::new(re, im)
+                };
+                d.write(value);
             }
-            GpuPrecision::Single => {
-                let mut raw = vec![0f32; 2 * n];
-                // SAFETY: f32 has no padding and every bit pattern is valid.
-                let bytes =
-                    unsafe { std::slice::from_raw_parts_mut(raw.as_mut_ptr().cast::<u8>(), 8 * n) };
-                buffer.read(bytes)?;
-                Ok(raw
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|&[re, im]| C64::new(re as f64, im as f64))
-                    .collect())
-            }
+        };
+        let mut out = Vec::with_capacity(n);
+        let dst = &mut out.spare_capacity_mut()[..n];
+        if n <= PIECE {
+            copy(dst, src);
+        } else {
+            dst.par_chunks_mut(PIECE)
+                .zip(src.par_chunks(PIECE * bytes))
+                .for_each(|(dst, src)| copy(dst, src));
         }
+        // SAFETY: every one of the first n elements was written above.
+        unsafe { out.set_len(n) };
+        Ok(out)
     }
 
     /// The first `n` complex values of the output buffer.
@@ -1064,33 +1087,55 @@ struct Plan {
 impl Plan {
     /// Runs of operations that together touch at most `tile_bits` qubits
     /// become one tile dispatch, applied in shared memory; anything else is
-    /// its own dispatch.
+    /// its own dispatch. A run takes operations out of order where that is
+    /// safe: past ones that don't fit, if it shares no qubit with any of
+    /// them. Layered circuits then need about half the passes.
     fn new(ops: &[GpuOp], n_qubits: usize, tile_bits: u32) -> Self {
         let amps = 1u32 << n_qubits;
+        let all = if n_qubits >= 32 {
+            u32::MAX
+        } else {
+            (1 << n_qubits) - 1
+        };
         let mut plan = Plan {
             params: Vec::new(),
             dispatches: Vec::new(),
             costs: Vec::new(),
         };
         let tiling = n_qubits as u32 >= tile_bits;
-        let mut rest = ops;
-        while let Some(first) = rest.first() {
-            // Grow the run while its qubits still fit in one tile.
+        let mut done = vec![false; ops.len()];
+        let mut start = 0;
+        let mut run = Vec::new();
+        while start < ops.len() {
+            // Grow the run while its qubits still fit in one tile, until
+            // the operations passed over cover every qubit.
             let mut inside = 0u32;
-            let mut run = 0;
-            for op in rest {
-                let union = inside | op.bits();
-                if !tiling || union.count_ones() > tile_bits {
+            let mut passed = 0u32;
+            run.clear();
+            for (i, op) in ops.iter().enumerate().skip(start) {
+                if done[i] {
+                    continue;
+                }
+                let bits = op.bits();
+                let union = inside | bits;
+                if tiling && bits & passed == 0 && union.count_ones() <= tile_bits {
+                    inside = union;
+                    run.push(i);
+                    continue;
+                }
+                passed |= bits;
+                if !tiling || run.is_empty() || passed == all {
                     break;
                 }
-                inside = union;
-                run += 1;
             }
-            if run < 2 {
-                let dispatch = first.standalone(&mut plan.params, amps);
+            if run.len() < 2 {
+                let dispatch = ops[start].standalone(&mut plan.params, amps);
                 plan.costs.push(amps as u64);
                 plan.dispatches.push(dispatch);
-                rest = &rest[1..];
+                done[start] = true;
+                while start < ops.len() && done[start] {
+                    start += 1;
+                }
                 continue;
             }
             // Fill the tile with the lowest free qubits, which keeps memory
@@ -1105,13 +1150,14 @@ impl Plan {
             // qubits.
             let rank = |q: u32| (inside & ((1 << q) - 1)).count_ones();
             let offset = plan.params.len() as u32;
-            for op in &rest[..run] {
-                op.remap(rank).tile_entry(&mut plan.params);
+            for &i in &run {
+                ops[i].remap(rank).tile_entry(&mut plan.params);
+                done[i] = true;
             }
             plan.dispatches.push((
                 Kernel::Tile,
                 Push {
-                    a: run as u32,
+                    a: run.len() as u32,
                     b: inside,
                     c: n_qubits as u32,
                     units: amps >> tile_bits,
@@ -1120,11 +1166,20 @@ impl Plan {
                 },
             ));
             // One pass over memory plus the gates' shared-memory work.
-            plan.costs.push(amps as u64 * (1 + run as u64 / 8));
-            rest = &rest[run..];
+            plan.costs.push(amps as u64 * (1 + run.len() as u64 / 8));
+            while start < ops.len() && done[start] {
+                start += 1;
+            }
         }
         plan
     }
+}
+
+/// The whole of `buffer`, for a descriptor write.
+fn buffer_info(buffer: &Buffer) -> [vk::DescriptorBufferInfo; 1] {
+    [vk::DescriptorBufferInfo::default()
+        .buffer(buffer.buffer)
+        .range(vk::WHOLE_SIZE)]
 }
 
 /// A descriptor write of storage buffers to `binding`.
@@ -1143,13 +1198,6 @@ fn write_set(
 fn bytes_of(values: &[C64]) -> &[u8] {
     // SAFETY: Complex<f64> is repr(C) as two f64s, with no padding.
     unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
-}
-
-fn bytes_of_mut(values: &mut [C64]) -> &mut [u8] {
-    // SAFETY: as for `bytes_of`; every bit pattern is a valid f64.
-    unsafe {
-        std::slice::from_raw_parts_mut(values.as_mut_ptr().cast(), std::mem::size_of_val(values))
-    }
 }
 
 fn bytes_of_f64(values: &[f64]) -> &[u8] {

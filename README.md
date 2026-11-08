@@ -82,37 +82,58 @@ noted.
 
 **Statevector circuits**, end to end from $`\lvert 0\dots 0\rangle`$ to the
 final amplitudes. The GPU column is compared with ketrs on the CPU, not with
-Aer: Aer's GPU mode needs CUDA, which this card can't run. GPU times include
-downloading the state.
+Aer: Aer's GPU mode needs CUDA, which this card can't run (see below for an
+NVIDIA card). GPU times are in double precision, which consumer cards run at
+a fraction of their single-precision speed, and include downloading the
+state.
 
 *Layered ansatz: 10 layers of $`R_y`$ rotations and a CNOT chain*
 
 | Qubits | Aer | ketrs | vs Aer | ketrs GPU | GPU vs CPU |
 |---:|---:|---:|:---|---:|:---|
-| 18 | 44.8 ms | 10.9 ms | `████▏` 4.1× | 6.3 ms | `█▊` 1.7× |
-| 20 | 157.5 ms | 46.0 ms | `███▍` 3.4× | 21.4 ms | `██▏` 2.2× |
-| 22 | 906.3 ms | 178.8 ms | `█████▏` 5.1× | 104.8 ms | `█▋` 1.7× |
-| 24 | 3.85 s | 818.6 ms | `████▊` 4.7× | 440.3 ms | `█▉` 1.9× |
-| 26 | 17.42 s | 3.97 s | `████▍` 4.4× | 2.00 s | `██` 2.0× |
+| 18 | 36.9 ms | 6.8 ms | `█████▍` 5.4× | 8.5 ms | `▊` 0.8× |
+| 20 | 115.4 ms | 43.1 ms | `██▋` 2.7× | 30.1 ms | `█▍` 1.4× |
+| 22 | 712.3 ms | 122.4 ms | `█████▉` 5.8× | 109.5 ms | `█▏` 1.1× |
+| 24 | 3.15 s | 554.2 ms | `█████▋` 5.7× | 368.4 ms | `█▌` 1.5× |
+| 26 | 13.87 s | 2.37 s | `█████▉` 5.9× | 1.49 s | `█▋` 1.6× |
 
 *Quantum Fourier transform*
 
 | Qubits | Aer | ketrs | vs Aer | ketrs GPU | GPU vs CPU |
 |---:|---:|---:|:---|---:|:---|
-| 18 | 19.0 ms | 7.2 ms | `██▋` 2.6× | 3.0 ms | `██▍` 2.4× |
-| 20 | 48.4 ms | 25.8 ms | `█▉` 1.9× | 12.8 ms | `██` 2.0× |
-| 22 | 292.9 ms | 115.6 ms | `██▌` 2.5× | 71.8 ms | `█▋` 1.6× |
-| 24 | 1.60 s | 521.7 ms | `███▏` 3.1× | 313.5 ms | `█▋` 1.7× |
-| 26 | 7.42 s | 3.02 s | `██▌` 2.5× | 1.56 s | `█▉` 1.9× |
+| 18 | 22.8 ms | 3.9 ms | `█████▉` 5.9× | 6.1 ms | `▋` 0.6× |
+| 20 | 72.9 ms | 16.3 ms | `████▌` 4.5× | 18.0 ms | `▉` 0.9× |
+| 22 | 234.3 ms | 66.5 ms | `███▌` 3.5× | 77.2 ms | `▉` 0.9× |
+| 24 | 1.33 s | 173.1 ms | `███████▊` 7.7× | 243.5 ms | `▊` 0.7× |
+| 26 | 6.21 s | 686.0 ms | `█████████` 9.1× | 1.01 s | `▋` 0.7× |
 
-Against Qiskit's NumPy `quantum_info.Statevector`, ketrs is 67–88× faster at
+Against Qiskit's NumPy `quantum_info.Statevector`, ketrs is 28–86× faster at
 18–20 qubits. Below 18 qubits the comparison with Aer is dominated by Aer's
 per-job overhead of about 2 ms, so it is left out.
 
 On the GPU, gates are batched into shared-memory tiles over any set of 10
-qubits, so most of a circuit takes one pass over GPU memory per tile rather
-than per gate. Expectation values computed on the GPU are 14–15× faster than
-downloading the state; 29 qubits (8 GiB) runs on a 16 GB card.
+qubits (11 on NVIDIA), taking gates out of order where they commute, so most
+of a circuit takes one pass over GPU memory per tile rather than per gate.
+Expectation values computed on the GPU are 14–15× faster than downloading the
+state; 29 qubits (8 GiB) runs on a 16 GB card.
+
+**Against Aer on an NVIDIA GPU**: an RTX 4090 (rented), against Aer 0.18's
+CUDA backend at matching precision, and in double precision also with
+cuStateVec, taking the faster. Times are GPU work only, reading back one
+$`\langle Z\rangle`$: that host downloaded states at about 1 GB/s for
+both simulators, which would otherwise dominate. The 4090 runs doubles at
+1/64 of its float speed, so single precision is the case it is built for.
+
+| Circuit | Qubits | Aer f32 | ketrs f32 | vs Aer | best Aer f64 | ketrs f64 | vs Aer |
+|---|---:|---:|---:|:---|---:|---:|:---|
+| Layered | 22 | 38.4 ms | 40.2 ms | `█` 0.96× | 40.7 ms | 42.3 ms | `█` 0.96× |
+| Layered | 24 | 164.2 ms | 43.2 ms | `███▊` 3.8× | 133.7 ms | 160.2 ms | `▉` 0.83× |
+| Layered | 26 | 698.0 ms | 169.2 ms | `████▏` 4.1× | 519.6 ms | 677.9 ms | `▊` 0.77× |
+| Layered | 28 | 2.97 s | 832.8 ms | `███▋` 3.6× | 2.18 s | 7.43 s | `▎` 0.29× |
+| QFT | 22 | 24.5 ms | 10.7 ms | `██▎` 2.3× | 20.9 ms | 23.5 ms | `▉` 0.89× |
+| QFT | 24 | 69.1 ms | 25.8 ms | `██▋` 2.7× | 73.7 ms | 86.0 ms | `▉` 0.86× |
+| QFT | 26 | 266.5 ms | 101.2 ms | `██▋` 2.6× | 311.6 ms | 373.1 ms | `▉` 0.84× |
+| QFT | 28 | 1.14 s | 508.6 ms | `██▎` 2.2× | 1.36 s | 2.81 s | `▌` 0.48× |
 
 **Mid-circuit measurement**: 1000 shots of circuits that measure, reset and
 branch partway through, ending with every qubit measured. *Feed-forward* is

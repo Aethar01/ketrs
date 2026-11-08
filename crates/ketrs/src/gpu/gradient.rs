@@ -8,8 +8,8 @@
 //! overlaps all go into a few submissions, and every overlap's partial sums
 //! come back in a single download at the end.
 
-use super::context::{GpuContext, Kernel, MAX_CHUNKS, Push};
-use super::{BATCH_UNITS, GpuOp, GpuStatevector, Plan, write_set};
+use super::context::{GpuContext, Kernel, Push};
+use super::{BATCH_UNITS, GpuOp, GpuStatevector, Plan, buffer_info, write_set};
 use crate::circuit::Circuit;
 use crate::error::Error;
 use crate::observable::PauliSum;
@@ -326,27 +326,22 @@ impl Sets {
             .map_err(|e| Error::Gpu(format!("allocating descriptor set: {e}")))?[0]
         };
         self.sets.push(set);
-        let chunks = |s: &GpuStatevector| -> Vec<vk::DescriptorBufferInfo> {
-            (0..MAX_CHUNKS)
-                .map(|i| {
-                    vk::DescriptorBufferInfo::default()
-                        .buffer(s.chunks[i % s.chunks.len()].buffer)
-                        .range(vk::WHOLE_SIZE)
-                })
-                .collect()
-        };
-        let one = |buffer: vk::Buffer| {
-            [vk::DescriptorBufferInfo::default()
-                .buffer(buffer)
-                .range(vk::WHOLE_SIZE)]
-        };
-        let (a, b) = (chunks(state), chunks(partner));
-        let (params, output) = (one(owner.params.buffer), one(owner.output.buffer));
+        let (a, b) = (
+            buffer_info(&state.chunks[0]),
+            buffer_info(&partner.chunks[0]),
+        );
+        let (a_chunks, b_chunks) = (
+            buffer_info(&state.addresses),
+            buffer_info(&partner.addresses),
+        );
+        let (params, output) = (buffer_info(&owner.params), buffer_info(&owner.output));
         let writes = [
             write_set(set, 0, &a),
             write_set(set, 1, &params),
             write_set(set, 2, &output),
             write_set(set, 3, &b),
+            write_set(set, 4, &a_chunks),
+            write_set(set, 5, &b_chunks),
         ];
         // SAFETY: the new set isn't in use yet.
         unsafe { ctx.device.update_descriptor_sets(&writes, &[]) };

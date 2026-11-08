@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.3 (2026-11-08)
+
+### GPU
+
+- Tiles take gates out of order: a later gate joins a tile ahead of gates
+  it shares no qubit with, so layered circuits need far fewer passes over
+  GPU memory. Single-precision circuits run 1.15–1.5× faster at 24–26
+  qubits on an RX 9060 XT; on an RTX 4090, 28-qubit circuits in double
+  precision run 4.3–4.9× faster (with the larger tiles below).
+- NVIDIA GPUs use 11-qubit tiles, which beat 10 there; other GPUs keep 10.
+- States split across several buffers reach them through buffer device
+  addresses instead of arrays of descriptors, so the GPU needs 6 storage
+  buffers per shader instead of 34, and splitting needs Vulkan 1.2's
+  `bufferDeviceAddress` instead of non-uniform descriptor indexing.
+- Downloading a state copies on every core, straight into uninitialised
+  memory: 1 GiB takes 208 ms instead of 496 ms.
+
+### Benchmarks
+
+- `bench/compare.py` compares with Aer on the GPU (double and single
+  precision, and cuStateVec if installed) when Aer has a CUDA device;
+  `--gpu-max-qubits` runs larger sizes on the GPU only.
+
 ## 0.1.2 (2026-11-08)
 
 ### Circuits

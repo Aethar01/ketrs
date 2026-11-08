@@ -13,8 +13,17 @@
 // 2^chunk_bits amplitudes each, indexed by the top bits of the amplitude
 // index, for states larger than one buffer can hold. Shaders access
 // amplitudes only through load_amp and store_amp.
+//
+// Chunked shaders reach the buffers through their device addresses, listed
+// at bindings 4 and 5, not through an array of descriptors: NVIDIA's
+// compiler turns a non-uniformly indexed descriptor array into a loop over
+// the distinct indices, which ran 28-qubit circuits 10-20x slower on an
+// RTX 4090.
 
-#extension GL_EXT_nonuniform_qualifier : enable
+#if CHUNKED
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#endif
 
 #if SINGLE
 #define real float
@@ -30,9 +39,11 @@ layout(local_size_x = 256) in;
 
 // Binding 3 is a second state of the same size, the "partner", for kernels
 // that combine two states (overlaps, H|ψ⟩); otherwise it repeats binding 0.
+// Chunked kernels find the two states' chunks at bindings 4 and 5 instead.
 #if CHUNKED
-layout(std430, set = 0, binding = 0) buffer State { cplx data[]; } chunks[MAX_CHUNKS];
-layout(std430, set = 0, binding = 3) buffer Partner { cplx data[]; } partner_chunks[MAX_CHUNKS];
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer Chunk { cplx data[]; };
+layout(std430, set = 0, binding = 4) readonly buffer Chunks { uvec2 chunks[MAX_CHUNKS]; };
+layout(std430, set = 0, binding = 5) readonly buffer PartnerChunks { uvec2 partner_chunks[MAX_CHUNKS]; };
 #else
 layout(std430, set = 0, binding = 0) buffer State { cplx amps[]; };
 layout(std430, set = 0, binding = 3) buffer Partner { cplx partner_amps[]; };
@@ -92,16 +103,16 @@ layout(push_constant) uniform Push {
 
 #if CHUNKED
 cplx load_amp(uint i) {
-    return chunks[nonuniformEXT(i >> pc.chunk_bits)].data[i & ((1u << pc.chunk_bits) - 1u)];
+    return Chunk(chunks[i >> pc.chunk_bits]).data[i & ((1u << pc.chunk_bits) - 1u)];
 }
 void store_amp(uint i, cplx v) {
-    chunks[nonuniformEXT(i >> pc.chunk_bits)].data[i & ((1u << pc.chunk_bits) - 1u)] = v;
+    Chunk(chunks[i >> pc.chunk_bits]).data[i & ((1u << pc.chunk_bits) - 1u)] = v;
 }
 cplx load_partner(uint i) {
-    return partner_chunks[nonuniformEXT(i >> pc.chunk_bits)].data[i & ((1u << pc.chunk_bits) - 1u)];
+    return Chunk(partner_chunks[i >> pc.chunk_bits]).data[i & ((1u << pc.chunk_bits) - 1u)];
 }
 void store_partner(uint i, cplx v) {
-    partner_chunks[nonuniformEXT(i >> pc.chunk_bits)].data[i & ((1u << pc.chunk_bits) - 1u)] = v;
+    Chunk(partner_chunks[i >> pc.chunk_bits]).data[i & ((1u << pc.chunk_bits) - 1u)] = v;
 }
 #else
 cplx load_amp(uint i) {
