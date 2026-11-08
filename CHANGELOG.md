@@ -10,10 +10,19 @@
   and each outcome carries its share; measurements and assignments after
   the last control flow are sampled from each path's final state. Counts
   have the same distribution as before, but the random stream differs, so
-  seeded counts of circuits with mid-circuit measurement change. On 1000
-  shots, teleportation is 34× faster, and a 16-qubit circuit with
-  feed-forward 1100× (15.4 s to 14 ms). Statevectors, MPS and GPU states
-  all branch; noisy trajectories still run shot by shot.
+  seeded counts of circuits with mid-circuit measurement change.
+  Statevectors, MPS and GPU states all branch; noisy trajectories still run
+  shot by shot.
+- On 1000 shots against 0.1.1: teleportation runs in 40 µs instead of
+  1 ms, a 16-qubit circuit with feed-forward in 9.3 ms instead of 15.4 s,
+  and a 20-qubit repeat-until-success loop in 0.70 s instead of 404 s.
+
+### Statevectors
+
+- Measurement, collapse and sampling each take one parallel pass over the
+  state: measuring a qubit of a 20-qubit state takes 1.2 ms instead of
+  12 ms, and drawing 1000 samples 0.7 ms instead of 2.9 ms. `sample` no
+  longer builds every cumulative weight.
 
 ## 0.1.1 (2026-11-06)
 

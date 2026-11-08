@@ -114,6 +114,29 @@ qubits, so most of a circuit takes one pass over GPU memory per tile rather
 than per gate. Expectation values computed on the GPU are 14–15× faster than
 downloading the state; 29 qubits (8 GiB) runs on a 16 GB card.
 
+**Mid-circuit measurement**: 1000 shots of circuits that measure, reset and
+branch partway through, ending with every qubit measured. *Feed-forward* is
+4 layers of the ansatz above, two measurements with corrections conditioned
+on them, 4 more layers; *repeat until success* re-prepares and measures an
+entangled qubit until it reads 1, then runs 4 more layers. Aer runs with and
+without its shot branching (off by default), and the faster counts. One
+block is 20×.
+
+| Circuit | Qubits | Aer | Aer, shot branching | ketrs | vs best Aer |
+|---|---:|---:|---:|---:|:---|
+| Feed-forward | 12 | 300 ms | 63.7 ms | 1.3 ms | `██▌` 50× |
+| Feed-forward | 16 | 7.57 s | 1.36 s | 8.0 ms | `████████▌` 170× |
+| Feed-forward | 20 | 158.9 s | 32.5 s | 104 ms | `███████████████▋` 312× |
+| Repeat until success | 12 | 341 ms | 121 ms | 10.6 ms | `▋` 11× |
+| Repeat until success | 16 | 7.27 s | 2.24 s | 69.8 ms | `█▋` 32× |
+| Repeat until success | 20 | 143.9 s | 45.8 s | 698 ms | `███▎` 66× |
+
+ketrs follows each distinct measurement history once, splitting the shots
+between outcomes by binomial draws, and samples the final measurements from
+each history's state. Most of the gap is that last step: with control flow
+in a circuit, Aer measures the final qubits shot by shot (or branch by
+branch) instead of sampling them. The two agree on the counts' distribution.
+
 **MPS**: TEBD of a transverse-field Ising chain (second-order Trotter,
 $`\Delta t = 0.1`$) against Aer's MPS method with the same bond-dimension cap
 $`\chi`$. The two agree on $`\langle Z\rangle`$ to the truncation level.
