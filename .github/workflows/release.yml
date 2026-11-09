@@ -76,6 +76,8 @@ jobs:
       - run: >
           maturin build --release --out dist --features gpu --find-interpreter
           --zig --compatibility manylinux_2_28
+      # Free-threaded builds (cp3xt) aren't supported yet.
+      - run: rm -f dist/*t-*.whl
       - name: Smoke test
         run: |
           pip install numpy
@@ -110,6 +112,7 @@ jobs:
       # build would find no GPU on a Mac.
       - run: pip install "maturin>=1.9,<2"
       - run: maturin build --release --out dist --find-interpreter
+      - run: rm -f dist/*t-*.whl
       - name: Smoke test
         run: |
           pip install numpy
@@ -146,6 +149,8 @@ jobs:
           "GLSLC=C:\VulkanSDK\Bin\glslc.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
       - run: pip install "maturin>=1.9,<2"
       - run: maturin build --release --out dist --features gpu --find-interpreter
+      - run: rm -f dist/*t-*.whl
+        shell: bash
       - name: Smoke test
         shell: bash
         run: |
