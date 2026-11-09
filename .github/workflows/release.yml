@@ -59,6 +59,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+      # Free-threaded interpreters first: `python` is then the last regular
+      # one, and steps.ft gives 3.14t for the smoke test.
+      - uses: actions/setup-python@v5
+        id: ft
+        with:
+          python-version: |
+            3.15t
+            3.14t
       - uses: actions/setup-python@v5
         with:
           python-version: |
@@ -76,13 +84,18 @@ jobs:
       - run: >
           maturin build --release --out dist --features gpu --find-interpreter
           --zig --compatibility manylinux_2_28
-      # Free-threaded builds (cp3xt) aren't supported yet.
-      - run: rm -f dist/*t-*.whl
       - name: Smoke test
         run: |
           pip install numpy
           pip install --no-index --find-links dist ketrs
           python -c "import ketrs; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities()); print('GPU support:', hasattr(ketrs, 'GpuStatevector'))"
+      - name: Smoke test (free-threaded)
+        shell: bash
+        run: |
+          py="${{ steps.ft.outputs.python-path }}"
+          "$py" -m pip install numpy
+          "$py" -m pip install --no-index --find-links dist ketrs
+          "$py" -c "import sys, ketrs; assert not sys._is_gil_enabled(), 'import re-enabled the GIL'; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities())"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.runner }}
@@ -92,12 +105,20 @@ jobs:
     needs: check
     strategy:
       matrix:
-        runner: [macos-15, macos-15-intel]
+        runner: [macos-15]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+      # Free-threaded interpreters first: `python` is then the last regular
+      # one, and steps.ft gives 3.14t for the smoke test.
+      - uses: actions/setup-python@v5
+        id: ft
+        with:
+          python-version: |
+            3.15t
+            3.14t
       - uses: actions/setup-python@v5
         with:
           python-version: |
@@ -112,12 +133,18 @@ jobs:
       # build would find no GPU on a Mac.
       - run: pip install "maturin>=1.9,<2"
       - run: maturin build --release --out dist --find-interpreter
-      - run: rm -f dist/*t-*.whl
       - name: Smoke test
         run: |
           pip install numpy
           pip install --no-index --find-links dist ketrs
           python -c "import ketrs; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities())"
+      - name: Smoke test (free-threaded)
+        shell: bash
+        run: |
+          py="${{ steps.ft.outputs.python-path }}"
+          "$py" -m pip install numpy
+          "$py" -m pip install --no-index --find-links dist ketrs
+          "$py" -c "import sys, ketrs; assert not sys._is_gil_enabled(), 'import re-enabled the GIL'; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities())"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.runner }}
@@ -130,6 +157,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+      # Free-threaded interpreters first: `python` is then the last regular
+      # one, and steps.ft gives 3.14t for the smoke test.
+      - uses: actions/setup-python@v5
+        id: ft
+        with:
+          python-version: |
+            3.15t
+            3.14t
       - uses: actions/setup-python@v5
         with:
           python-version: |
@@ -149,14 +184,19 @@ jobs:
           "GLSLC=C:\VulkanSDK\Bin\glslc.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
       - run: pip install "maturin>=1.9,<2"
       - run: maturin build --release --out dist --features gpu --find-interpreter
-      - run: rm -f dist/*t-*.whl
-        shell: bash
       - name: Smoke test
         shell: bash
         run: |
           pip install numpy
           pip install --no-index --find-links dist ketrs
           python -c "import ketrs; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities()); print('GPU support:', hasattr(ketrs, 'GpuStatevector'))"
+      - name: Smoke test (free-threaded)
+        shell: bash
+        run: |
+          py="${{ steps.ft.outputs.python-path }}"
+          "$py" -m pip install numpy
+          "$py" -m pip install --no-index --find-links dist ketrs
+          "$py" -c "import sys, ketrs; assert not sys._is_gil_enabled(), 'import re-enabled the GIL'; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities())"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows

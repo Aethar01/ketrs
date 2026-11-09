@@ -42,3 +42,19 @@ jobs:
       - run: uv pip install maturin pytest qiskit qiskit-aer qiskit-qasm3-import numpy scipy
       - run: uv run --no-project maturin develop --release --features gpu
       - run: uv run --no-project pytest
+
+  # Free-threaded Python: the module must leave the GIL off, and ketrs must
+  # be safe from several threads. Qiskit doesn't support free-threading, so
+  # only the tests that don't need it run here.
+  python-free-threaded:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.14t
+      - run: uv pip install maturin numpy pytest
+      - run: .venv/bin/maturin build --release --out dist -i .venv/bin/python
+      - run: uv pip install dist/*.whl
+      - run: .venv/bin/python -m pytest python/tests/test_threads.py

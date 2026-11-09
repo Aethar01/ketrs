@@ -23,6 +23,20 @@ let state = Statevector::from_circuit(&bell);
 Qubit ordering follows Qiskit: qubit 0 is the least significant bit of a
 basis-state index, and Pauli labels have qubit 0 rightmost.
 
+## Install
+
+```sh
+pip install ketrs              # Python 3.10+, including free-threaded 3.14t
+pip install "ketrs[qiskit]"    # with the Qiskit converter's dependency
+cargo add ketrs                # Rust (add --features gpu for GpuStatevector)
+```
+
+Wheels are built for Linux (x86-64 and arm64, glibc 2.28+), Windows
+(x86-64) and macOS (Apple silicon). The Linux and Windows wheels include
+`GpuStatevector`, which needs only a Vulkan driver at run time; the macOS
+wheels don't support GPUs yet. Elsewhere pip builds from source, which needs
+Rust.
+
 ## Engines
 
 | Engine | Use it for |

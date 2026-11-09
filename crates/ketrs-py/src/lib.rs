@@ -1451,7 +1451,9 @@ fn ghz(n_qubits: usize) -> PyCircuit {
     }
 }
 
-#[pymodule]
+/// Safe without the GIL: there's no shared mutable state outside objects
+/// (whose borrows PyO3 checks), and `GpuStatevector` stays on its thread.
+#[pymodule(gil_used = false)]
 fn _ketrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<PyCircuit>()?;
