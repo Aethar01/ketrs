@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### GPU
+
+- Tiles apply each gate in the cheapest form its matrix allows: diagonal
+  gates multiply only the amplitudes they change, X-like gates and swaps
+  move amplitudes without arithmetic, real matrices skip the imaginary
+  parts, and controlled gates visit only the amplitudes with every control
+  set, so no thread idles. In double precision, which consumer GPUs run at
+  a fraction of their float speed, only runs of one-qubit gates are fused,
+  keeping two-qubit gates in these forms. On an RX 9060 XT, double-precision
+  QFT runs 2.2–2.6× faster at 26–28 qubits and the layered ansatz 1.6–1.9×,
+  so the GPU is ahead of the CPU again: 1.0–1.7× on QFT and 1.3–2.5× on the
+  layered ansatz at 18–26 qubits, end to end.
+- On an RTX 4090 at 22–26 qubits, double-precision circuits run 2.2–3.3×
+  faster, and now beat Aer's CUDA backend and cuStateVec by 1.3–2.5×
+  (before: 0.77–0.96×); single precision is 1.9–4.0× faster than Aer's at
+  22–28 qubits. 28-qubit double-precision states (4 GiB) still run far
+  slower than their size suggests there.
+
 ## 0.1.3 (2026-11-08)
 
 ### GPU

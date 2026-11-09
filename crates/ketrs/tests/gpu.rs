@@ -401,6 +401,63 @@ fn assert_close_single(got: &[C64], want: &[C64]) {
     }
 }
 
+/// Each gate form of the tile kernel (general, diagonal with and without a
+/// leading 1, antidiagonal plain and with phases, real, swap), uncontrolled,
+/// controlled and multi-controlled, in tiles of a 13-qubit state.
+#[test]
+fn tile_gate_forms_match_cpu() {
+    let Some(ctx) = gpu() else { return };
+    let n = 13;
+    let mut circ = Circuit::new(n);
+    for q in 0..n {
+        circ.h(q);
+    }
+    for (i, q) in (0..n).enumerate() {
+        let (a, b, c) = (q, (q + 3) % n, (q + 7) % n);
+        let angle = 0.3 + 0.1 * i as f64;
+        circ.u(angle, 0.4, 0.7, a)
+            .controlled(
+                ketrs::Gate::U {
+                    theta: angle,
+                    phi: 0.2,
+                    lambda: 0.9,
+                },
+                a,
+                b,
+            )
+            .rz(angle, b)
+            .controlled(ketrs::Gate::Rz(angle), a, c)
+            .multi_controlled(ketrs::Gate::Phase(angle), &[a, b], c)
+            .cp(angle, b, c)
+            .t(a)
+            .x(b)
+            .y(c)
+            .cx(a, b)
+            .cy(b, c)
+            .ccx(a, b, c)
+            .ry(angle, c)
+            .cry(angle, a, c)
+            .multi_controlled(ketrs::Gate::Ry(angle), &[b, c], a)
+            .swap(a, c);
+    }
+    for precision in [GpuPrecision::Double, GpuPrecision::Single] {
+        if precision == GpuPrecision::Double && !ctx.supports_f64() {
+            continue;
+        }
+        for chunk_bits in [13, 10] {
+            let mut gpu_state =
+                GpuStatevector::zero_with_layout(&ctx, n, chunk_bits, precision).unwrap();
+            gpu_state.run(&circ).unwrap();
+            let got = gpu_state.amplitudes().unwrap();
+            let want = Statevector::from_circuit(&circ);
+            match precision {
+                GpuPrecision::Double => assert_close(&got, want.amplitudes()),
+                GpuPrecision::Single => assert_close_single(&got, want.amplitudes()),
+            }
+        }
+    }
+}
+
 #[test]
 fn single_precision_matches_cpu() {
     let Some(ctx) = gpu() else { return };

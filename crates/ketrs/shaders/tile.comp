@@ -18,10 +18,29 @@
 //   1 quad:  q0, q1, min(q0, q1), then 16 complex entries, row-major
 //   2 pauli: x mask, z mask, highest bit of x, then cos, factor (complex)
 //   3 phase: z mask, then plus, minus (complex)
+//   4 diagonal pair: target, control mask, then d0 d1 (complex)
+//   5 antidiagonal pair: target, control mask, 1 if a plain swap (X), then
+//     m01 m10 (complex)
+//   6 real pair: target, control mask, then m00 m01 m10 m11 (real)
+//   7 swap:  q0, q1, min(q0, q1)
+//
+// Controlled gates loop over only the amplitudes with every control set,
+// so no lane idles on an unmet control: GPUs without fast 64-bit floats are
+// limited by this arithmetic, not by memory. The diagonal, antidiagonal,
+// real and swap forms skip the multiplies a general matrix would need.
 #include "common.glsl"
 
 const uint TILE = 1u << TILE_BITS;
 shared cplx tile[TILE];
+
+// k with a zero bit inserted at each set bit of `mask`, lowest first.
+uint insert_zero_bits(uint k, uint mask) {
+    while (mask != 0u) {
+        k = insert_zero_bit(k, uint(findLSB(mask)));
+        mask &= mask - 1u;
+    }
+    return k;
+}
 
 cplx cat(uint p) {
     return cplx(param(p), param(p + 1u));
@@ -55,19 +74,62 @@ void main() {
         uint p = pc.offset;
         for (uint g = 0u; g < pc.a; g++) {
             uint kind = param_uint(p);
-            if (kind == 0u) {
+            if (kind == 0u || kind == 5u || kind == 6u) {
                 uint target = param_uint(p + 1u), control = param_uint(p + 2u);
-                cplx m00 = cat(p + 3u), m01 = cat(p + 5u), m10 = cat(p + 7u), m11 = cat(p + 9u);
-                for (uint k = lane; k < TILE / 2u; k += 256u) {
-                    uint i0 = insert_zero_bit(k, target);
-                    if ((i0 & control) == control) {
+                uint set_bits = control | (1u << target);
+                uint pairs = TILE >> uint(bitCount(set_bits));
+                if (kind == 0u) {
+                    cplx m00 = cat(p + 3u), m01 = cat(p + 5u), m10 = cat(p + 7u), m11 = cat(p + 9u);
+                    for (uint k = lane; k < pairs; k += 256u) {
+                        uint i0 = insert_zero_bits(k, set_bits) | control;
                         uint i1 = i0 | (1u << target);
                         cplx x = tile[i0], y = tile[i1];
                         tile[i0] = cmul(m00, x) + cmul(m01, y);
                         tile[i1] = cmul(m10, x) + cmul(m11, y);
                     }
+                    p += 11u;
+                } else if (kind == 5u) {
+                    bool plain = param_uint(p + 3u) == 1u;
+                    cplx m01 = cat(p + 4u), m10 = cat(p + 6u);
+                    for (uint k = lane; k < pairs; k += 256u) {
+                        uint i0 = insert_zero_bits(k, set_bits) | control;
+                        uint i1 = i0 | (1u << target);
+                        cplx x = tile[i0], y = tile[i1];
+                        tile[i0] = plain ? y : cmul(m01, y);
+                        tile[i1] = plain ? x : cmul(m10, x);
+                    }
+                    p += 8u;
+                } else {
+                    real m00 = param(p + 3u), m01 = param(p + 4u), m10 = param(p + 5u), m11 = param(p + 6u);
+                    for (uint k = lane; k < pairs; k += 256u) {
+                        uint i0 = insert_zero_bits(k, set_bits) | control;
+                        uint i1 = i0 | (1u << target);
+                        cplx x = tile[i0], y = tile[i1];
+                        tile[i0] = m00 * x + m01 * y;
+                        tile[i1] = m10 * x + m11 * y;
+                    }
+                    p += 7u;
                 }
-                p += 11u;
+            } else if (kind == 4u) {
+                uint target = param_uint(p + 1u), control = param_uint(p + 2u);
+                cplx d0 = cat(p + 3u), d1 = cat(p + 5u);
+                uint count = TILE >> uint(bitCount(control));
+                for (uint k = lane; k < count; k += 256u) {
+                    uint i = insert_zero_bits(k, control) | control;
+                    tile[i] = cmul((i >> target & 1u) == 1u ? d1 : d0, tile[i]);
+                }
+                p += 7u;
+            } else if (kind == 7u) {
+                uint q0 = param_uint(p + 1u), q1 = param_uint(p + 2u), low = param_uint(p + 3u);
+                uint high = q0 + q1 - low;
+                for (uint k = lane; k < TILE / 4u; k += 256u) {
+                    uint b = insert_zero_bit(insert_zero_bit(k, low), high);
+                    uint i01 = b | (1u << q0), i10 = b | (1u << q1);
+                    cplx x = tile[i01];
+                    tile[i01] = tile[i10];
+                    tile[i10] = x;
+                }
+                p += 4u;
             } else if (kind == 1u) {
                 uint q0 = param_uint(p + 1u), q1 = param_uint(p + 2u), low = param_uint(p + 3u);
                 uint high = q0 + q1 - low;

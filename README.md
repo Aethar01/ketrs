@@ -91,23 +91,23 @@ state.
 
 | Qubits | Aer | ketrs | vs Aer | ketrs GPU | GPU vs CPU |
 |---:|---:|---:|:---|---:|:---|
-| 18 | 36.9 ms | 6.8 ms | `█████▍` 5.4× | 8.5 ms | `▊` 0.8× |
-| 20 | 115.4 ms | 43.1 ms | `██▋` 2.7× | 30.1 ms | `█▍` 1.4× |
-| 22 | 712.3 ms | 122.4 ms | `█████▉` 5.8× | 109.5 ms | `█▏` 1.1× |
-| 24 | 3.15 s | 554.2 ms | `█████▋` 5.7× | 368.4 ms | `█▌` 1.5× |
-| 26 | 13.87 s | 2.37 s | `█████▉` 5.9× | 1.49 s | `█▋` 1.6× |
+| 18 | 34.7 ms | 7.1 ms | `████▉` 4.9× | 5.5 ms | `█▎` 1.3× |
+| 20 | 103.6 ms | 50.4 ms | `██` 2.1× | 19.8 ms | `██▌` 2.5× |
+| 22 | 727.7 ms | 125.5 ms | `█████▊` 5.8× | 76.8 ms | `█▋` 1.6× |
+| 24 | 3.18 s | 560.3 ms | `█████▋` 5.7× | 245.8 ms | `██▎` 2.3× |
+| 26 | 13.83 s | 2.40 s | `█████▊` 5.8× | 1.00 s | `██▍` 2.4× |
 
 *Quantum Fourier transform*
 
 | Qubits | Aer | ketrs | vs Aer | ketrs GPU | GPU vs CPU |
 |---:|---:|---:|:---|---:|:---|
-| 18 | 22.8 ms | 3.9 ms | `█████▉` 5.9× | 6.1 ms | `▋` 0.6× |
-| 20 | 72.9 ms | 16.3 ms | `████▌` 4.5× | 18.0 ms | `▉` 0.9× |
-| 22 | 234.3 ms | 66.5 ms | `███▌` 3.5× | 77.2 ms | `▉` 0.9× |
-| 24 | 1.33 s | 173.1 ms | `███████▊` 7.7× | 243.5 ms | `▊` 0.7× |
-| 26 | 6.21 s | 686.0 ms | `█████████` 9.1× | 1.01 s | `▋` 0.7× |
+| 18 | 22.1 ms | 3.8 ms | `█████▉` 5.9× | 3.0 ms | `█▎` 1.3× |
+| 20 | 70.8 ms | 12.5 ms | `█████▋` 5.7× | 8.9 ms | `█▍` 1.4× |
+| 22 | 233.3 ms | 67.4 ms | `███▌` 3.5× | 39.0 ms | `█▊` 1.7× |
+| 24 | 1.36 s | 173.1 ms | `███████▉` 7.8× | 168.0 ms | `█` 1.0× |
+| 26 | 6.26 s | 680.9 ms | `█████████▎` 9.2× | 573.0 ms | `█▎` 1.2× |
 
-Against Qiskit's NumPy `quantum_info.Statevector`, ketrs is 28–86× faster at
+Against Qiskit's NumPy `quantum_info.Statevector`, ketrs is 31–112× faster at
 18–20 qubits. Below 18 qubits the comparison with Aer is dominated by Aer's
 per-job overhead of about 2 ms, so it is left out.
 
@@ -123,17 +123,20 @@ cuStateVec, taking the faster. Times are GPU work only, reading back one
 $`\langle Z\rangle`$: that host downloaded states at about 1 GB/s for
 both simulators, which would otherwise dominate. The 4090 runs doubles at
 1/64 of its float speed, so single precision is the case it is built for.
+At 28 qubits in double precision (4 GiB) ketrs slows sharply on this card,
+9–13× its 27-qubit time rather than about 2×, for a reason not yet found; it
+is not the split into two buffers, which costs 5–12% at 26–27 qubits.
 
 | Circuit | Qubits | Aer f32 | ketrs f32 | vs Aer | best Aer f64 | ketrs f64 | vs Aer |
 |---|---:|---:|---:|:---|---:|---:|:---|
-| Layered | 22 | 38.4 ms | 40.2 ms | `█` 0.96× | 40.7 ms | 42.3 ms | `█` 0.96× |
-| Layered | 24 | 164.2 ms | 43.2 ms | `███▊` 3.8× | 133.7 ms | 160.2 ms | `▉` 0.83× |
-| Layered | 26 | 698.0 ms | 169.2 ms | `████▏` 4.1× | 519.6 ms | 677.9 ms | `▊` 0.77× |
-| Layered | 28 | 2.97 s | 832.8 ms | `███▋` 3.6× | 2.18 s | 7.43 s | `▎` 0.29× |
-| QFT | 22 | 24.5 ms | 10.7 ms | `██▎` 2.3× | 20.9 ms | 23.5 ms | `▉` 0.89× |
-| QFT | 24 | 69.1 ms | 25.8 ms | `██▋` 2.7× | 73.7 ms | 86.0 ms | `▉` 0.86× |
-| QFT | 26 | 266.5 ms | 101.2 ms | `██▋` 2.6× | 311.6 ms | 373.1 ms | `▉` 0.84× |
-| QFT | 28 | 1.14 s | 508.6 ms | `██▎` 2.2× | 1.36 s | 2.81 s | `▌` 0.48× |
+| Layered | 22 | 41.7 ms | 14.9 ms | `██▊` 2.8× | 36.6 ms | 18.5 ms | `██` 2.0× |
+| Layered | 24 | 159.6 ms | 42.3 ms | `███▊` 3.8× | 139.6 ms | 56.6 ms | `██▌` 2.5× |
+| Layered | 26 | 663.9 ms | 167.6 ms | `████` 4.0× | 489.6 ms | 223.9 ms | `██▏` 2.2× |
+| Layered | 28 | 2.81 s | 1.06 s | `██▋` 2.7× | 2.03 s | 4.99 s | `▍` 0.41× |
+| QFT | 22 | 31.7 ms | 14.9 ms | `██▏` 2.1× | 28.3 ms | 21.9 ms | `█▎` 1.3× |
+| QFT | 24 | 77.5 ms | 24.4 ms | `███▏` 3.2× | 82.0 ms | 36.9 ms | `██▎` 2.2× |
+| QFT | 26 | 270.9 ms | 90.0 ms | `███` 3.0× | 319.5 ms | 149.7 ms | `██▏` 2.1× |
+| QFT | 28 | 1.07 s | 562.5 ms | `█▉` 1.9× | 1.37 s | 4.80 s | `▎` 0.29× |
 
 **Mid-circuit measurement**: 1000 shots of circuits that measure, reset and
 branch partway through, ending with every qubit measured. *Feed-forward* is
@@ -145,12 +148,12 @@ block is 20×.
 
 | Circuit | Qubits | Aer | Aer, shot branching | ketrs | vs best Aer |
 |---|---:|---:|---:|---:|:---|
-| Feed-forward | 12 | 300 ms | 63.7 ms | 1.3 ms | `██▌` 50× |
-| Feed-forward | 16 | 7.57 s | 1.36 s | 8.0 ms | `████████▌` 170× |
-| Feed-forward | 20 | 158.9 s | 32.5 s | 104 ms | `███████████████▋` 312× |
-| Repeat until success | 12 | 341 ms | 121 ms | 10.6 ms | `▋` 11× |
-| Repeat until success | 16 | 7.27 s | 2.24 s | 69.8 ms | `█▋` 32× |
-| Repeat until success | 20 | 143.9 s | 45.8 s | 698 ms | `███▎` 66× |
+| Feed-forward | 12 | 300 ms | 64.2 ms | 896 µs | `███▋` 72× |
+| Feed-forward | 16 | 7.63 s | 1.36 s | 7.2 ms | `█████████▌` 189× |
+| Feed-forward | 20 | 160.0 s | 31.7 s | 69.0 ms | `███████████████████████` 460× |
+| Repeat until success | 12 | 347 ms | 127 ms | 7.0 ms | `▉` 18× |
+| Repeat until success | 16 | 7.26 s | 2.24 s | 49.4 ms | `██▎` 45× |
+| Repeat until success | 20 | 143.1 s | 45.2 s | 428 ms | `█████▎` 106× |
 
 ketrs follows each distinct measurement history once, splitting the shots
 between outcomes by binomial draws, and samples the final measurements from

@@ -4,17 +4,19 @@
 //! with nothing but the system Vulkan driver, loaded at run time. The GLSL
 //! shaders in `shaders/` are compiled to SPIR-V by `build.rs` with glslc.
 //!
-//! A circuit is fused (see [`Circuit::fused`]) and planned into dispatches:
-//! runs of gates touching at most ten qubits become one shared-memory tile
-//! pass, everything else one dispatch per gate, with every gate matrix in a
-//! single parameter buffer.
+//! A circuit is fused (fully in single precision, only runs of one-qubit
+//! gates in double; see `fuse`) and planned into dispatches: runs of
+//! gates touching at most ten qubits (eleven on NVIDIA) become one
+//! shared-memory tile pass, everything else one dispatch per gate, with
+//! every gate matrix in a single parameter buffer.
 //!
 //! Amplitudes are complex doubles, `16 · 2ⁿ` bytes in all. A state larger
 //! than one storage buffer (4 GiB or just under, so 27 or 28 qubits) is
-//! split over up to sixteen buffers, which kernels index per amplitude;
-//! that needs Vulkan 1.2's non-uniform descriptor indexing and allows up to
-//! 31 qubits, memory permitting. Expectation values and sampling run on the GPU, downloading
-//! only partial sums and the sampled blocks.
+//! split over up to sixteen buffers, which kernels reach per amplitude
+//! through their device addresses; that needs Vulkan 1.2's buffer device
+//! addresses and allows up to 31 qubits, memory permitting. Expectation
+//! values and sampling run on the GPU, downloading only partial sums and
+//! the sampled blocks.
 
 mod context;
 mod evolve;
@@ -704,7 +706,7 @@ impl GpuStatevector {
                 circuit.n_parameters()
             )));
         }
-        let mut ops: Vec<GpuOp> = GpuOp::plan(&circuit.fused());
+        let mut ops: Vec<GpuOp> = GpuOp::plan(&fuse(circuit, self.precision));
         if circuit.global_phase() != 0.0 {
             let phase = C64::cis(circuit.global_phase());
             ops.push(GpuOp::Phase {
@@ -856,6 +858,20 @@ impl Drop for GpuStatevector {
                 .device
                 .free_descriptor_sets(self.ctx.descriptor_pool, &[self.set]);
         }
+    }
+}
+
+/// `circuit` with gates merged as suits the GPU at `precision`. Consumer GPUs
+/// run doubles at a small fraction of their float speed, so in double
+/// precision tiles are limited by arithmetic: only runs of one-qubit gates
+/// are merged, keeping CNOTs, phases and swaps in the cheap forms of
+/// `tile.comp` rather than dense 4×4 matrices (1.6–2.2× faster at 26 qubits
+/// on an RX 9060 XT). Single precision is nearer the memory limit, where
+/// fewer gates win, so it fuses fully.
+pub(super) fn fuse(circuit: &Circuit, precision: GpuPrecision) -> Circuit {
+    match precision {
+        GpuPrecision::Double => circuit.fused_where(|op| matches!(op, Operation::Gate { .. })),
+        GpuPrecision::Single => circuit.fused(),
     }
 }
 
@@ -1043,12 +1059,38 @@ impl GpuOp {
         }
     }
 
-    /// Append to a tile kernel's gate list (see `shaders/tile.comp`).
+    /// Append to a tile kernel's gate list (see `shaders/tile.comp`), in
+    /// the cheapest form the gate's matrix allows.
     fn tile_entry(&self, params: &mut Vec<f64>) {
+        let zero = C64::new(0.0, 0.0);
+        let one = C64::new(1.0, 0.0);
         match self {
-            GpuOp::Pair { target, control, m } => {
-                params.extend([0.0, *target as f64, *control as f64]);
-                push_complex(params, m);
+            &GpuOp::Pair { target, control, m } => {
+                let [m00, m01, m10, m11] = m;
+                if m01 == zero && m10 == zero {
+                    // With m00 = 1, only the amplitudes with the target set
+                    // change: treat the target as one more control.
+                    let control = if m00 == one {
+                        control | 1 << target
+                    } else {
+                        control
+                    };
+                    params.extend([4.0, target as f64, control as f64]);
+                    push_complex(params, &[m00, m11]);
+                } else if m00 == zero && m11 == zero {
+                    let plain = m01 == one && m10 == one;
+                    params.extend([5.0, target as f64, control as f64, plain as u8 as f64]);
+                    push_complex(params, &[m01, m10]);
+                } else if m.iter().all(|z| z.im == 0.0) {
+                    params.extend([6.0, target as f64, control as f64]);
+                    params.extend(m.map(|z| z.re));
+                } else {
+                    params.extend([0.0, target as f64, control as f64]);
+                    push_complex(params, &m);
+                }
+            }
+            GpuOp::Quad { q0, q1, m } if *m == SWAP => {
+                params.extend([7.0, *q0 as f64, *q1 as f64, (*q0).min(*q1) as f64]);
             }
             GpuOp::Quad { q0, q1, m } => {
                 params.extend([1.0, *q0 as f64, *q1 as f64, (*q0).min(*q1) as f64]);
@@ -1065,6 +1107,12 @@ impl GpuOp {
         }
     }
 }
+
+/// A swap as a [`GpuOp::Quad`] matrix, row-major.
+const SWAP: [C64; 16] = {
+    let (o, l) = (C64::new(0.0, 0.0), C64::new(1.0, 0.0));
+    [l, o, o, o, o, o, l, o, o, l, o, o, o, o, o, l]
+};
 
 fn push_complex(params: &mut Vec<f64>, values: &[C64]) {
     for v in values {
