@@ -183,7 +183,21 @@ jobs:
           & C:\VulkanSDK\Bin\glslc.exe --version
           "GLSLC=C:\VulkanSDK\Bin\glslc.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
       - run: pip install "maturin>=1.9,<2"
-      - run: maturin build --release --out dist --features gpu --find-interpreter
+      # Regular and free-threaded interpreters are both `python.exe` here, so
+      # --find-interpreter keeps only one of each version: list them all.
+      - name: Build
+        shell: bash
+        run: |
+          cache=$(cygpath -u "$RUNNER_TOOL_CACHE")/Python
+          interpreters=()
+          for v in 3.10 3.11 3.12 3.13 3.14 3.15; do
+            dir=$(ls -d "$cache/$v".* | sort -V | tail -1)
+            interpreters+=("$dir/x64/python.exe")
+            if [ -e "$dir/x64-freethreaded/python.exe" ]; then
+              interpreters+=("$dir/x64-freethreaded/python.exe")
+            fi
+          done
+          maturin build --release --out dist --features gpu -i "${interpreters[@]}"
       - name: Smoke test
         shell: bash
         run: |
