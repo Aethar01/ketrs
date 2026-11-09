@@ -91,23 +91,23 @@ state.
 
 | Qubits | Aer | ketrs | vs Aer | ketrs GPU | GPU vs CPU |
 |---:|---:|---:|:---|---:|:---|
-| 18 | 34.7 ms | 7.1 ms | `████▉` 4.9× | 5.5 ms | `█▎` 1.3× |
-| 20 | 103.6 ms | 50.4 ms | `██` 2.1× | 19.8 ms | `██▌` 2.5× |
-| 22 | 727.7 ms | 125.5 ms | `█████▊` 5.8× | 76.8 ms | `█▋` 1.6× |
-| 24 | 3.18 s | 560.3 ms | `█████▋` 5.7× | 245.8 ms | `██▎` 2.3× |
-| 26 | 13.83 s | 2.40 s | `█████▊` 5.8× | 1.00 s | `██▍` 2.4× |
+| 18 | 37.1 ms | 7.1 ms | `█████▎` 5.2× | 5.5 ms | `█▎` 1.3× |
+| 20 | 115.7 ms | 52.3 ms | `██▎` 2.2× | 20.0 ms | `██▋` 2.6× |
+| 22 | 736.8 ms | 125.3 ms | `█████▉` 5.9× | 78.3 ms | `█▋` 1.6× |
+| 24 | 3.12 s | 555.4 ms | `█████▋` 5.6× | 238.2 ms | `██▍` 2.3× |
+| 26 | 13.82 s | 2.42 s | `█████▊` 5.7× | 935.2 ms | `██▋` 2.6× |
 
 *Quantum Fourier transform*
 
 | Qubits | Aer | ketrs | vs Aer | ketrs GPU | GPU vs CPU |
 |---:|---:|---:|:---|---:|:---|
-| 18 | 22.1 ms | 3.8 ms | `█████▉` 5.9× | 3.0 ms | `█▎` 1.3× |
-| 20 | 70.8 ms | 12.5 ms | `█████▋` 5.7× | 8.9 ms | `█▍` 1.4× |
-| 22 | 233.3 ms | 67.4 ms | `███▌` 3.5× | 39.0 ms | `█▊` 1.7× |
-| 24 | 1.36 s | 173.1 ms | `███████▉` 7.8× | 168.0 ms | `█` 1.0× |
-| 26 | 6.26 s | 680.9 ms | `█████████▎` 9.2× | 573.0 ms | `█▎` 1.2× |
+| 18 | 18.8 ms | 3.6 ms | `█████▎` 5.2× | 2.6 ms | `█▍` 1.4× |
+| 20 | 71.9 ms | 16.1 ms | `████▌` 4.5× | 11.8 ms | `█▍` 1.4× |
+| 22 | 236.0 ms | 70.7 ms | `███▍` 3.3× | 40.3 ms | `█▊` 1.8× |
+| 24 | 1.33 s | 169.9 ms | `███████▉` 7.8× | 171.6 ms | `█` 1.0× |
+| 26 | 6.21 s | 678.7 ms | `█████████▏` 9.1× | 613.0 ms | `█▏` 1.1× |
 
-Against Qiskit's NumPy `quantum_info.Statevector`, ketrs is 31–112× faster at
+Against Qiskit's NumPy `quantum_info.Statevector`, ketrs is 29–87× faster at
 18–20 qubits. Below 18 qubits the comparison with Aer is dominated by Aer's
 per-job overhead of about 2 ms, so it is left out.
 
@@ -123,20 +123,17 @@ cuStateVec, taking the faster. Times are GPU work only, reading back one
 $`\langle Z\rangle`$: that host downloaded states at about 1 GB/s for
 both simulators, which would otherwise dominate. The 4090 runs doubles at
 1/64 of its float speed, so single precision is the case it is built for.
-At 28 qubits in double precision (4 GiB) ketrs slows sharply on this card,
-9–13× its 27-qubit time rather than about 2×, for a reason not yet found; it
-is not the split into two buffers, which costs 5–12% at 26–27 qubits.
 
 | Circuit | Qubits | Aer f32 | ketrs f32 | vs Aer | best Aer f64 | ketrs f64 | vs Aer |
 |---|---:|---:|---:|:---|---:|---:|:---|
-| Layered | 22 | 41.7 ms | 14.9 ms | `██▊` 2.8× | 36.6 ms | 18.5 ms | `██` 2.0× |
-| Layered | 24 | 159.6 ms | 42.3 ms | `███▊` 3.8× | 139.6 ms | 56.6 ms | `██▌` 2.5× |
-| Layered | 26 | 663.9 ms | 167.6 ms | `████` 4.0× | 489.6 ms | 223.9 ms | `██▏` 2.2× |
-| Layered | 28 | 2.81 s | 1.06 s | `██▋` 2.7× | 2.03 s | 4.99 s | `▍` 0.41× |
-| QFT | 22 | 31.7 ms | 14.9 ms | `██▏` 2.1× | 28.3 ms | 21.9 ms | `█▎` 1.3× |
-| QFT | 24 | 77.5 ms | 24.4 ms | `███▏` 3.2× | 82.0 ms | 36.9 ms | `██▎` 2.2× |
-| QFT | 26 | 270.9 ms | 90.0 ms | `███` 3.0× | 319.5 ms | 149.7 ms | `██▏` 2.1× |
-| QFT | 28 | 1.07 s | 562.5 ms | `█▉` 1.9× | 1.37 s | 4.80 s | `▎` 0.29× |
+| Layered | 22 | 37.4 ms | 14.1 ms | `██▋` 2.7× | 32.5 ms | 18.1 ms | `█▊` 1.8× |
+| Layered | 24 | 158.5 ms | 45.5 ms | `███▌` 3.5× | 129.5 ms | 56.4 ms | `██▎` 2.3× |
+| Layered | 26 | 671.7 ms | 176.7 ms | `███▊` 3.8× | 498.5 ms | 247.3 ms | `██` 2.0× |
+| Layered | 28 | 2.86 s | 687.5 ms | `████▏` 4.2× | 2.09 s | 1.02 s | `██` 2.0× |
+| QFT | 22 | 25.0 ms | 9.9 ms | `██▌` 2.5× | 21.9 ms | 13.0 ms | `█▋` 1.7× |
+| QFT | 24 | 68.0 ms | 27.5 ms | `██▌` 2.5× | 73.2 ms | 43.7 ms | `█▋` 1.7× |
+| QFT | 26 | 255.5 ms | 110.0 ms | `██▍` 2.3× | 304.5 ms | 182.3 ms | `█▋` 1.7× |
+| QFT | 28 | 1.08 s | 380.7 ms | `██▉` 2.8× | 1.33 s | 720.2 ms | `█▉` 1.8× |
 
 **Mid-circuit measurement**: 1000 shots of circuits that measure, reset and
 branch partway through, ending with every qubit measured. *Feed-forward* is
