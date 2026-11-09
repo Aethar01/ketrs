@@ -9,7 +9,7 @@
 //! come back in a single download at the end.
 
 use super::context::{GpuContext, Kernel, Push};
-use super::{BATCH_UNITS, GpuOp, GpuStatevector, Plan, buffer_info, write_set};
+use super::{BATCH_UNITS, GpuOp, GpuPrecision, GpuStatevector, Plan, buffer_info, fuse, write_set};
 use crate::circuit::Circuit;
 use crate::error::Error;
 use crate::observable::PauliSum;
@@ -182,8 +182,9 @@ fn push_segment(
     out: &mut Vec<SweepDispatch>,
     ops: &Circuit,
     tile_bits: u32,
+    precision: GpuPrecision,
 ) {
-    let gpu_ops: Vec<GpuOp> = GpuOp::plan(&ops.fused());
+    let gpu_ops: Vec<GpuOp> = GpuOp::plan(&fuse(ops, precision));
     let plan = Plan::new(&gpu_ops, ops.n_qubits(), tile_bits);
     let base = params.len() as u32;
     params.extend(&plan.params);
@@ -228,7 +229,13 @@ fn sweep(
             terms.push((b.parameter, b.scale));
         }
         if !terms.is_empty() {
-            push_segment(&mut params, &mut dispatches, &pending, tile_bits);
+            push_segment(
+                &mut params,
+                &mut dispatches,
+                &pending,
+                tile_bits,
+                psi.precision,
+            );
             pending = Circuit::new(n);
             let g = Generator::of(op);
             let masks = (g.masks.x as u32, g.controls as u32, g.masks.z as u32);
