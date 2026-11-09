@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.5 (2026-11-09)
+
+### Python
+
+- First release on PyPI: `pip install ketrs`. Wheels for CPython 3.10–3.15
+  and free-threaded 3.14t and 3.15t, on Linux (x86-64 and arm64, glibc
+  2.28+), Windows (x86-64) and macOS (Apple silicon). The Linux and Windows
+  wheels include `GpuStatevector`.
+- Free-threaded Python is supported: importing ketrs leaves the GIL
+  disabled, and ketrs can be used from several threads at once.
+
+### Releases
+
+- Releases are published to crates.io and PyPI from CI, by trusted
+  publishing, when a version tag is pushed.
+
 ## 0.1.4 (2026-11-09)
 
 ### GPU

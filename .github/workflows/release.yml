@@ -1,0 +1,275 @@
+name: Release
+
+# Pushing a tag vX.Y.Z publishes ketrs X.Y.Z to crates.io and PyPI, once
+# every wheel and the sdist have built. To publish an existing tag, run this
+# workflow by hand with that tag. Pushes and pull requests that change the
+# release setup build everything without publishing.
+#
+# Both registries use trusted publishing from the `release` environment: no
+# API tokens are stored.
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["**"]
+    paths: [".github/workflows/release.yml", "pyproject.toml", "crates/ketrs-py/**"]
+  pull_request:
+    paths: [".github/workflows/release.yml", "pyproject.toml", "crates/ketrs-py/**"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish, e.g. v0.1.4"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A tag push, or the tag named in a manual run.
+  RELEASE_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: version
+        name: Check the tag matches the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "Cargo.toml version: $version"
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          elif [ "$RELEASE_TAG" = "v$version" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::tag $RELEASE_TAG does not match version $version"
+            exit 1
+          fi
+
+  linux:
+    needs: check
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      # Free-threaded interpreters first: `python` is then the last regular
+      # one, and steps.ft gives 3.14t for the smoke test.
+      - uses: actions/setup-python@v5
+        id: ft
+        with:
+          python-version: |
+            3.15t
+            3.14t
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+            3.15
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y glslc
+      # Built on the runner (where glslc is) with zig as the linker, for
+      # glibc 2.28 and later.
+      - run: pip install "maturin>=1.9,<2" ziglang
+      - run: >
+          maturin build --release --out dist --features gpu --find-interpreter
+          --zig --compatibility manylinux_2_28
+      - name: Smoke test
+        run: |
+          pip install numpy
+          pip install --no-index --find-links dist ketrs
+          python -c "import ketrs; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities()); print('GPU support:', hasattr(ketrs, 'GpuStatevector'))"
+      - name: Smoke test (free-threaded)
+        shell: bash
+        run: |
+          py="${{ steps.ft.outputs.python-path }}"
+          "$py" -m pip install numpy
+          "$py" -m pip install --no-index --find-links dist ketrs
+          "$py" -c "import sys, ketrs; assert not sys._is_gil_enabled(), 'import re-enabled the GIL'; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities())"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.runner }}
+          path: dist
+
+  macos:
+    needs: check
+    strategy:
+      matrix:
+        runner: [macos-15]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      # Free-threaded interpreters first: `python` is then the last regular
+      # one, and steps.ft gives 3.14t for the smoke test.
+      - uses: actions/setup-python@v5
+        id: ft
+        with:
+          python-version: |
+            3.15t
+            3.14t
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+            3.15
+      - uses: dtolnay/rust-toolchain@stable
+      # No `gpu` feature: ketrs doesn't enumerate MoltenVK devices, so a GPU
+      # build would find no GPU on a Mac.
+      - run: pip install "maturin>=1.9,<2"
+      - run: maturin build --release --out dist --find-interpreter
+      - name: Smoke test
+        run: |
+          pip install numpy
+          pip install --no-index --find-links dist ketrs
+          python -c "import ketrs; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities())"
+      - name: Smoke test (free-threaded)
+        shell: bash
+        run: |
+          py="${{ steps.ft.outputs.python-path }}"
+          "$py" -m pip install numpy
+          "$py" -m pip install --no-index --find-links dist ketrs
+          "$py" -c "import sys, ketrs; assert not sys._is_gil_enabled(), 'import re-enabled the GIL'; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities())"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.runner }}
+          path: dist
+
+  windows:
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      # Free-threaded interpreters first: `python` is then the last regular
+      # one, and steps.ft gives 3.14t for the smoke test.
+      - uses: actions/setup-python@v5
+        id: ft
+        with:
+          python-version: |
+            3.15t
+            3.14t
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+            3.15
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install glslc (Vulkan SDK)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe -OutFile vulkan-sdk.exe
+          Start-Process -Wait -FilePath .\vulkan-sdk.exe -ArgumentList '--root', 'C:\VulkanSDK', '--accept-licenses', '--default-answer', '--confirm-command', 'install'
+          & C:\VulkanSDK\Bin\glslc.exe --version
+          "GLSLC=C:\VulkanSDK\Bin\glslc.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - run: pip install "maturin>=1.9,<2"
+      # Regular and free-threaded interpreters are both `python.exe` here, so
+      # --find-interpreter keeps only one of each version: list them all.
+      - name: Build
+        shell: bash
+        run: |
+          cache=$(cygpath -u "$RUNNER_TOOL_CACHE")/Python
+          interpreters=()
+          for v in 3.10 3.11 3.12 3.13 3.14 3.15; do
+            dir=$(ls -d "$cache/$v".* | sort -V | tail -1)
+            interpreters+=("$dir/x64/python.exe")
+            if [ -e "$dir/x64-freethreaded/python.exe" ]; then
+              interpreters+=("$dir/x64-freethreaded/python.exe")
+            fi
+          done
+          maturin build --release --out dist --features gpu -i "${interpreters[@]}"
+      - name: Smoke test
+        shell: bash
+        run: |
+          pip install numpy
+          pip install --no-index --find-links dist ketrs
+          python -c "import ketrs; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities()); print('GPU support:', hasattr(ketrs, 'GpuStatevector'))"
+      - name: Smoke test (free-threaded)
+        shell: bash
+        run: |
+          py="${{ steps.ft.outputs.python-path }}"
+          "$py" -m pip install numpy
+          "$py" -m pip install --no-index --find-links dist ketrs
+          "$py" -c "import sys, ketrs; assert not sys._is_gil_enabled(), 'import re-enabled the GIL'; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities())"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows
+          path: dist
+
+  sdist:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - run: pip install "maturin>=1.9,<2"
+      - run: maturin sdist --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  crates-io:
+    needs: [check, linux, macos, windows, sdist]
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - id: existing
+        name: Skip a version already on crates.io
+        run: |
+          version=${RELEASE_TAG#v}
+          code=$(curl -s -o /dev/null -w '%{http_code}' -A "ketrs release workflow" \
+            "https://crates.io/api/v1/crates/ketrs/$version")
+          echo "published=$([ "$code" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: rust-lang/crates-io-auth-action@v1
+        if: steps.existing.outputs.published == 'false'
+        id: auth
+      - if: steps.existing.outputs.published == 'false'
+        run: cargo publish -p ketrs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  pypi:
+    needs: [check, crates-io]
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
