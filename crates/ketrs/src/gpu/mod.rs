@@ -1124,6 +1124,14 @@ fn highest_bit(x: u32) -> u32 {
     u32::BITS - 1 - x.leading_zeros()
 }
 
+/// The lowest qubits every tile includes, so neighbouring threads load
+/// neighbouring amplitudes. A tile of only high qubits scatters each warp's
+/// loads across the whole state: at 28 qubits in double precision (4 GiB)
+/// such passes ran about 15× slower on an RTX 4090, making whole circuits
+/// 6–10× slower. Two qubits cost little at smaller sizes on that card and on
+/// an RX 9060 XT, where more cost more passes than they save.
+const MIN_LOW_QUBITS: u32 = 2;
+
 /// The dispatches and parameters for one circuit.
 struct Plan {
     params: Vec<f64>,
@@ -1151,13 +1159,18 @@ impl Plan {
             costs: Vec::new(),
         };
         let tiling = n_qubits as u32 >= tile_bits;
+        let low = if tiling {
+            (1u32 << MIN_LOW_QUBITS) - 1
+        } else {
+            0
+        };
         let mut done = vec![false; ops.len()];
         let mut start = 0;
         let mut run = Vec::new();
         while start < ops.len() {
             // Grow the run while its qubits still fit in one tile, until
             // the operations passed over cover every qubit.
-            let mut inside = 0u32;
+            let mut inside = low;
             let mut passed = 0u32;
             run.clear();
             for (i, op) in ops.iter().enumerate().skip(start) {

@@ -12,13 +12,20 @@
   a fraction of their float speed, only runs of one-qubit gates are fused,
   keeping two-qubit gates in these forms. On an RX 9060 XT, double-precision
   QFT runs 2.2–2.6× faster at 26–28 qubits and the layered ansatz 1.6–1.9×,
-  so the GPU is ahead of the CPU again: 1.0–1.7× on QFT and 1.3–2.5× on the
+  so the GPU is ahead of the CPU again: 1.0–1.8× on QFT and 1.3–2.6× on the
   layered ansatz at 18–26 qubits, end to end.
 - On an RTX 4090 at 22–26 qubits, double-precision circuits run 2.2–3.3×
-  faster, and now beat Aer's CUDA backend and cuStateVec by 1.3–2.5×
-  (before: 0.77–0.96×); single precision is 1.9–4.0× faster than Aer's at
-  22–28 qubits. 28-qubit double-precision states (4 GiB) still run far
-  slower than their size suggests there.
+  faster.
+- Every tile includes the two lowest qubits, so neighbouring threads load
+  neighbouring amplitudes. Tiles of only high qubits scattered each warp's
+  loads across the state, which at 28 qubits in double precision (4 GiB)
+  made passes about 15× slower on an RTX 4090: 28-qubit circuits there run
+  6–10× faster (QFT 4.89 s to 502 ms). Single precision at 28 qubits runs
+  1.15–1.7× faster on an RTX 4090 and an RX 9060 XT.
+- Against Aer 0.18's CUDA backend on an RTX 4090 (GPU work only), ketrs is
+  now 1.7–2.3× faster in double precision at 22–28 qubits, against Aer or
+  cuStateVec, whichever is faster (0.1.3: 0.29–0.96×), and 2.3–4.2× faster
+  in single precision.
 
 ## 0.1.3 (2026-11-08)
 
