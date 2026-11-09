@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 proptest-regressions/
 bench/results.json
+todo.md
