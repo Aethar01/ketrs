@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.6 (2026-11-13)
+
+### Features
+
+- `SparseOperator`: a Hermitian operator stored as a sparse matrix in the
+  computational basis, for operators that are sparse as matrices but long as
+  Pauli sums (for example hops whose amplitude depends on the whole
+  configuration). `Statevector.expectation`, `apply_pauli_sum` and `evolve`
+  accept one in place of a `PauliSum`, and `SparseOperator.from_scipy`
+  builds one from any SciPy sparse matrix. In Rust:
+  `SparseOperator::from_csr` and `DenseState::{expectation_sparse,
+  apply_sparse, evolve_sparse}`.
+
 ## 0.1.5 (2026-11-09)
 
 ### Python

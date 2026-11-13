@@ -13,6 +13,7 @@ pub(crate) mod krylov;
 mod measure;
 mod noise;
 pub(crate) mod shots;
+mod sparse;
 
 pub use eigen::{EigenOptions, Eigenstate};
 

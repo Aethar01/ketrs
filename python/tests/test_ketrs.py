@@ -313,6 +313,70 @@ def test_apply_pauli_sum_matches_matrix():
     np.testing.assert_allclose(got.amplitudes(), ISING.to_matrix() @ psi0, atol=1e-12)
 
 
+
+def random_sparse_hermitian(n_qubits, density, seed):
+    """A random complex Hermitian matrix with about `density` of its entries set."""
+    import scipy.sparse as sp
+
+    rng = np.random.default_rng(seed)
+    dim = 2**n_qubits
+    a = sp.random(dim, dim, density=density, random_state=rng, format="csr")
+    a = a + 1j * sp.random(dim, dim, density=density, random_state=rng, format="csr")
+    return (a + a.conj().T).tocsr()
+
+
+def test_sparse_operator_matches_dense_matrix():
+    matrix = random_sparse_hermitian(5, 0.1, seed=1)
+    op = ketrs.SparseOperator.from_scipy(matrix)
+    assert op.n_qubits == 5
+    psi0 = QiskitStatevector(random_circuit(5, depth=4, seed=7)).data
+    dense = matrix.toarray()
+    state = ketrs.Statevector.from_amplitudes(psi0)
+    assert state.expectation(op) == pytest.approx(np.real(psi0.conj() @ dense @ psi0), abs=1e-12)
+    np.testing.assert_allclose(state.apply_pauli_sum(op).amplitudes(), dense @ psi0, atol=1e-12)
+    state.evolve(op, 0.7)
+    np.testing.assert_allclose(state.amplitudes(), expm(-0.7j * dense) @ psi0, atol=1e-10)
+
+
+def test_sparse_operator_equals_its_pauli_sum():
+    op = ketrs.SparseOperator.from_scipy(ISING.to_matrix(sparse=True))
+    h = pauli_sum_from_qiskit(ISING)
+    psi0 = QiskitStatevector(random_circuit(4, depth=4, seed=8)).data
+    a, b = ketrs.Statevector.from_amplitudes(psi0), ketrs.Statevector.from_amplitudes(psi0)
+    a.evolve(op, 1.3)
+    b.evolve(h, 1.3)
+    np.testing.assert_allclose(a.amplitudes(), b.amplitudes(), atol=1e-10)
+
+
+def test_sparse_operator_on_real_states():
+    real = random_sparse_hermitian(4, 0.2, seed=2).real
+    complex_op = ketrs.SparseOperator.from_scipy(random_sparse_hermitian(4, 0.2, seed=3))
+    psi0 = np.random.default_rng(4).normal(size=16)
+    psi0 /= np.linalg.norm(psi0)
+    state = ketrs.Statevector.from_amplitudes(psi0)
+    op = ketrs.SparseOperator.from_scipy(real)
+    assert op.is_real()
+    np.testing.assert_allclose(state.apply_pauli_sum(op).amplitudes(), real @ psi0, atol=1e-12)
+    # The imaginary, antisymmetric part drops out of a real expectation value.
+    dense = random_sparse_hermitian(4, 0.2, seed=3).toarray()
+    assert state.expectation(complex_op) == pytest.approx(psi0 @ dense.real @ psi0, abs=1e-12)
+    with pytest.raises(ValueError, match="real"):
+        state.apply_pauli_sum(complex_op)
+    with pytest.raises(ValueError, match="complex"):
+        state.evolve(op, 0.1)
+
+
+def test_sparse_operator_rejects_bad_input():
+    with pytest.raises(ValueError, match="Hermitian"):
+        ketrs.SparseOperator.from_scipy(np.array([[0, 1], [2, 0]]))
+    with pytest.raises(ValueError, match="power-of-two"):
+        ketrs.SparseOperator.from_scipy(np.eye(3))
+    op = ketrs.SparseOperator.from_scipy(np.eye(4))
+    with pytest.raises(ValueError, match="qubits"):
+        ketrs.Statevector(3).expectation(op)
+    with pytest.raises(ValueError, match="SparseOperator"):
+        ketrs.lowest_eigenstates(op, 2)
+
 NUMPY_DTYPE = {"complex": "complex128", "real": "float64", "complex64": "complex64", "float32": "float32"}
 
 

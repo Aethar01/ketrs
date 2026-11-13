@@ -90,7 +90,8 @@ use ketrs::statevector::EigenOptions;
 use ketrs::{Angle, BinaryOp, Condition, Expr, Instruction, Parameter};
 use ketrs::{
     Circuit, Complex32, Complex64 as C64, DenseState, Error, Gate, Operation, Pauli, PauliString,
-    PauliSum, RealStatevector, RealStatevector32, Scalar, Statevector, Statevector32,
+    PauliSum, RealStatevector, RealStatevector32, Scalar, SparseOperator, Statevector,
+    Statevector32,
 };
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
@@ -100,6 +101,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use sector::Kind as SectorKind;
 use sector::{PySectorBasis, PySectorStatevector};
+use std::sync::Arc;
 
 fn to_py_err(e: Error) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -941,10 +943,116 @@ impl PyPauliSum {
     }
 }
 
+/// A Hermitian operator stored as a sparse matrix in the computational
+/// basis (row and column `i` are basis state `i`, qubit 0 the least
+/// significant bit).
+///
+/// For operators that are sparse as matrices but long as Pauli sums, such as
+/// hops whose amplitude depends on the whole configuration.
+/// `Statevector.expectation`, `apply_pauli_sum` and `evolve` accept one in
+/// place of a `PauliSum`.
+#[pyclass(name = "SparseOperator", module = "ketrs", frozen, from_py_object)]
+#[derive(Clone)]
+struct PySparseOperator {
+    inner: Arc<SparseOperator>,
+}
+
+#[pymethods]
+impl PySparseOperator {
+    /// Build from CSR arrays on `n_qubits` qubits: row `i` holds
+    /// `data[indptr[i]:indptr[i+1]]` in columns `indices[indptr[i]:indptr[i+1]]`.
+    /// Repeated entries are summed. Raises `ValueError` unless the matrix is
+    /// Hermitian.
+    #[new]
+    fn new(
+        py: Python<'_>,
+        n_qubits: usize,
+        indptr: PyReadonlyArray1<'_, i64>,
+        indices: PyReadonlyArray1<'_, i64>,
+        data: PyReadonlyArray1<'_, C64>,
+    ) -> PyResult<Self> {
+        let to_usize = |a: &PyReadonlyArray1<'_, i64>, name: &str| -> PyResult<Vec<usize>> {
+            a.as_array()
+                .iter()
+                .map(|&v| {
+                    usize::try_from(v)
+                        .map_err(|_| PyValueError::new_err(format!("{name} has a negative entry")))
+                })
+                .collect()
+        };
+        let indptr = to_usize(&indptr, "indptr")?;
+        let indices = to_usize(&indices, "indices")?;
+        let data = data.as_array().to_vec();
+        let inner = py
+            .detach(|| SparseOperator::from_csr(n_qubits, indptr, indices, data))
+            .map_err(to_py_err)?;
+        Ok(PySparseOperator {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Build from any SciPy sparse matrix or array (anything with
+    /// `tocsr()`), or a dense 2-D NumPy array, whose size is a power of two.
+    #[staticmethod]
+    fn from_scipy(py: Python<'_>, matrix: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let csr = if matrix.hasattr("tocsr")? {
+            matrix.call_method0("tocsr")?
+        } else {
+            py.import("scipy.sparse")?
+                .call_method1("csr_matrix", (matrix,))?
+        };
+        let shape: (usize, usize) = csr.getattr("shape")?.extract()?;
+        if shape.0 != shape.1 || !shape.0.is_power_of_two() {
+            return Err(PyValueError::new_err(format!(
+                "matrix must be square with a power-of-two size, got {shape:?}"
+            )));
+        }
+        let n_qubits = shape.0.trailing_zeros() as usize;
+        let as_type = |name: &str, dtype: &str| -> PyResult<Bound<'_, PyAny>> {
+            csr.getattr(name)?.call_method1("astype", (dtype,))
+        };
+        let indptr = as_type("indptr", "int64")?;
+        let indices = as_type("indices", "int64")?;
+        let data = as_type("data", "complex128")?;
+        Self::new(
+            py,
+            n_qubits,
+            indptr.extract()?,
+            indices.extract()?,
+            data.extract()?,
+        )
+    }
+
+    #[getter]
+    fn n_qubits(&self) -> usize {
+        self.inner.n_qubits()
+    }
+
+    /// Number of stored entries.
+    #[getter]
+    fn nnz(&self) -> usize {
+        self.inner.nnz()
+    }
+
+    /// Whether every entry is real.
+    fn is_real(&self) -> bool {
+        self.inner.is_real()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SparseOperator(n_qubits={}, nnz={})",
+            self.inner.n_qubits(),
+            self.inner.nnz()
+        )
+    }
+}
+
 /// Anything `Statevector.expectation` accepts.
 #[derive(FromPyObject)]
 enum Observable {
     Sum(PyPauliSum),
+    Sparse(PySparseOperator),
     Label(String),
     List(Vec<(String, f64)>),
 }
@@ -952,6 +1060,10 @@ enum Observable {
 impl Observable {
     fn into_sum(self) -> PyResult<PauliSum> {
         match self {
+            Observable::Sparse(_) => Err(PyValueError::new_err(
+                "a SparseOperator is accepted only by Statevector.expectation, \
+                 apply_pauli_sum and evolve; use a PauliSum here",
+            )),
             Observable::Sum(s) => Ok(s.inner),
             Observable::Label(label) => PauliString::from_label(&label)
                 .map(PauliSum::from)
@@ -1196,15 +1308,27 @@ impl PyStatevector {
         })
     }
 
-    /// `⟨ψ|H|ψ⟩`. Accepts a `PauliSum`, a single label such as `"ZZ"`, or a
-    /// list of `(label, coefficient)` pairs.
+    /// `⟨ψ|H|ψ⟩`. Accepts a `PauliSum`, a `SparseOperator`, a single label
+    /// such as `"ZZ"`, or a list of `(label, coefficient)` pairs.
     fn expectation(&self, py: Python<'_>, observable: Observable) -> PyResult<f64> {
+        if let Observable::Sparse(op) = &observable {
+            let op = &op.inner;
+            return dispatch!(State, &self.state, s => py.detach(|| s.expectation_sparse(op)))
+                .map_err(to_py_err);
+        }
         let sum = observable.into_sum()?;
         dispatch!(State, &self.state, s => py.detach(|| s.expectation(&sum))).map_err(to_py_err)
     }
 
     /// `H|ψ⟩` as a new, generally unnormalised, statevector.
     fn apply_pauli_sum(&self, py: Python<'_>, hamiltonian: Observable) -> PyResult<Self> {
+        if let Observable::Sparse(op) = &hamiltonian {
+            let op = &op.inner;
+            let state = convert!(State => State, &self.state, s => {
+                py.detach(|| s.apply_sparse(op)).map_err(to_py_err)?
+            });
+            return Ok(Self::wrap(state, self.rng.clone()));
+        }
         let sum = hamiltonian.into_sum()?;
         let state = convert!(State => State, &self.state, s => {
             py.detach(|| s.apply_pauli_sum(&sum)).map_err(to_py_err)?
@@ -1213,8 +1337,19 @@ impl PyStatevector {
     }
 
     /// Evolve by `exp(-iHt)` exactly (to about machine precision), without
-    /// forming the matrix exponential. Needs a complex statevector.
+    /// forming the matrix exponential. `H` is a `PauliSum` or a
+    /// `SparseOperator`. Needs a complex statevector.
     fn evolve(&mut self, py: Python<'_>, hamiltonian: Observable, time: f64) -> PyResult<()> {
+        if let Observable::Sparse(op) = &hamiltonian {
+            let op = &op.inner;
+            return match &mut self.state {
+                State::Complex(s) => py.detach(|| s.evolve_sparse(op, time)).map_err(to_py_err),
+                State::Complex32(s) => py.detach(|| s.evolve_sparse(op, time)).map_err(to_py_err),
+                State::Real(_) | State::Real32(_) => Err(PyValueError::new_err(
+                    "exp(-iHt) is complex; evolve needs dtype='complex' or 'complex64'",
+                )),
+            };
+        }
         let sum = hamiltonian.into_sum()?;
         match &mut self.state {
             State::Complex(s) => py.detach(|| s.evolve(&sum, time)).map_err(to_py_err),
@@ -1459,6 +1594,7 @@ fn _ketrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCircuit>()?;
     m.add_class::<PyParameter>()?;
     m.add_class::<PyPauliSum>()?;
+    m.add_class::<PySparseOperator>()?;
     m.add_class::<PyStatevector>()?;
     m.add_class::<PyEigenstate>()?;
     m.add_class::<PySectorBasis>()?;

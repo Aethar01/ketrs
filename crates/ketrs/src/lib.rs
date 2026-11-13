@@ -30,6 +30,7 @@ pub mod parameter;
 pub mod qasm;
 pub mod scalar;
 pub mod sector;
+pub mod sparse;
 pub mod statevector;
 mod trajectory;
 
@@ -49,4 +50,5 @@ pub use sector::{
     RealSectorStatevector, RealSectorStatevector32, SectorBasis, SectorState, SectorStatevector,
     SectorStatevector32,
 };
+pub use sparse::SparseOperator;
 pub use statevector::{DenseState, RealStatevector, RealStatevector32, Statevector, Statevector32};
