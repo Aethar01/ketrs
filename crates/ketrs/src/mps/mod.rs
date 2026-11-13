@@ -18,6 +18,7 @@
 //! disjoint bonds run in parallel, in Hastings' form of TEBD.
 
 mod dmrg;
+mod expand;
 mod layers;
 mod linalg;
 mod mpo;

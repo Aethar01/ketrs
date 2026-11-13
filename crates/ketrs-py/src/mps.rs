@@ -117,7 +117,26 @@ impl PyMps {
     /// DMRG keeps the symmetries the start shares with H; start from
     /// `MPS.random` for the true ground state, or from a state in the sector
     /// you want.
-    #[pyo3(signature = (hamiltonian, max_bond=64, cutoff=1e-12, max_sweeps=20, tolerance=1e-10))]
+    ///
+    /// `noise` is the strength of the noise in the first sweep. Each split
+    /// widens its bond, at zero weight, with the strongest directions that
+    /// the terms of H reaching past the two sites would add. That lets
+    /// terms on more than two qubits act, such as a four-qubit hop on a
+    /// product state, where plain two-site DMRG stalls. `noise` is
+    /// multiplied by `noise_decay` each sweep and switched off once it is
+    /// below `cutoff` or once a sweep with it changes the energy by less
+    /// than `tolerance`. `converged` is only reported after a sweep without
+    /// it. `noise=0` gives plain two-site DMRG.
+    #[pyo3(signature = (
+        hamiltonian,
+        max_bond=64,
+        cutoff=1e-12,
+        max_sweeps=20,
+        tolerance=1e-10,
+        noise=1e-4,
+        noise_decay=0.1,
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn dmrg(
         &mut self,
         py: Python<'_>,
@@ -126,14 +145,23 @@ impl PyMps {
         cutoff: f64,
         max_sweeps: usize,
         tolerance: f64,
+        noise: f64,
+        noise_decay: f64,
     ) -> PyResult<(f64, Vec<f64>, bool)> {
         options(max_bond, cutoff)?;
+        if !(noise >= 0.0 && noise.is_finite() && (0.0..=1.0).contains(&noise_decay)) {
+            return Err(PyValueError::new_err(
+                "noise must be finite and non-negative, and noise_decay in [0, 1]",
+            ));
+        }
         let sum = hamiltonian.into_sum()?;
         let opts = DmrgOptions {
             max_bond,
             cutoff,
             max_sweeps,
             tolerance,
+            noise,
+            noise_decay,
             ..DmrgOptions::default()
         };
         let mps = &mut self.inner;
@@ -251,9 +279,9 @@ impl PyMps {
 
     /// Evolve by exp(-iHt) with `steps` steps of two-site TDVP, for
     /// Hamiltonians of any range (TEBD routes long-range terms with swaps).
-    /// From a weakly entangled start such as a product state, accuracy is
-    /// lost while bonds grow; take more steps, or start with more bond
-    /// dimension.
+    /// While bonds are below `max_bond`, each step first enlarges them with
+    /// the directions of H|ψ⟩ (a global subspace expansion), so terms on
+    /// many qubits act even from a product state.
     #[pyo3(signature = (hamiltonian, time, steps=1))]
     fn tdvp(
         &mut self,

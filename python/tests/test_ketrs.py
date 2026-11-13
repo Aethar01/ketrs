@@ -646,6 +646,50 @@ def test_dmrg_ground_state_matches_numpy():
     assert mps.expectation(pauli_sum_from_qiskit(op)) == pytest.approx(energy, abs=1e-8)
 
 
+
+def test_mps_four_qubit_hops_from_a_product_state():
+    # Hops on four qubits with gaps: no two-site move creates one from
+    # |0…0⟩, so plain two-site DMRG stays there and TDVP has to grow its
+    # bonds through its subspace expansion.
+    n = 8
+    terms = [(p * 4, [k, k + 1, k + 3, k + 4], 1.0) for k in range(n - 4) for p in "XY"]
+    terms += [("Z", [q], 0.5) for q in range(n)]
+    terms += [("ZZ", [q, q + 2], 0.3) for q in range(n - 2)]
+    op = SparsePauliOp.from_sparse_list(terms, num_qubits=n)
+    h = pauli_sum_from_qiskit(op)
+    # The hops conserve symmetries |0…0⟩ has and the overall ground state
+    # lacks, which DMRG keeps: compare within the states H connects to |0…0⟩.
+    matrix = op.to_matrix()
+    sector, frontier = {0}, [0]
+    while frontier:
+        for j in np.nonzero(matrix[:, frontier.pop()])[0]:
+            if j not in sector:
+                sector.add(j)
+                frontier.append(j)
+    sector = sorted(sector)
+    want = np.linalg.eigvalsh(matrix[np.ix_(sector, sector)])[0]
+
+    stuck, _, _ = ketrs.MPS(n).dmrg(h, noise=0.0)
+    assert stuck > want + 1.0
+    mps = ketrs.MPS(n)
+    energy, _, converged = mps.dmrg(h)
+    assert converged
+    assert energy == pytest.approx(want, abs=1e-8)
+
+    exact = ketrs.Statevector(n)
+    exact.evolve(h, 0.5)
+
+    def tdvp_error(steps):
+        mps = ketrs.MPS(n)
+        mps.tdvp(h, 0.5, steps=steps)
+        assert min(mps.bond_dimensions) > 1
+        return np.abs(mps.to_statevector().amplitudes() - exact.amplitudes()).max()
+
+    # Second order: the error falls 4× when the step halves.
+    coarse, fine = tdvp_error(20), tdvp_error(40)
+    assert coarse < 3e-3
+    assert fine < coarse / 3.5
+
 # --- OpenQASM --------------------------------------------------------------------------
 
 

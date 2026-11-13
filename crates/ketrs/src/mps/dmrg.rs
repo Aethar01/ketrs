@@ -7,8 +7,20 @@
 //! Lanczos, starting from the current two-site tensor, then splits it by
 //! truncated SVD and moves on. Sweeps go right and then left until the
 //! energy stops changing.
+//!
+//! Two-site updates only see the parts of terms on more than two sites
+//! that the bonds already carry, so plain two-site DMRG stalls when no
+//! two-site move lowers the energy. A product state under a four-qubit hop
+//! is one such case. Early sweeps therefore add noise. White's
+//! density-matrix perturbation (Phys. Rev. B 72, 180403, 2005) is used in
+//! the form of a subspace expansion (as in DMRG3S, Hubig et al., Phys.
+//! Rev. B 91, 155115, 2015). Each split keeps the two-site tensor's own
+//! truncated basis exactly and widens it with the strongest directions
+//! that the partial terms crossing the bond reach. Those directions are
+//! weighted by a noise strength that decays, and noise is switched off
+//! once it stops helping.
 
-use super::linalg::{matmul, matmul_add};
+use super::linalg::{matmul, matmul_add, thin_svd};
 use super::mpo::{Mpo, MpoSite, pauli_entry};
 use super::{Absorb, Mps, MpsOptions, Tensor};
 use crate::error::Error;
@@ -33,6 +45,23 @@ pub struct DmrgOptions {
     pub tolerance: f64,
     /// Residual tolerance of each two-site Lanczos solve.
     pub lanczos_tolerance: f64,
+    /// Strength α of the noise in the first sweep (0 turns it off). Each
+    /// split keeps the two-site tensor θ's own truncated basis and adds,
+    /// at zero weight, the leading directions of `α Σ_c P_c P_c†` outside
+    /// it. Here `P_c` is θ acted on by the part of `H` behind the split
+    /// along one MPO channel `c` (a partial term continuing past the two
+    /// sites), scaled to θ's norm. Directions whose weight is below
+    /// `cutoff`, or beyond twice θ's own bond, are not added. The extra
+    /// directions let terms on more than two sites act. Without them, DMRG
+    /// can stall in a state no two-site move improves, such as a product
+    /// state under a four-qubit hop. Since θ itself is never perturbed,
+    /// noise costs time (wider bonds) but never accuracy.
+    pub noise: f64,
+    /// Factor applied to `noise` after each sweep. Noise stops once it is
+    /// below `cutoff` or once a sweep with it changes the energy by less
+    /// than `tolerance`. Convergence is only declared after a sweep without
+    /// it.
+    pub noise_decay: f64,
 }
 
 impl Default for DmrgOptions {
@@ -43,6 +72,8 @@ impl Default for DmrgOptions {
             max_sweeps: 20,
             tolerance: 1e-10,
             lanczos_tolerance: 1e-10,
+            noise: 1e-4,
+            noise_decay: 0.1,
         }
     }
 }
@@ -54,7 +85,8 @@ pub struct DmrgResult {
     pub energy: f64,
     /// The energy after each sweep.
     pub sweep_energies: Vec<f64>,
-    /// Whether the energy settled within `tolerance` before `max_sweeps`.
+    /// Whether the energy settled within `tolerance` in a sweep without
+    /// noise before `max_sweeps`.
     pub converged: bool,
 }
 
@@ -80,6 +112,8 @@ impl Mps {
     /// `|0…0⟩` a number-conserving Hamiltonian never leaves the empty
     /// sector. Start from [`Mps::random`] for the true ground state, or from
     /// a state in the sector you want (e.g. a Néel state for `Sz = 0`).
+    /// The perturbation set by [`DmrgOptions::noise`] keeps these
+    /// symmetries too, since it is built from `H`.
     pub fn dmrg(
         &mut self,
         hamiltonian: &PauliSum,
@@ -122,9 +156,15 @@ impl Mps {
         let mut sweep_energies = Vec::new();
         let mut energy = f64::INFINITY;
         let mut converged = false;
+        let mut noise = options.noise.max(0.0);
         for _ in 0..options.max_sweeps {
+            // Below this the perturbation is lost to the cutoff anyway.
+            if noise < options.cutoff.max(1e-14) {
+                noise = 0.0;
+            }
             for i in 0..n - 1 {
-                energy = self.optimise_pair(i, &mpo, &left, &right, &lanczos, Absorb::Right)?;
+                energy =
+                    self.optimise_pair(i, &mpo, &left, &right, &lanczos, noise, Absorb::Right)?;
                 left[i + 1] = Some(update_left(
                     left[i].as_ref().unwrap(),
                     &self.tensors[i],
@@ -132,7 +172,8 @@ impl Mps {
                 ));
             }
             for i in (0..n - 1).rev() {
-                energy = self.optimise_pair(i, &mpo, &left, &right, &lanczos, Absorb::Left)?;
+                energy =
+                    self.optimise_pair(i, &mpo, &left, &right, &lanczos, noise, Absorb::Left)?;
                 right[i] = Some(update_right(
                     right[i + 1].as_ref().unwrap(),
                     &self.tensors[i + 1],
@@ -145,9 +186,14 @@ impl Mps {
                 .map_or(f64::INFINITY, |e: &f64| (e - total).abs());
             sweep_energies.push(total);
             if change < options.tolerance {
-                converged = true;
-                break;
+                if noise == 0.0 {
+                    converged = true;
+                    break;
+                }
+                // The noise has found what it can; settle without it.
+                noise = 0.0;
             }
+            noise *= options.noise_decay;
         }
         Ok(DmrgResult {
             energy: energy + mpo.shift,
@@ -157,7 +203,9 @@ impl Mps {
     }
 
     /// Replace sites `i` and `i + 1` with the lowest eigenvector of the
-    /// effective Hamiltonian there. Returns its energy (without the shift).
+    /// effective Hamiltonian there, split with a perturbation of weight
+    /// `noise`. Returns its energy (without the shift).
+    #[allow(clippy::too_many_arguments)]
     fn optimise_pair(
         &mut self,
         i: usize,
@@ -165,6 +213,7 @@ impl Mps {
         left: &[Option<Env>],
         right: &[Option<Env>],
         lanczos: &EigenOptions,
+        noise: f64,
         absorb: Absorb,
     ) -> Result<f64, Error> {
         let (l, r) = (self.tensors[i].left, self.tensors[i + 1].right);
@@ -184,9 +233,189 @@ impl Mps {
         let mut hx = vec![ZERO; x.len()];
         op.apply(&x, &mut hx);
         let energy = dot(&x, &hx).re;
-        self.split(i, MatRef::from_row_major_slice(&x, l * 2, 2 * r), absorb);
+        let theta = MatRef::from_row_major_slice(&x, l * 2, 2 * r);
+        if noise > 0.0 {
+            let perturbation = match absorb {
+                Absorb::Right => {
+                    left_perturbation(left[i].as_ref().unwrap(), &mpo.sites[i], &x, l, r)
+                }
+                Absorb::Left => {
+                    right_perturbation(right[i + 1].as_ref().unwrap(), &mpo.sites[i + 1], &x, l, r)
+                }
+            };
+            self.split_perturbed(i, theta, &perturbation, noise, absorb);
+        } else {
+            self.split(i, theta, absorb);
+        }
         Ok(energy)
     }
+
+    /// [`split`](Mps::split), but the side that does not take the centre
+    /// also gets up to [`noise_room`] directions outside `θ`'s kept basis:
+    /// the leading eigenvectors of `noise · Σ_c P_c P_c†` (`P_c† P_c` for a
+    /// left move) projected off that basis, with each block `P_c` scaled to
+    /// `θ`'s norm, while their weight is above the cutoff. `θ` keeps exactly
+    /// the basis and weights a plain split would give it, so the energy is
+    /// unchanged and the new directions only widen the next updates.
+    fn split_perturbed(
+        &mut self,
+        i: usize,
+        theta: MatRef<'_, C64>,
+        perturbation: &[Mat<C64>],
+        noise: f64,
+        absorb: Absorb,
+    ) {
+        let (rows, cols) = (theta.nrows(), theta.ncols());
+        let weight = |m: MatRef<'_, C64>| -> f64 {
+            (0..m.nrows())
+                .flat_map(|r| (0..m.ncols()).map(move |c| m[(r, c)].norm_sqr()))
+                .sum()
+        };
+        let total = weight(theta);
+        let (u, s, v) = thin_svd(theta);
+        let keep = self.bond_to_keep(&s, total);
+        // θ's kept basis on the side being traced out, as columns.
+        let (own, side) = match absorb {
+            Absorb::Right => (u.as_ref().subcols(0, keep), rows),
+            Absorb::Left => (v.as_ref().subcols(0, keep), cols),
+        };
+        let room = noise_room(keep)
+            .min(self.options.max_bond.saturating_sub(keep))
+            .min(rows.min(cols).saturating_sub(keep));
+        let extra = if room > 0 && total > 0.0 {
+            // Each channel (partial term) gets weight `noise`, however small
+            // its coefficients: normalised over all of P together, hops
+            // would be drowned by large penalty terms.
+            let mut rho = Mat::<C64>::zeros(side, side);
+            for p in perturbation {
+                let w = weight(p.as_ref());
+                if w == 0.0 {
+                    continue;
+                }
+                let scale = C64::new(noise * total / w, 0.0);
+                let gram = match absorb {
+                    Absorb::Right => matmul(p.as_ref(), p.adjoint()),
+                    Absorb::Left => matmul(p.adjoint(), p.as_ref()),
+                };
+                rho += Mat::<C64>::from_fn(side, side, |r, c| scale * gram[(r, c)]);
+            }
+            // Off θ's basis: Q ρ Q with Q = 1 − own·own†.
+            let project = |m: MatRef<'_, C64>| -> Mat<C64> {
+                let mut out = m.to_owned();
+                out -= matmul(own, matmul(own.adjoint(), m).as_ref());
+                out
+            };
+            let rho = project(project(rho.as_ref()).adjoint().to_owned().as_ref());
+            let (vectors, weights, _) = thin_svd(rho.as_ref());
+            let count = weights
+                .iter()
+                .take_while(|&&w| w > self.options.cutoff * total)
+                .count()
+                .min(room);
+            // Orthonormalise again against θ's basis, for rounding.
+            let candidates = project(vectors.as_ref().subcols(0, count));
+            let (q, sv, _) = thin_svd(candidates.as_ref());
+            let count = sv.iter().take_while(|&&x| x > 0.5).count();
+            q.as_ref().subcols(0, count).to_owned()
+        } else {
+            Mat::<C64>::zeros(side, 0)
+        };
+        let bond = keep + extra.ncols();
+        let basis = Mat::<C64>::from_fn(side, bond, |r, c| {
+            if c < keep {
+                own[(r, c)]
+            } else {
+                extra[(r, c - keep)]
+            }
+        });
+        let (left, right) = (rows / 2, cols / 2);
+        match absorb {
+            Absorb::Right => {
+                let centre = matmul(basis.adjoint(), theta);
+                let kept = weight(centre.as_ref());
+                self.truncation_error += ((total - kept) / total).max(0.0);
+                let rescale = C64::new((total / kept).sqrt(), 0.0);
+                let centre = Mat::<C64>::from_fn(bond, cols, |r, c| rescale * centre[(r, c)]);
+                self.tensors[i] = Tensor::from_matrix(basis.as_ref(), left, bond);
+                self.tensors[i + 1] = Tensor::from_matrix(centre.as_ref(), bond, right);
+                self.center = i + 1;
+            }
+            Absorb::Left => {
+                let centre = matmul(theta, basis.as_ref());
+                let kept = weight(centre.as_ref());
+                self.truncation_error += ((total - kept) / total).max(0.0);
+                let rescale = C64::new((total / kept).sqrt(), 0.0);
+                let centre = Mat::<C64>::from_fn(rows, bond, |r, c| rescale * centre[(r, c)]);
+                let basis = basis.adjoint().to_owned();
+                self.tensors[i] = Tensor::from_matrix(centre.as_ref(), left, bond);
+                self.tensors[i + 1] = Tensor::from_matrix(basis.as_ref(), bond, right);
+                self.center = i;
+            }
+        }
+    }
+}
+
+/// How many noise directions a split may add to a bond that keeps `keep`
+/// of its own. Directions are ranked by noise weight, which only roughly
+/// tracks usefulness, so fewer than twice `keep` can miss the one a trapped
+/// state needs; more makes every noisy sweep slower.
+fn noise_room(keep: usize) -> usize {
+    (2 * keep).max(4)
+}
+
+/// White's perturbation for a split moving right: for each MPO bond index
+/// `b` between the two sites, `Σ_a (L_a ⊗ W_i[a][b]) θ` as a `(l, p) × (q, r)`
+/// matrix. Its columns are the left halves of the partial terms of `H` that
+/// continue past site `i`.
+fn left_perturbation(env: &Env, w: &MpoSite, theta: &[C64], l: usize, r: usize) -> Vec<Mat<C64>> {
+    let theta = MatRef::from_row_major_slice(theta, l, 4 * r);
+    // y_a[l, (p, q, r)] = Σ_l' L_a[l, l'] θ[l', p, q, r]
+    let y: Vec<Mat<C64>> = env
+        .blocks
+        .iter()
+        .map(|e| matmul(e.as_ref(), theta))
+        .collect();
+    let mut out = vec![Mat::<C64>::zeros(2 * l, 2 * r); w.right];
+    for &(a, b, p, coeff) in &w.entries {
+        for p_out in 0..2 {
+            let (p_in, val) = pauli_entry(p, p_out);
+            let f = coeff * val;
+            for row in 0..l {
+                for q in 0..2 {
+                    for col in 0..r {
+                        out[b][(2 * row + p_out, q * r + col)] +=
+                            f * y[a][(row, (2 * p_in + q) * r + col)];
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The mirror of [`left_perturbation`] for a split moving left: for each
+/// MPO bond index `a` between the two sites, `Σ_c (W_{i+1}[a][c] ⊗ R_c) θ`.
+fn right_perturbation(env: &Env, w: &MpoSite, theta: &[C64], l: usize, r: usize) -> Vec<Mat<C64>> {
+    let theta = MatRef::from_row_major_slice(theta, 4 * l, r);
+    // z_c[(l, p, q), r] = Σ_r' θ[l, p, q, r'] R_c[r, r']
+    let z: Vec<Mat<C64>> = env
+        .blocks
+        .iter()
+        .map(|e| matmul(theta, e.transpose()))
+        .collect();
+    let mut out = vec![Mat::<C64>::zeros(2 * l, 2 * r); w.left];
+    for &(a, c, p, coeff) in &w.entries {
+        for q_out in 0..2 {
+            let (q_in, val) = pauli_entry(p, q_out);
+            let f = coeff * val;
+            for row in 0..2 * l {
+                for col in 0..r {
+                    out[a][(row, q_out * r + col)] += f * z[c][(2 * row + q_in, col)];
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Two neighbouring sites contracted, row-major `(l, p, q, r)` to match
@@ -202,12 +431,25 @@ pub(super) fn two_site_vector(a: &Tensor, b: &Tensor) -> Vec<C64> {
 /// The environment of sites `< i + 1` from that of sites `< i`, site `i`'s
 /// tensor and its MPO site.
 pub(super) fn update_left(env: &Env, a: &Tensor, w: &MpoSite) -> Env {
-    let (l, r) = (a.left, a.right);
+    let y = left_operator(env, a, w);
+    let bra = a.as_left_matrix().adjoint();
+    Env {
+        blocks: y.iter().map(|yb| matmul(bra, yb.as_ref())).collect(),
+    }
+}
+
+/// The mirror of [`right_operator`]: the MPO site `w` applied to `ket` and
+/// contracted with a left environment whose rows are on a bra basis. For
+/// each right MPO index `b`, a matrix with rows `(l_bra, p)` and columns on
+/// `ket`'s right bond.
+pub(super) fn left_operator(env: &Env, ket: &Tensor, w: &MpoSite) -> Vec<Mat<C64>> {
+    let r = ket.right;
+    let l = env.blocks[0].nrows();
     // x_a[l, (p, r')] = Σ_l' env_a[l, l'] A[l', p, r']
     let x: Vec<Mat<C64>> = env
         .blocks
         .iter()
-        .map(|e| matmul(e.as_ref(), a.as_right_matrix()))
+        .map(|e| matmul(e.as_ref(), ket.as_right_matrix()))
         .collect();
     let mut y = vec![Mat::<C64>::zeros(l * 2, r); w.right];
     for &(ai, bi, p, coeff) in &w.entries {
@@ -221,21 +463,32 @@ pub(super) fn update_left(env: &Env, a: &Tensor, w: &MpoSite) -> Env {
             }
         }
     }
-    let bra = a.as_left_matrix().adjoint();
-    Env {
-        blocks: y.iter().map(|yb| matmul(bra, yb.as_ref())).collect(),
-    }
+    y
 }
 
 /// The environment of sites `> i − 1` from that of sites `> i`, site `i`'s
 /// tensor and its MPO site.
 pub(super) fn update_right(env: &Env, a: &Tensor, w: &MpoSite) -> Env {
-    let (l, r) = (a.left, a.right);
+    let y = right_operator(env, a, w);
+    let bra = a.as_right_matrix().conjugate();
+    Env {
+        blocks: y.iter().map(|ya| matmul(bra, ya.transpose())).collect(),
+    }
+}
+
+/// The MPO site `w` applied to `ket` and contracted with a right
+/// environment whose rows are on another (bra) basis: for each left MPO
+/// index `a`, a matrix with rows on `ket`'s left bond and columns
+/// `(p, r_bra)`. Contracting its columns with a bra tensor gives the next
+/// environment; with a ket tensor, [`update_right`].
+pub(super) fn right_operator(env: &Env, ket: &Tensor, w: &MpoSite) -> Vec<Mat<C64>> {
+    let l = ket.left;
+    let r = env.blocks[0].nrows();
     // x_c[(l', p), r] = Σ_r' A[l', p, r'] env_c[r, r']
     let x: Vec<Mat<C64>> = env
         .blocks
         .iter()
-        .map(|e| matmul(a.as_left_matrix(), e.transpose()))
+        .map(|e| matmul(ket.as_left_matrix(), e.transpose()))
         .collect();
     let mut y = vec![Mat::<C64>::zeros(l, 2 * r); w.left];
     for &(ai, ci, p, coeff) in &w.entries {
@@ -249,10 +502,7 @@ pub(super) fn update_right(env: &Env, a: &Tensor, w: &MpoSite) -> Env {
             }
         }
     }
-    let bra = a.as_right_matrix().conjugate();
-    Env {
-        blocks: y.iter().map(|ya| matmul(bra, ya.transpose())).collect(),
-    }
+    y
 }
 
 /// The effective Hamiltonian on two neighbouring sites.

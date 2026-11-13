@@ -384,3 +384,239 @@ fn tdvp_rejects_bad_arguments() {
     // Terms beyond the chain are rejected.
     assert!(Mps::zero(2, exact()).tdvp(&h, 1.0, 1).is_err());
 }
+
+// --- Terms on more than two sites, from product states -----------------------
+
+use ketrs::Complex64 as C64;
+
+/// Adds the Hermitian `op` acting on `qubits` (local bit `j` is
+/// `qubits[j]`) to `sum` as Pauli strings.
+fn add_dense(sum: &mut PauliSum, qubits: &[usize], op: &[Vec<C64>]) {
+    let k = qubits.len();
+    let dim = 1usize << k;
+    let paulis = [Pauli::I, Pauli::X, Pauli::Y, Pauli::Z];
+    for code in 0..1usize << (2 * k) {
+        let ps: Vec<Pauli> = (0..k).map(|j| paulis[(code >> (2 * j)) & 3]).collect();
+        // Tr(P O) / dim, with P a signed permutation: row → col.
+        let mut trace = C64::new(0.0, 0.0);
+        for (row, op_row) in op.iter().enumerate() {
+            let mut col = 0;
+            let mut v = C64::new(1.0, 0.0);
+            for (j, p) in ps.iter().enumerate() {
+                let b = (row >> j) & 1;
+                let (cb, val) = match p {
+                    Pauli::I => (b, C64::new(1.0, 0.0)),
+                    Pauli::X => (1 - b, C64::new(1.0, 0.0)),
+                    Pauli::Y => (1 - b, C64::new(0.0, if b == 0 { -1.0 } else { 1.0 })),
+                    Pauli::Z => (b, C64::new(if b == 0 { 1.0 } else { -1.0 }, 0.0)),
+                };
+                col |= cb << j;
+                v *= val;
+            }
+            trace += v * op_row[col].conj();
+        }
+        let c = trace.re / dim as f64;
+        if c.abs() > 1e-12 {
+            let ops = qubits
+                .iter()
+                .zip(&ps)
+                .filter(|(_, p)| **p != Pauli::I)
+                .map(|(&q, &p)| (q, p));
+            sum.add(c, PauliString::new(ops).unwrap());
+        }
+    }
+}
+
+/// Adds `scale · (c0 + Σ c_q Z_q)²`.
+fn add_square(sum: &mut PauliSum, scale: f64, c0: f64, linear: &[(usize, f64)]) {
+    let mut constant = c0 * c0;
+    for (i, &(q, c)) in linear.iter().enumerate() {
+        constant += c * c;
+        sum.add(
+            scale * 2.0 * c0 * c,
+            PauliString::new([(q, Pauli::Z)]).unwrap(),
+        );
+        for &(r, d) in &linear[i + 1..] {
+            sum.add(
+                scale * 2.0 * c * d,
+                PauliString::new([(q, Pauli::Z), (r, Pauli::Z)]).unwrap(),
+            );
+        }
+    }
+    sum.add(scale * constant, PauliString::identity());
+}
+
+/// A qubit-encoded U(1) lattice gauge theory, like the Schwinger model:
+/// each cell holds a staggered fermion and a two-qubit link register
+/// (electric field E ∈ {−1, 0, 1, 2}), with
+///
+/// `H = x Σ (ψ†ₙ Uₙ ψₙ₊₁ + h.c.) + μ Σ (−1)ⁿ nₙ + Σ Eₙ² + λ Σ Gₙ²`,
+///
+/// where U raises E and `Gₙ = Eₙ − Eₙ₋₁ − qₙ` is Gauss's law. Each hop acts
+/// on four qubits. An open chain has cells in order, so each hop's qubits
+/// are consecutive. A ring has cells in the folded order 0, N−1, 1, N−2, …,
+/// so hops span up to eight qubits with gaps. Returns H and the
+/// strong-coupling vacuum, from which no two-site move creates a hop.
+fn gauge_model(cells: usize, ring: bool) -> (PauliSum, Vec<bool>) {
+    let (x, mu, lambda) = (0.5, 0.5, 5.0);
+    let links = if ring { cells } else { cells - 1 };
+    let mut position = vec![0; cells];
+    if ring {
+        let mut order = Vec::new();
+        for j in 0..cells.div_ceil(2) {
+            order.push(j);
+            if cells - 1 - j != j {
+                order.push(cells - 1 - j);
+            }
+        }
+        for (p, &cell) in order.iter().enumerate() {
+            position[cell] = p;
+        }
+    } else {
+        position = (0..cells).collect();
+    }
+    let matter = |n: usize| 3 * position[n % cells];
+    let link = |n: usize| [matter(n) + 1, matter(n) + 2];
+    let n_qubits = if ring { 3 * cells } else { 3 * cells - 2 };
+
+    let mut h = PauliSum::new();
+    let zero = C64::new(0.0, 0.0);
+    for n in 0..links {
+        // Local bits: 0 = ψₙ, 1-2 = link n (E + 1 in binary), 3 = ψₙ₊₁.
+        let mut op = vec![vec![zero; 16]; 16];
+        for e in 0..3 {
+            let (from, to) = ((e << 1) | 8, 1 | ((e + 1) << 1));
+            op[to][from] = C64::new(x, 0.0);
+            op[from][to] = C64::new(x, 0.0);
+        }
+        let [a, b] = link(n);
+        add_dense(&mut h, &[matter(n), a, b, matter(n + 1)], &op);
+    }
+    // E = 1/2 − Z_a/2 − Z_b.
+    let field = |n: usize| {
+        let [a, b] = link(n);
+        [(a, -0.5), (b, -1.0)]
+    };
+    for n in 0..cells {
+        let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
+        // μ (−1)ⁿ (1 − Z)/2
+        h.add(
+            -mu * sign / 2.0,
+            PauliString::new([(matter(n), Pauli::Z)]).unwrap(),
+        );
+        h.add(mu * sign / 2.0, PauliString::identity());
+        // Gₙ, with qₙ = (1 − Z)/2 − [n odd].
+        let mut c0 = -0.5 + (n % 2) as f64;
+        let mut linear = vec![(matter(n), 0.5)];
+        if n < links {
+            add_square(&mut h, 1.0, 0.5, &field(n));
+            c0 += 0.5;
+            linear.extend(field(n));
+        }
+        if n > 0 || ring {
+            c0 -= 0.5;
+            linear.extend(field((n + cells - 1) % cells).map(|(q, c)| (q, -c)));
+        }
+        add_square(&mut h, lambda, c0, &linear);
+    }
+    let mut vacuum = vec![false; n_qubits];
+    for n in 0..cells {
+        vacuum[matter(n)] = n % 2 == 1;
+        if n < links {
+            vacuum[link(n)[0]] = true; // E = 0
+        }
+    }
+    (h.simplify(1e-14), vacuum)
+}
+
+fn plain() -> DmrgOptions {
+    DmrgOptions {
+        noise: 0.0,
+        ..DmrgOptions::default()
+    }
+}
+
+#[test]
+fn dmrg_noise_escapes_product_states_under_four_qubit_hops() {
+    for (cells, ring) in [(4, false), (4, true)] {
+        let (h, vacuum) = gauge_model(cells, ring);
+        let n = vacuum.len();
+        let exact = exact_ground(&h, n);
+        let start = Mps::basis(n, &vacuum, MpsOptions::default());
+        let e_vacuum = start.expectation(&h).unwrap();
+
+        // Plain two-site DMRG never leaves the vacuum.
+        let stuck = start.clone().dmrg(&h, &plain()).unwrap();
+        assert!(stuck.converged);
+        assert!((stuck.energy - e_vacuum).abs() < 1e-10, "{stuck:?}");
+        assert!(stuck.energy > exact + 0.3, "{exact} {stuck:?}");
+
+        let mut mps = start;
+        let result = mps.dmrg(&h, &DmrgOptions::default()).unwrap();
+        assert!(result.converged);
+        assert!(
+            (result.energy - exact).abs() < 1e-8,
+            "ring {ring}: {exact} {result:?}"
+        );
+        assert!((mps.expectation(&h).unwrap() - result.energy).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn dmrg_noise_escapes_weak_random_starts() {
+    // From bond-2 random starts, plain DMRG settles in metastable states
+    // for some seeds; with noise every seed reaches the ground state.
+    let (h, vacuum) = gauge_model(4, true);
+    let n = vacuum.len();
+    let exact = exact_ground(&h, n);
+    let mut worst_plain: f64 = 0.0;
+    for seed in 0..6 {
+        let start = Mps::random(n, 2, seed, MpsOptions::default());
+        let plain = start.clone().dmrg(&h, &plain()).unwrap();
+        worst_plain = worst_plain.max(plain.energy - exact);
+        let result = start.clone().dmrg(&h, &DmrgOptions::default()).unwrap();
+        assert!(
+            (result.energy - exact).abs() < 1e-8,
+            "seed {seed}: {exact} {result:?}"
+        );
+    }
+    assert!(worst_plain > 1e-6, "{worst_plain}");
+}
+
+fn gauge_tdvp_error(ring: bool, steps: usize) -> (f64, Vec<usize>) {
+    let (h, vacuum) = gauge_model(4, ring);
+    let n = vacuum.len();
+    let mut mps = Mps::basis(n, &vacuum, exact());
+    mps.tdvp(&h, 1.0, steps).unwrap();
+    let start = vacuum
+        .iter()
+        .enumerate()
+        .map(|(q, &b)| (b as usize) << q)
+        .sum();
+    let mut want = Statevector::basis(n, start);
+    want.evolve(&h, 1.0).unwrap();
+    let error = mps
+        .to_amplitudes()
+        .iter()
+        .zip(want.amplitudes())
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0, f64::max);
+    (error, mps.bond_dimensions())
+}
+
+#[test]
+fn tdvp_from_a_product_state_with_four_qubit_hops() {
+    // The subspace expansion must reach every bond, not only those near
+    // the right end, or the hops on the left never act: it used to leave
+    // the left bonds at 1 and an error of 0.35 at any step count.
+    let (coarse, bonds) = gauge_tdvp_error(false, 10);
+    assert!(bonds.iter().all(|&d| d > 1), "{bonds:?}");
+    assert!(coarse < 2e-5, "{coarse}");
+    // The error falls as for a second-order integrator.
+    let (fine, _) = gauge_tdvp_error(false, 40);
+    assert!(fine < coarse / 12.0, "{coarse} -> {fine}");
+    // Folded onto a chain, hops span up to eight qubits.
+    let (error, bonds) = gauge_tdvp_error(true, 10);
+    assert!(bonds.iter().all(|&d| d > 1), "{bonds:?}");
+    assert!(error < 1e-3, "{error}");
+}

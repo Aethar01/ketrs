@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### MPS
+
+- `Mps::dmrg` adds noise in early sweeps, so Hamiltonians whose terms span
+  more than two sites no longer trap it in metastable states. One example
+  is a lattice gauge theory whose hops act on four qubits: from its
+  strong-coupling vacuum, plain two-site DMRG never moved, and from weak
+  random starts it settled above the ground state and reported
+  convergence. The noise is White's density-matrix perturbation in
+  subspace-expansion form. Each split keeps the two-site tensor's own
+  truncated basis exactly and widens it, at zero weight, with the
+  strongest directions that the partial terms crossing the bond reach
+  (each MPO channel weighted equally). It therefore costs time but never
+  accuracy. The strength is
+  `DmrgOptions::noise` (default `1e-4`). It falls by `noise_decay`
+  (default `0.1`) each sweep and is switched off once below the cutoff or
+  once a sweep settles. Convergence is only reported after a sweep without
+  it. Python: `MPS.dmrg(..., noise=1e-4, noise_decay=0.1)`; `noise=0`
+  gives the previous behaviour.
+- `Mps::tdvp`'s subspace expansion now reaches every bond. It enlarged the
+  bonds with `ψ ⊕ ε·Hψ` and then dropped every direction below `1e-13` of
+  ψ's largest singular value, but `Hψ`'s weight shrank by about 10× per
+  site from the right end. Hops more than a few sites from the right end
+  therefore never acted, and from a product state the left bonds stayed
+  at 1. The error stayed at 0.35 however many steps were taken. The
+  expansion now projects each MPO channel of `Hψ` onto the already
+  expanded basis and appends the orthonormalised complement, enlarging the
+  right bases before the right half-sweep and the left bases before the
+  left half-sweep. From a product state, the error now falls as for a
+  second-order integrator.
+
 ## 0.1.6 (2026-11-13)
 
 ### Features
