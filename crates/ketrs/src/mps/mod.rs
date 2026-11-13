@@ -460,11 +460,11 @@ impl Mps {
         let dim = self.tensors[start].left;
         let mut env = Mat::<C64>::identity(dim, dim);
         let mut next_op = ops.iter().peekable();
-        for site in start..=end {
+        for (site, tensor) in self.tensors.iter().enumerate().take(end + 1).skip(start) {
             let pauli = next_op
                 .next_if(|&&(q, _)| q == site)
                 .map_or(Pauli::I, |&(_, p)| p);
-            env = transfer(&env, &self.tensors[site], pauli);
+            env = transfer(&env, tensor, pauli);
         }
         (0..env.nrows()).map(|i| env[(i, i)]).sum()
     }
