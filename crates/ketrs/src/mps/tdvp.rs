@@ -22,7 +22,8 @@
 //! that starts from a product state still makes an `O(dt²)` error;
 //! overall the integrator stays second order.
 
-use super::dmrg::{Env, TwoSite, two_site_vector, update_left, update_right};
+use super::dmrg::{Env, two_site_vector};
+use super::envs::Envs;
 use super::linalg::{matmul, matmul_add};
 use super::mpo::{Mpo, MpoSite, pauli_entry};
 use super::{Absorb, Mps};
@@ -63,11 +64,7 @@ impl Mps {
         let half = time / steps as f64 / 2.0;
 
         self.move_center(0);
-        // left[i]: sites < i; right[i]: sites > i.
-        let mut left: Vec<Option<Env>> = (0..n).map(|_| None).collect();
-        let mut right: Vec<Option<Env>> = (0..n).map(|_| None).collect();
-        left[0] = Some(Env::boundary());
-        right[n - 1] = Some(Env::boundary());
+        let mut envs = Envs::new(self, &mpo)?;
         let mut stale = true;
 
         for _ in 0..steps {
@@ -78,46 +75,30 @@ impl Mps {
             }
             if stale {
                 for i in (0..n - 1).rev() {
-                    right[i] = Some(update_right(
-                        right[i + 1].as_ref().unwrap(),
-                        &self.tensors[i + 1],
-                        &mpo.sites[i + 1],
-                    ));
+                    envs.update_right(i, &self.tensors[i + 1], &mpo)?;
                 }
                 stale = false;
             }
             // Sweep right: the centre starts at site 0.
             for i in 0..n - 1 {
-                self.evolve_pair(i, &mpo, &left, &right, half, Absorb::Right)?;
-                left[i + 1] = Some(update_left(
-                    left[i].as_ref().unwrap(),
-                    &self.tensors[i],
-                    &mpo.sites[i],
-                ));
+                self.evolve_pair(i, &mpo, &envs, half, Absorb::Right)?;
+                envs.update_left(i, &self.tensors[i], &mpo)?;
                 if i + 1 < n - 1 {
-                    self.evolve_site(i + 1, &mpo, &left, &right, -half)?;
+                    self.evolve_site(i + 1, &mpo, &envs, -half)?;
                 }
             }
             // Sweep left: the centre starts at site n − 1.
             if growing {
                 self.expand_left_bases(&mpo);
-                for i in 0..n - 1 {
-                    left[i + 1] = Some(update_left(
-                        left[i].as_ref().unwrap(),
-                        &self.tensors[i],
-                        &mpo.sites[i],
-                    ));
+                for (i, tensor) in self.tensors[..n - 1].iter().enumerate() {
+                    envs.update_left(i, tensor, &mpo)?;
                 }
             }
             for i in (0..n - 1).rev() {
-                self.evolve_pair(i, &mpo, &left, &right, half, Absorb::Left)?;
-                right[i] = Some(update_right(
-                    right[i + 1].as_ref().unwrap(),
-                    &self.tensors[i + 1],
-                    &mpo.sites[i + 1],
-                ));
+                self.evolve_pair(i, &mpo, &envs, half, Absorb::Left)?;
+                envs.update_right(i, &self.tensors[i + 1], &mpo)?;
                 if i > 0 {
-                    self.evolve_site(i, &mpo, &left, &right, -half)?;
+                    self.evolve_site(i, &mpo, &envs, -half)?;
                 }
             }
         }
@@ -147,55 +128,38 @@ impl Mps {
         &mut self,
         i: usize,
         mpo: &Mpo,
-        left: &[Option<Env>],
-        right: &[Option<Env>],
+        envs: &Envs,
         t: f64,
         absorb: Absorb,
     ) -> Result<(), Error> {
         let (l, r) = (self.tensors[i].left, self.tensors[i + 1].right);
         let mut x = two_site_vector(&self.tensors[i], &self.tensors[i + 1]);
-        let op = TwoSite::new(
-            left[i].as_ref().unwrap(),
-            right[i + 1].as_ref().unwrap(),
-            &mpo.sites[i],
-            &mpo.sites[i + 1],
-            l,
-            r,
-        );
-        krylov_evolve(&op, &mut x, t, true)?;
+        let op = envs.two_site(i, mpo, l, r);
+        let evolved = krylov_evolve(&op, &mut x, t, true);
+        envs.check()?;
+        evolved?;
         self.split(i, MatRef::from_row_major_slice(&x, l * 2, 2 * r), absorb);
         Ok(())
     }
 
     /// Evolve site `i`, the centre, by `exp(-iH t)` under its effective
     /// Hamiltonian.
-    fn evolve_site(
-        &mut self,
-        i: usize,
-        mpo: &Mpo,
-        left: &[Option<Env>],
-        right: &[Option<Env>],
-        t: f64,
-    ) -> Result<(), Error> {
-        let op = OneSite {
-            left: left[i].as_ref().unwrap(),
-            right: right[i].as_ref().unwrap(),
-            site: &mpo.sites[i],
-            l: self.tensors[i].left,
-            r: self.tensors[i].right,
-        };
-        krylov_evolve(&op, &mut self.tensors[i].data, t, true)
+    fn evolve_site(&mut self, i: usize, mpo: &Mpo, envs: &Envs, t: f64) -> Result<(), Error> {
+        let op = envs.one_site(i, mpo, self.tensors[i].left, self.tensors[i].right);
+        let evolved = krylov_evolve(&op, &mut self.tensors[i].data, t, true);
+        envs.check()?;
+        evolved
     }
 }
 
 /// The effective Hamiltonian on one site, between the environments of the
 /// sites either side.
-struct OneSite<'a> {
-    left: &'a Env,
-    right: &'a Env,
-    site: &'a MpoSite,
-    l: usize,
-    r: usize,
+pub(super) struct OneSite<'a> {
+    pub(super) left: &'a Env,
+    pub(super) right: &'a Env,
+    pub(super) site: &'a MpoSite,
+    pub(super) l: usize,
+    pub(super) r: usize,
 }
 
 impl LinearOperator<C64> for OneSite<'_> {

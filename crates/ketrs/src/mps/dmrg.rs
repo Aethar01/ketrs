@@ -20,6 +20,7 @@
 //! weighted by a noise strength that decays, and noise is switched off
 //! once it stops helping.
 
+use super::envs::Envs;
 use super::linalg::{matmul, matmul_add, thin_svd};
 use super::mpo::{Mpo, MpoSite, pauli_entry};
 use super::{Absorb, Mps, MpsOptions, Tensor};
@@ -92,6 +93,7 @@ pub struct DmrgResult {
 
 /// An environment: for each MPO bond index, a matrix with rows on the bra
 /// bond and columns on the ket bond.
+#[derive(Clone)]
 pub(super) struct Env {
     pub(super) blocks: Vec<Mat<C64>>,
 }
@@ -140,17 +142,9 @@ impl Mps {
         let norm = self.norm_sqr().sqrt();
         self.tensors[0].data.iter_mut().for_each(|a| *a /= norm);
 
-        // left[i]: sites < i; right[i]: sites > i.
-        let mut left: Vec<Option<Env>> = (0..n).map(|_| None).collect();
-        let mut right: Vec<Option<Env>> = (0..n).map(|_| None).collect();
-        left[0] = Some(Env::boundary());
-        right[n - 1] = Some(Env::boundary());
+        let mut envs = Envs::new(self, &mpo)?;
         for i in (0..n - 1).rev() {
-            right[i] = Some(update_right(
-                right[i + 1].as_ref().unwrap(),
-                &self.tensors[i + 1],
-                &mpo.sites[i + 1],
-            ));
+            envs.update_right(i, &self.tensors[i + 1], &mpo)?;
         }
 
         let mut sweep_energies = Vec::new();
@@ -163,22 +157,12 @@ impl Mps {
                 noise = 0.0;
             }
             for i in 0..n - 1 {
-                energy =
-                    self.optimise_pair(i, &mpo, &left, &right, &lanczos, noise, Absorb::Right)?;
-                left[i + 1] = Some(update_left(
-                    left[i].as_ref().unwrap(),
-                    &self.tensors[i],
-                    &mpo.sites[i],
-                ));
+                energy = self.optimise_pair(i, &mpo, &envs, &lanczos, noise, Absorb::Right)?;
+                envs.update_left(i, &self.tensors[i], &mpo)?;
             }
             for i in (0..n - 1).rev() {
-                energy =
-                    self.optimise_pair(i, &mpo, &left, &right, &lanczos, noise, Absorb::Left)?;
-                right[i] = Some(update_right(
-                    right[i + 1].as_ref().unwrap(),
-                    &self.tensors[i + 1],
-                    &mpo.sites[i + 1],
-                ));
+                energy = self.optimise_pair(i, &mpo, &envs, &lanczos, noise, Absorb::Left)?;
+                envs.update_right(i, &self.tensors[i + 1], &mpo)?;
             }
             let total = energy + mpo.shift;
             let change = sweep_energies
@@ -205,13 +189,11 @@ impl Mps {
     /// Replace sites `i` and `i + 1` with the lowest eigenvector of the
     /// effective Hamiltonian there, split with a perturbation of weight
     /// `noise`. Returns its energy (without the shift).
-    #[allow(clippy::too_many_arguments)]
     fn optimise_pair(
         &mut self,
         i: usize,
         mpo: &Mpo,
-        left: &[Option<Env>],
-        right: &[Option<Env>],
+        envs: &Envs,
         lanczos: &EigenOptions,
         noise: f64,
         absorb: Absorb,
@@ -221,26 +203,20 @@ impl Mps {
         let scale = 1.0 / norm(&v0);
         v0.iter_mut().for_each(|a| *a *= scale);
 
-        let op = TwoSite::new(
-            left[i].as_ref().unwrap(),
-            right[i + 1].as_ref().unwrap(),
-            &mpo.sites[i],
-            &mpo.sites[i + 1],
-            l,
-            r,
-        );
-        let x = lanczos_lowest_from(&op, &v0, &[], lanczos)?;
+        let op = envs.two_site(i, mpo, l, r);
+        let x = lanczos_lowest_from(&op, &v0, &[], lanczos);
+        envs.check()?;
+        let x = x?;
         let mut hx = vec![ZERO; x.len()];
         op.apply(&x, &mut hx);
+        envs.check()?;
         let energy = dot(&x, &hx).re;
         let theta = MatRef::from_row_major_slice(&x, l * 2, 2 * r);
         if noise > 0.0 {
             let perturbation = match absorb {
-                Absorb::Right => {
-                    left_perturbation(left[i].as_ref().unwrap(), &mpo.sites[i], &x, l, r)
-                }
+                Absorb::Right => left_perturbation(&*envs.left(i)?, &mpo.sites[i], &x, l, r),
                 Absorb::Left => {
-                    right_perturbation(right[i + 1].as_ref().unwrap(), &mpo.sites[i + 1], &x, l, r)
+                    right_perturbation(&*envs.right(i + 1)?, &mpo.sites[i + 1], &x, l, r)
                 }
             };
             self.split_perturbed(i, theta, &perturbation, noise, absorb);
