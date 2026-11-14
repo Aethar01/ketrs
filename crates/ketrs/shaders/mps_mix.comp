@@ -1,0 +1,54 @@
+#version 460
+// The sparse step of an MPS contraction: one MPO site (or two contracted
+// ones) acting on the physical indices while moving between MPO channels,
+//
+//     out[o_blk][row][o][col] = Σ f · in[i_blk][row][i][col]
+//
+// over the entries (i_blk, i, f) listed for each (o_blk, o). Entries for
+// key `o_blk · phys + o` are entries[starts[key] .. starts[key + 1]].
+// Element strides (block, row, physical, column) give the layouts of `in`
+// and `out`. One thread per output element, in a grid-stride loop.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 256) in;
+
+struct Entry {
+    dvec2 f;
+    uint block;
+    uint phys;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer In { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer Out { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Starts { uint v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Entries { Entry v[]; };
+
+layout(push_constant) uniform Push {
+    uvec2 in_addr, out_addr, starts_addr, entries_addr;
+    uint blocks, phys, rows, cols;
+    uint in_block, in_row, in_phys, in_col;
+    uint out_block, out_row, out_phys, out_col;
+};
+
+void main() {
+    In src = In(in_addr);
+    Out dst = Out(out_addr);
+    Starts starts = Starts(starts_addr);
+    Entries entries = Entries(entries_addr);
+    uint total = blocks * phys * rows * cols;
+    uint stride = gl_NumWorkGroups.x * 256u;
+    for (uint e = gl_GlobalInvocationID.x; e < total; e += stride) {
+        uint col = e % cols;
+        uint row = (e / cols) % rows;
+        uint key = e / (cols * rows);
+        uint o = key % phys, blk = key / phys;
+        dvec2 acc = dvec2(0.0);
+        for (uint t = starts.v[key]; t < starts.v[key + 1u]; t++) {
+            Entry en = entries.v[t];
+            dvec2 x = src.v[en.block * in_block + row * in_row + en.phys * in_phys + col * in_col];
+            acc += dvec2(en.f.x * x.x - en.f.y * x.y, en.f.x * x.y + en.f.y * x.x);
+        }
+        dst.v[blk * out_block + row * out_row + o * out_phys + col * out_col] = acc;
+    }
+}

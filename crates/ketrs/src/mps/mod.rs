@@ -20,6 +20,8 @@
 mod dmrg;
 mod envs;
 mod expand;
+#[cfg(feature = "gpu")]
+mod gpu;
 mod layers;
 mod linalg;
 mod mpo;
@@ -110,6 +112,23 @@ pub struct Mps {
     /// Total discarded weight from truncations so far: roughly the lost
     /// fidelity, `1 − |⟨ψ_exact|ψ⟩|²`, while it is small.
     truncation_error: f64,
+    /// The GPU that runs TDVP and DMRG sweeps, if any.
+    #[cfg(feature = "gpu")]
+    gpu: Option<GpuHandle>,
+}
+
+/// A GPU context held by an [`Mps`].
+#[cfg(feature = "gpu")]
+#[derive(Clone)]
+struct GpuHandle(std::sync::Arc<crate::gpu::GpuContext>);
+
+#[cfg(feature = "gpu")]
+impl std::fmt::Debug for GpuHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("GpuHandle")
+            .field(&self.0.device_name())
+            .finish()
+    }
 }
 
 impl Mps {
@@ -136,6 +155,8 @@ impl Mps {
             center: 0,
             options,
             truncation_error: 0.0,
+            #[cfg(feature = "gpu")]
+            gpu: None,
         }
     }
 
@@ -172,6 +193,8 @@ impl Mps {
             center: n_qubits - 1,
             options,
             truncation_error: 0.0,
+            #[cfg(feature = "gpu")]
+            gpu: None,
         };
         mps.move_center(0);
         let norm = mps.norm_sqr().sqrt();
@@ -200,6 +223,39 @@ impl Mps {
     pub fn set_options(&mut self, options: MpsOptions) {
         assert!(options.max_bond > 0, "max_bond must be at least 1");
         self.options = options;
+    }
+
+    /// Run [`tdvp`](Self::tdvp) and [`dmrg`](Self::dmrg) on `gpu`, or on
+    /// the CPU with `None` (the default).
+    ///
+    /// The sweeps keep their environments in GPU memory and apply the
+    /// effective Hamiltonians there, which is nearly all of their work; the
+    /// tensors, SVDs and Krylov iterations stay on the CPU, so results agree
+    /// with the CPU's up to rounding. It pays from bond dimensions of a few
+    /// tens upwards. Fails if the GPU lacks 64-bit floats or buffer device
+    /// addresses ([`GpuContext::supports_mps`](crate::gpu::GpuContext::supports_mps)).
+    /// Clones share the GPU.
+    #[cfg(feature = "gpu")]
+    pub fn set_gpu(
+        &mut self,
+        gpu: Option<std::sync::Arc<crate::gpu::GpuContext>>,
+    ) -> Result<(), Error> {
+        if let Some(ctx) = &gpu
+            && !ctx.supports_mps()
+        {
+            return Err(Error::Gpu(format!(
+                "{} can't run MPS sweeps: they need 64-bit floats and buffer device addresses",
+                ctx.device_name()
+            )));
+        }
+        self.gpu = gpu.map(GpuHandle);
+        Ok(())
+    }
+
+    /// The GPU set by [`set_gpu`](Self::set_gpu), if any.
+    #[cfg(feature = "gpu")]
+    pub fn gpu(&self) -> Option<&std::sync::Arc<crate::gpu::GpuContext>> {
+        self.gpu.as_ref().map(|g| &g.0)
     }
 
     /// Bond dimension between each pair of neighbouring qubits.

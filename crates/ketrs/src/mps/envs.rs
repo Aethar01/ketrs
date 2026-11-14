@@ -1,6 +1,10 @@
-//! Where a sweep keeps its environments and applies effective Hamiltonians.
+//! Where a sweep keeps its environments and applies effective Hamiltonians:
+//! on the CPU, or on a GPU when the state has one (see
+//! [`Mps::set_gpu`](super::Mps::set_gpu)).
 
 use super::dmrg::{Env, TwoSite, update_left, update_right};
+#[cfg(feature = "gpu")]
+use super::gpu::{GpuOperator, GpuSweep};
 use super::mpo::Mpo;
 use super::tdvp::OneSite;
 use super::{Mps, Tensor};
@@ -16,11 +20,17 @@ pub(super) enum Envs {
         left: Vec<Option<Env>>,
         right: Vec<Option<Env>>,
     },
+    #[cfg(feature = "gpu")]
+    Gpu(Box<GpuSweep>),
 }
 
 impl Envs {
-    /// Only the boundary environments.
+    /// Only the boundary environments, on `mps`'s GPU if it has one.
     pub(super) fn new(mps: &Mps, mpo: &Mpo) -> Result<Envs, Error> {
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = &mps.gpu {
+            return Ok(Envs::Gpu(Box::new(GpuSweep::new(&gpu.0, mpo)?)));
+        }
         let n = mps.n_qubits();
         debug_assert_eq!(mpo.sites.len(), n);
         let mut left: Vec<Option<Env>> = (0..n).map(|_| None).collect();
@@ -41,6 +51,8 @@ impl Envs {
                 ));
                 Ok(())
             }
+            #[cfg(feature = "gpu")]
+            Envs::Gpu(g) => g.update_left(i, a, mpo),
         }
     }
 
@@ -55,6 +67,8 @@ impl Envs {
                 ));
                 Ok(())
             }
+            #[cfg(feature = "gpu")]
+            Envs::Gpu(g) => g.update_right(i, a, mpo),
         }
     }
 
@@ -70,6 +84,8 @@ impl Envs {
                 l,
                 r,
             )),
+            #[cfg(feature = "gpu")]
+            Envs::Gpu(g) => Op::Gpu(g.two_site(i, l, r)),
         }
     }
 
@@ -83,6 +99,8 @@ impl Envs {
                 l,
                 r,
             }),
+            #[cfg(feature = "gpu")]
+            Envs::Gpu(g) => Op::Gpu(g.one_site(i, l, r)),
         }
     }
 
@@ -92,6 +110,8 @@ impl Envs {
             Envs::Cpu { left, .. } => Ok(Cow::Borrowed(
                 left[i].as_ref().expect("left environment built"),
             )),
+            #[cfg(feature = "gpu")]
+            Envs::Gpu(g) => Ok(Cow::Owned(g.download_left(i)?)),
         }
     }
 
@@ -101,13 +121,18 @@ impl Envs {
             Envs::Cpu { right, .. } => Ok(Cow::Borrowed(
                 right[i].as_ref().expect("right environment built"),
             )),
+            #[cfg(feature = "gpu")]
+            Envs::Gpu(g) => Ok(Cow::Owned(g.download_right(i)?)),
         }
     }
 
-    /// Any error raised while applying an operator.
+    /// Any error raised while applying an operator (only GPU applications
+    /// can fail).
     pub(super) fn check(&self) -> Result<(), Error> {
         match self {
             Envs::Cpu { .. } => Ok(()),
+            #[cfg(feature = "gpu")]
+            Envs::Gpu(g) => g.take_error(),
         }
     }
 }
@@ -116,6 +141,8 @@ impl Envs {
 pub(super) enum Op<'a> {
     Two(TwoSite<'a>),
     One(OneSite<'a>),
+    #[cfg(feature = "gpu")]
+    Gpu(GpuOperator<'a>),
 }
 
 impl LinearOperator<C64> for Op<'_> {
@@ -123,6 +150,8 @@ impl LinearOperator<C64> for Op<'_> {
         match self {
             Op::Two(op) => op.apply(x, out),
             Op::One(op) => op.apply(x, out),
+            #[cfg(feature = "gpu")]
+            Op::Gpu(op) => op.apply(x, out),
         }
     }
 }

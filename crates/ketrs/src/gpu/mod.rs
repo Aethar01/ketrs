@@ -23,6 +23,7 @@ mod evolve;
 mod gradient;
 
 pub use context::GpuContext;
+pub(crate) use context::{Buffer, MPS_PUSH_BYTES, Memory, MpsKernel};
 
 use crate::circuit::{Circuit, Operation};
 use crate::error::Error;
@@ -33,7 +34,7 @@ use crate::statevector::hamiltonian::{GroupedPauliSum, Imaginary};
 use crate::statevector::shots::pack;
 use crate::trajectory::{self, Trajectory};
 use ash::vk;
-use context::{Buffer, Kernel, MAX_CHUNKS, Memory, Push};
+use context::{Kernel, MAX_CHUNKS, Push};
 use num_complex::Complex64 as C64;
 use rand::Rng;
 use rayon::prelude::*;

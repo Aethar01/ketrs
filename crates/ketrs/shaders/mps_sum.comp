@@ -1,0 +1,28 @@
+#version 460
+// out[e] = Σ_s parts[s · stride + e] for e < count: the partial products of
+// a k-split mps_gemm.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer In { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer Out { dvec2 v[]; };
+
+layout(push_constant) uniform Push {
+    uvec2 parts_addr, out_addr;
+    uint count, parts, stride;
+};
+
+void main() {
+    In src = In(parts_addr);
+    Out dst = Out(out_addr);
+    uint step = gl_NumWorkGroups.x * 256u;
+    for (uint e = gl_GlobalInvocationID.x; e < count; e += step) {
+        dvec2 acc = dvec2(0.0);
+        for (uint s = 0u; s < parts; s++) {
+            acc += src.v[s * stride + e];
+        }
+        dst.v[e] = acc;
+    }
+}

@@ -119,6 +119,24 @@ const TILE_SHADERS: [(u32, [[&[u8]; 2]; 2]); 3] = [
     ),
 ];
 
+/// The MPS contraction kernels (`mps_*.comp`), which take every buffer by
+/// device address in their push constants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MpsKernel {
+    /// Batched, strided complex matrix product.
+    Gemm = 0,
+    /// MPO channels and physical indices mixed by a sparse table.
+    Mix = 1,
+    /// Sum of the partial products of a k-split `Gemm`.
+    Sum = 2,
+}
+
+const MPS_SHADERS: [&[u8]; 3] = [spirv!("mps_gemm"), spirv!("mps_mix"), spirv!("mps_sum")];
+
+/// Push-constant bytes of the MPS kernels' layout (Vulkan's guaranteed
+/// minimum).
+pub(crate) const MPS_PUSH_BYTES: u32 = 128;
+
 /// State buffers a chunked kernel can address (`MAX_CHUNKS` in
 /// `shaders/common.glsl`).
 pub(crate) const MAX_CHUNKS: usize = 16;
@@ -228,6 +246,11 @@ pub struct GpuContext {
     pub(crate) descriptor_layout: vk::DescriptorSetLayout,
     pub(crate) pipeline_layout: vk::PipelineLayout,
     pipelines: Vec<vk::Pipeline>,
+    /// Layout of the MPS kernels: push constants only.
+    mps_layout: vk::PipelineLayout,
+    /// The MPS kernels in [`MpsKernel`] order; empty without 64-bit floats
+    /// or buffer device addresses.
+    mps_pipelines: Vec<vk::Pipeline>,
     pub(crate) descriptor_pool: vk::DescriptorPool,
     /// Serialises the command pool, descriptor pool and queue, which Vulkan
     /// requires to be externally synchronised.
@@ -330,6 +353,8 @@ impl GpuContext {
             descriptor_layout: vk::DescriptorSetLayout::null(),
             pipeline_layout: vk::PipelineLayout::null(),
             pipelines: Vec::new(),
+            mps_layout: vk::PipelineLayout::null(),
+            mps_pipelines: Vec::new(),
             descriptor_pool: vk::DescriptorPool::null(),
             lock: Mutex::new(()),
         };
@@ -444,22 +469,25 @@ impl GpuContext {
                     self.pipelines.push(vk::Pipeline::null());
                     continue;
                 }
-                let code = ash::util::read_spv(&mut std::io::Cursor::new(spv))
-                    .map_err(|e| Error::Gpu(format!("reading SPIR-V: {e}")))?;
-                let module = d
-                    .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)
-                    .map_err(gpu_err("creating shader module"))?;
-                let stage = vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::COMPUTE)
-                    .module(module)
-                    .name(c"main");
-                let info = [vk::ComputePipelineCreateInfo::default()
-                    .stage(stage)
-                    .layout(self.pipeline_layout)];
-                let result = d.create_compute_pipelines(vk::PipelineCache::null(), &info, None);
-                d.destroy_shader_module(module, None);
-                let pipeline = result.map_err(|(_, e)| gpu_err("creating compute pipeline")(e))?;
-                self.pipelines.push(pipeline[0]);
+                let pipeline = self.compute_pipeline(spv, self.pipeline_layout)?;
+                self.pipelines.push(pipeline);
+            }
+
+            if self.f64_supported && self.chunks_supported {
+                let push = [vk::PushConstantRange::default()
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                    .offset(0)
+                    .size(MPS_PUSH_BYTES)];
+                self.mps_layout = d
+                    .create_pipeline_layout(
+                        &vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push),
+                        None,
+                    )
+                    .map_err(gpu_err("creating pipeline layout"))?;
+                for spv in MPS_SHADERS {
+                    let pipeline = self.compute_pipeline(spv, self.mps_layout)?;
+                    self.mps_pipelines.push(pipeline);
+                }
             }
 
             let sizes = [vk::DescriptorPoolSize::default()
@@ -476,6 +504,70 @@ impl GpuContext {
                 .map_err(gpu_err("creating descriptor pool"))?;
         }
         Ok(())
+    }
+
+    /// A compute pipeline from SPIR-V with entry point `main`.
+    fn compute_pipeline(
+        &self,
+        spv: &[u8],
+        layout: vk::PipelineLayout,
+    ) -> Result<vk::Pipeline, Error> {
+        let d = &self.device;
+        let code = ash::util::read_spv(&mut std::io::Cursor::new(spv))
+            .map_err(|e| Error::Gpu(format!("reading SPIR-V: {e}")))?;
+        // SAFETY: valid create infos on a live device; the module is
+        // destroyed once the pipeline holds it.
+        unsafe {
+            let module = d
+                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)
+                .map_err(gpu_err("creating shader module"))?;
+            let stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(module)
+                .name(c"main");
+            let info = [vk::ComputePipelineCreateInfo::default()
+                .stage(stage)
+                .layout(layout)];
+            let result = d.create_compute_pipelines(vk::PipelineCache::null(), &info, None);
+            d.destroy_shader_module(module, None);
+            Ok(result.map_err(|(_, e)| gpu_err("creating compute pipeline")(e))?[0])
+        }
+    }
+
+    /// Whether the MPS kernels are available: they need 64-bit floats and
+    /// buffer device addresses.
+    pub fn supports_mps(&self) -> bool {
+        !self.mps_pipelines.is_empty()
+    }
+
+    /// Record one dispatch of an MPS kernel with the given push constants
+    /// (at most [`MPS_PUSH_BYTES`]).
+    pub(crate) fn mps_dispatch(
+        &self,
+        cmd: vk::CommandBuffer,
+        kernel: MpsKernel,
+        push: &[u8],
+        groups: [u32; 3],
+    ) {
+        debug_assert!(push.len() as u32 <= MPS_PUSH_BYTES);
+        // SAFETY: recording into a command buffer in the recording state,
+        // with a pipeline and layout of this context.
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.mps_pipelines[kernel as usize],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                self.mps_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                push,
+            );
+            self.device
+                .cmd_dispatch(cmd, groups[0], groups[1], groups[2]);
+        }
     }
 
     /// The GPU's name, as reported by the driver.
@@ -638,9 +730,10 @@ impl Drop for GpuContext {
         unsafe {
             let d = &self.device;
             let _ = d.device_wait_idle();
-            for &p in &self.pipelines {
+            for &p in self.pipelines.iter().chain(&self.mps_pipelines) {
                 d.destroy_pipeline(p, None);
             }
+            d.destroy_pipeline_layout(self.mps_layout, None);
             d.destroy_descriptor_pool(self.descriptor_pool, None);
             d.destroy_pipeline_layout(self.pipeline_layout, None);
             d.destroy_descriptor_set_layout(self.descriptor_layout, None);
