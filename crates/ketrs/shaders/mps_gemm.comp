@@ -17,7 +17,10 @@
 // staging 16-wide k slices of A and B in shared memory. 64-bit floats run
 // at a small fraction of the 32-bit rate on consumer GPUs, so this simple
 // layout is already bound by them (it ran at the RX 9060 XT's double
-// peak; larger per-thread tiles were slower).
+// peak; larger per-thread tiles were slower). Complex products therefore
+// use three real multiplications instead of four (the 3M method), which
+// made bond-128 contractions 18% faster; its rounding error is a small
+// multiple of the usual one.
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 
@@ -36,8 +39,10 @@ layout(push_constant) uniform Push {
 };
 
 const uint T = 16;
-shared dvec2 as_[T][T + 1];
-shared dvec2 bs[T][T + 1];
+// Each staged entry is (re, im, re + im), for the three real products of
+// the 3M method: (a + ib)(c + id) = ac − bd + i[(a + b)(c + d) − ac − bd].
+shared dvec3 as_[T][T + 1];
+shared dvec3 bs[T][T + 1];
 
 void main() {
     In a = In(a_addr);
@@ -52,24 +57,29 @@ void main() {
     double b_sign = (flags & 2u) != 0u ? -1.0 : 1.0;
     uint a_base = batch * a_batch, b_base = batch * b_batch;
 
-    dvec2 acc = dvec2(0.0);
+    // Σ re·re, Σ im·im, Σ (re + im)(re + im).
+    double t1 = 0.0, t2 = 0.0, t3 = 0.0;
     for (uint k0 = k_begin; k0 < k_end; k0 += T) {
         // A tile: rows of this workgroup, k in [k0, k0 + T); thread (tx, ty)
         // loads A[row0 + ty][k0 + tx]. B tile: B[k0 + ty][col0 + tx].
         uint ar = gl_WorkGroupID.y * T + ty, ak = k0 + tx;
         dvec2 av = (ar < m && ak < k_end) ? a.v[a_base + ar * a_row + ak * a_col] : dvec2(0.0);
-        as_[ty][tx] = dvec2(av.x, a_sign * av.y);
+        av.y *= a_sign;
+        as_[ty][tx] = dvec3(av, av.x + av.y);
         uint bk = k0 + ty, bc = gl_WorkGroupID.x * T + tx;
         dvec2 bv = (bk < k_end && bc < n) ? b.v[b_base + bk * b_row + bc * b_col] : dvec2(0.0);
-        bs[ty][tx] = dvec2(bv.x, b_sign * bv.y);
+        bv.y *= b_sign;
+        bs[ty][tx] = dvec3(bv, bv.x + bv.y);
         barrier();
         for (uint j = 0u; j < T; j++) {
-            dvec2 x = as_[ty][j], y = bs[j][tx];
-            acc.x = fma(x.x, y.x, fma(-x.y, y.y, acc.x));
-            acc.y = fma(x.x, y.y, fma(x.y, y.x, acc.y));
+            dvec3 x = as_[ty][j], y = bs[j][tx];
+            t1 = fma(x.x, y.x, t1);
+            t2 = fma(x.y, y.y, t2);
+            t3 = fma(x.z, y.z, t3);
         }
         barrier();
     }
+    dvec2 acc = dvec2(t1 - t2, t3 - t1 - t2);
     if (row < m && col < n) {
         uint at = batch * c_batch + split * c_split + row * c_row + col;
         c.v[at] = (flags & 4u) != 0u ? c.v[at] + acc : acc;

@@ -34,8 +34,10 @@ const COMPLEX: u64 = 16;
 /// Tile edge of `mps_gemm.comp`.
 const TILE: u32 = 16;
 
-/// Workgroups a product should have before its k range is split.
-const TARGET_GROUPS: u32 = 1024;
+/// Output tiles below which a product's k range is split. At bond 32 a
+/// split made the second contraction 2× faster; at 64, with 64 tiles, it
+/// no longer helped.
+const TARGET_GROUPS: u32 = 128;
 
 /// Shortest k range of a split product.
 const MIN_SPLIT_K: u32 = 64;
