@@ -189,8 +189,17 @@ fn complement(rows: MatRef<'_, C64>, basis: MatRef<'_, C64>, room: usize) -> Mat
     if scale == 0.0 {
         return Mat::zeros(0, cols);
     }
+    // There are usually many more rows (one set per MPO channel) than
+    // columns. `rows = Q R` with `Q`'s columns orthonormal, so `R` has the
+    // same row space and, after any projection on the right, the same
+    // singular values and right singular vectors, in far fewer rows.
+    let compact = if rows.nrows() > cols {
+        rows.qr().thin_R().to_owned()
+    } else {
+        rows.to_owned()
+    };
     // Twice, as in classical Gram–Schmidt, for orthogonality to rounding.
-    let rest = project_out(project_out(rows).as_ref());
+    let rest = project_out(project_out(compact.as_ref()).as_ref());
     let (_, s, v) = thin_svd(rest.as_ref());
     let keep = s
         .iter()

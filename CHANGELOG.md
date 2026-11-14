@@ -21,6 +21,10 @@
   192-qubit TDVP step at bond dimension 64 went from 416 s to 132 s on
   three threads; one thread is also about 25% faster on two-site
   products, as the sparse MPO step now runs along contiguous rows.
+- TDVP's subspace expansion is about 2.6× faster. It first reduces each
+  bond's `Hψ` channels, many more rows than columns, to the triangular
+  factor of a QR decomposition, which has the same row space, so the
+  projections and SVDs that follow work on a square matrix.
 - `Mps::dmrg` adds noise in early sweeps, so Hamiltonians whose terms span
   more than two sites no longer trap it in metastable states. One example
   is a lattice gauge theory whose hops act on four qubits: from its
