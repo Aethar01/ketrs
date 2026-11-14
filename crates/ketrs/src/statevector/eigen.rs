@@ -118,24 +118,26 @@ fn lanczos_lowest<T: Scalar>(
     seed: u64,
 ) -> Result<Vec<T>, Error> {
     let v0 = start_vector(dim, locked, seed)?;
-    lanczos_lowest_from(op, &v0, locked, options)
+    Ok(lanczos_lowest_from(op, &v0, locked, options)?.1)
 }
 
 /// As [`lanczos_lowest`], from a given unit start vector orthogonal to
-/// `locked`. A good guess (such as the previous solution in DMRG) converges
-/// in far fewer iterations.
+/// `locked`, also returning the converged Ritz value (the eigenvalue
+/// estimate, within about `tolerance² / gap` of the vector's energy). A
+/// good guess (such as the previous solution in DMRG) converges in far
+/// fewer iterations.
 pub(crate) fn lanczos_lowest_from<T: Scalar>(
     op: &impl LinearOperator<T>,
     v0: &[T],
     locked: &[&[T]],
     options: &EigenOptions,
-) -> Result<Vec<T>, Error> {
+) -> Result<(f64, Vec<T>), Error> {
     let dim = v0.len();
 
     // Pass 1: build the tridiagonal matrix until its lowest Ritz pair
     // converges.
     let (mut alphas, mut betas) = (Vec::new(), Vec::new());
-    let mut ritz: Option<Vec<f64>> = None;
+    let mut ritz: Option<(f64, Vec<f64>)> = None;
     recurrence(
         op,
         v0,
@@ -143,17 +145,17 @@ pub(crate) fn lanczos_lowest_from<T: Scalar>(
         options.max_iterations,
         |_, _, alpha, beta| {
             alphas.push(alpha);
-            let (_, s) = tridiagonal_lowest(&alphas, &betas);
+            let (theta, s) = tridiagonal_lowest(&alphas, &betas);
             // Residual of the Ritz pair: β times the last eigenvector component.
             if beta * s[s.len() - 1].abs() <= options.tolerance || beta <= breakdown(&alphas) {
-                ritz = Some(s);
+                ritz = Some((theta, s));
                 return ControlFlow::Break(());
             }
             betas.push(beta);
             ControlFlow::Continue(())
         },
     );
-    let s = ritz.ok_or_else(|| {
+    let (theta, s) = ritz.ok_or_else(|| {
         Error::NotConverged(format!(
             "Lanczos did not converge in {} iterations",
             options.max_iterations
@@ -173,7 +175,7 @@ pub(crate) fn lanczos_lowest_from<T: Scalar>(
     });
     orthogonalise(&mut x, locked);
     normalise(&mut x);
-    Ok(x)
+    Ok((theta, x))
 }
 
 /// A random unit vector orthogonal to `locked`.

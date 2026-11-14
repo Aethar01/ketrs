@@ -27,12 +27,10 @@ use super::{Absorb, Mps, MpsOptions, Tensor};
 use crate::error::Error;
 use crate::observable::PauliSum;
 use crate::statevector::eigen::EigenOptions;
-use crate::statevector::krylov::{LinearOperator, dot, norm};
+use crate::statevector::krylov::norm;
 use faer::{Mat, MatRef};
 use num_complex::Complex64 as C64;
 use rayon::prelude::*;
-
-const ZERO: C64 = C64::new(0.0, 0.0);
 
 /// Settings for [`Mps::dmrg`].
 #[derive(Clone, Debug)]
@@ -205,13 +203,11 @@ impl Mps {
         v0.iter_mut().for_each(|a| *a *= scale);
 
         let op = envs.two_site(i, mpo, l, r);
-        let x = op.lowest(&v0, lanczos);
+        // The Ritz value is the energy of `x` to within the Lanczos
+        // tolerance squared, without another product.
+        let found = op.lowest(&v0, lanczos);
         envs.check()?;
-        let x = x?;
-        let mut hx = vec![ZERO; x.len()];
-        op.apply(&x, &mut hx);
-        envs.check()?;
-        let energy = dot(&x, &hx).re;
+        let (energy, x) = found?;
         let theta = MatRef::from_row_major_slice(&x, l * 2, 2 * r);
         if noise > 0.0 {
             let perturbation = match absorb {

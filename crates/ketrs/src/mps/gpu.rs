@@ -1078,7 +1078,11 @@ impl GpuOperator<'_> {
     /// replayed, so this takes half the products; if it would outgrow
     /// [`LANCZOS_BYTES`] before converging, the solve is redone with the
     /// CPU's recurrence (still applying `H` on the GPU).
-    pub(super) fn lowest(&self, v0: &[C64], options: &EigenOptions) -> Result<Vec<C64>, Error> {
+    pub(super) fn lowest(
+        &self,
+        v0: &[C64],
+        options: &EigenOptions,
+    ) -> Result<(f64, Vec<C64>), Error> {
         self.lowest_within(v0, options, LANCZOS_BYTES)
     }
 
@@ -1088,7 +1092,7 @@ impl GpuOperator<'_> {
         v0: &[C64],
         options: &EigenOptions,
         budget: u64,
-    ) -> Result<Vec<C64>, Error> {
+    ) -> Result<(f64, Vec<C64>), Error> {
         let len = self.len();
         assert_eq!(v0.len(), len);
         let fits = (budget / (len as u64 * COMPLEX)) as usize;
@@ -1111,16 +1115,16 @@ impl GpuOperator<'_> {
             let end = (k + rec.batch).min(limit);
             for (alpha, beta) in rec.steps(s, k..end)? {
                 alphas.push(alpha);
-                let (_, v) = tridiagonal_lowest(&alphas, &betas);
+                let (theta, v) = tridiagonal_lowest(&alphas, &betas);
                 if beta * v[v.len() - 1].abs() <= options.tolerance || beta <= breakdown(&alphas) {
-                    ritz = Some(v);
+                    ritz = Some((theta, v));
                     break 'steps;
                 }
                 betas.push(beta);
             }
             k = end;
         }
-        let Some(v) = ritz else {
+        let Some((theta, v)) = ritz else {
             if limit < options.max_iterations {
                 drop(guard);
                 return lanczos_lowest_from(self, v0, &[], options);
@@ -1135,7 +1139,7 @@ impl GpuOperator<'_> {
         rec.combine(s, &c)?;
         let mut x = vec![C64::new(0.0, 0.0); len];
         rec.download(s, rec.v(0), &mut x)?;
-        Ok(x)
+        Ok((theta, x))
     }
 }
 
@@ -1492,20 +1496,26 @@ mod tests {
                 // the CPU's recurrence, against the CPU's.
                 let v0: Vec<C64> = x.iter().map(|v| v / norm(&x)).collect();
                 let options = EigenOptions::default();
-                let want =
+                let (want_e, want) =
                     lanczos_lowest_from(&cpu.two_site(i, &mpo, l, r2), &v0, &[], &options).unwrap();
                 let Op::Gpu(op) = gpu.two_site(i, &mpo, l, r2) else {
                     unreachable!()
                 };
                 let bytes = (x.len() * 16) as u64;
                 for budget in [LANCZOS_BYTES, 4 * bytes] {
-                    let got = op.lowest_within(&v0, &options, budget).unwrap();
+                    let (got_e, got) = op.lowest_within(&v0, &options, budget).unwrap();
+                    assert!((want_e - got_e).abs() < 1e-9, "{want_e} {got_e}");
                     // Unique ground states agree up to a phase.
                     let overlap: C64 = want.iter().zip(&got).map(|(a, b)| a.conj() * b).sum();
                     assert!(
                         (overlap.norm() - 1.0).abs() < 1e-9,
                         "lowest two sites {i}, budget {budget}: {overlap}"
                     );
+                    // The Ritz value is the vector's energy.
+                    let mut hx = vec![C64::default(); got.len()];
+                    cpu.two_site(i, &mpo, l, r2).apply(&got, &mut hx);
+                    let energy: f64 = got.iter().zip(&hx).map(|(a, b)| (a.conj() * b).re).sum();
+                    assert!((energy - got_e).abs() < 1e-9, "{energy} {got_e}");
                 }
             }
         }

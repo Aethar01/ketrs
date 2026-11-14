@@ -165,9 +165,14 @@ impl Op<'_> {
         }
     }
 
-    /// The lowest eigenvector, by Lanczos iteration from the unit vector
-    /// `v0`, with the recurrence in GPU memory for a GPU operator.
-    pub(super) fn lowest(&self, v0: &[C64], options: &EigenOptions) -> Result<Vec<C64>, Error> {
+    /// The lowest eigenvalue estimate and eigenvector, by Lanczos iteration
+    /// from the unit vector `v0`, with the recurrence in GPU memory for a
+    /// GPU operator.
+    pub(super) fn lowest(
+        &self,
+        v0: &[C64],
+        options: &EigenOptions,
+    ) -> Result<(f64, Vec<C64>), Error> {
         match self {
             Op::Cpu(..) => lanczos_lowest_from(self, v0, &[], options),
             #[cfg(feature = "gpu")]
