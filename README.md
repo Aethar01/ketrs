@@ -44,7 +44,7 @@ Rust.
 | `Statevector` / `RealStatevector` | Any circuit, exactly. Parallel, cache-blocked, with gate fusion. The real (f64) variant halves memory for real circuits; single-precision `Statevector32` / `RealStatevector32` (`dtype="complex64"` / `"float32"`) halve it again and run 1.65× / 4× faster than complex128 at 22–26 qubits, to about $`10^{-6}`$. |
 | `SectorStatevector` | States confined to fixed Hamming weights (particle number, spin, charge): stores only that subspace, rejecting anything that leaves it. |
 | `DensityMatrix` | Mixed states and noise: Kraus channels (depolarizing, amplitude and phase damping, Pauli, any Kraus set) and noise models after every gate, matching Qiskit Aer's density-matrix method and 1.3–4.2× faster. For more qubits, statevectors run the same noise models (plus readout error) as quantum trajectories. |
-| `MPS` | Weakly entangled states of many qubits: TEBD, TDVP for Hamiltonians of any range (with subspace expansion while bonds grow), DMRG ground states (with noise, so terms on more than two qubits can't trap it), sampling, with controlled truncation. TDVP and DMRG sweeps can run on a Vulkan GPU with 64-bit floats (`mps.gpu = True`), 5.7–8.6× faster than the CPU at bond dimensions 64–128. |
+| `MPS` | Weakly entangled states of many qubits: TEBD, TDVP for Hamiltonians of any range (with subspace expansion while bonds grow), DMRG ground states (with noise, so terms on more than two qubits can't trap it), sampling, with controlled truncation. TDVP and DMRG sweeps can run on a Vulkan GPU with 64-bit floats (`mps.gpu = True`), 2× faster than three CPU cores at bond dimension 64. |
 | `GpuStatevector` | Large circuits on any Vulkan 1.2 GPU (NVIDIA, AMD, …), up to 31 qubits memory permitting, in double precision where the GPU has 64-bit floats or single (`complex64`, 2.8–5.8× faster on consumer cards) anywhere; expectation values, sampling, $`H\vert\psi\rangle`$, adjoint gradients and exact $`e^{-iHt}`$ (2.8–6.5× faster than the CPU at 18–24 qubits) run on the GPU. Needs only the system Vulkan driver at run time: no CUDA or ROCm. |
 
 ## Features
@@ -192,22 +192,20 @@ in parallel.
 192-qubit Schwinger model with link registers (1537 Pauli terms, MPO bond
 dimension about 25), with and without `mps.gpu = True`, on the RX 9060 XT.
 Both start from the same state, warmed up by earlier steps until the bonds
-are near the cap $`\chi`$. They then reach the same bond dimensions and the
-same energy to about $`10^{-10}`$. The CPU used 6 threads at $`\chi`$ = 64
-and 96 and one at 128: its matrices are too small to split, so the thread
-count changed its time by under 2%. One block is 1×.
+are near the cap $`\chi`$. They then reach the same bond dimensions and
+energies within $`10^{-9}`$. The CPU had three threads (the other three
+cores were busy). One block is 1×.
 
-| $`\chi`$ cap | Mean bond | GPU | CPU | Speedup |
+| $`\chi`$ cap | Mean bond | GPU | CPU, 3 threads | Speedup |
 |---:|---:|---:|---:|:---|
-| 64 | 56 | 73.4 s | 415.7 s | `█████▋` 5.7× |
-| 96 | 83 | 154.2 s | 1248.3 s | `████████▏` 8.1× |
-| 128 | 109 | 353.3 s | 3052.3 s | `████████▋` 8.6× |
+| 64 | 56 | 67.2 s | 131.9 s | `██` 2.0× |
 
 The GPU applies the effective Hamiltonians, about 95% of a step on the CPU;
-SVDs, Krylov steps and subspace expansion stay on the CPU and take most of
-what remains. Consumer cards run 64-bit floats at a small fraction of their
-32-bit speed (about 400 GFLOP/s here), so the gain depends on the card's
-double-precision rate.
+SVDs, Krylov steps and subspace expansion stay on the CPU and take about
+10 s of the GPU's step. Consumer cards run 64-bit floats at a small
+fraction of their 32-bit speed (about 400 GFLOP/s here), so the gain
+depends on the card's double-precision rate and on how many CPU cores are
+free.
 
 **Exact evolution and ground states** of a Heisenberg chain, against scipy's
 `expm_multiply` and `eigsh` on a sparse matrix built in advance (construction
