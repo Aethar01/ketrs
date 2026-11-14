@@ -7,7 +7,11 @@
 //! sequential below [`PARALLEL_SIZE`], faer's global setting above.
 
 use faer::diag::Diag;
+use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::matmul::matmul as faer_matmul;
+use faer::linalg::qr::no_pivoting::factor::{
+    qr_in_place, qr_in_place_scratch, recommended_block_size,
+};
 use faer::linalg::svd::{ComputeSvdVectors, SvdError, SvdParams, svd as faer_svd, svd_scratch};
 use faer::traits::Conjugate;
 use faer::{Accum, Mat, MatRef, Par, Side, Spec};
@@ -42,6 +46,35 @@ where
         par(size),
     );
     out
+}
+
+/// The triangular factor `R` (`min(m, n) × n`) of `a = Q R`.
+///
+/// Always sequential: on a 1600 × 128 matrix faer's parallel QR took 3.8 ms
+/// on three threads against 2.3 ms on one, and several times that when
+/// other processes shared the cores.
+pub(crate) fn qr_r(a: MatRef<'_, C64>) -> Mat<C64> {
+    let (m, n) = (a.nrows(), a.ncols());
+    let k = m.min(n);
+    let mut factors = a.to_owned();
+    let block = recommended_block_size::<C64>(m, n);
+    let mut coeffs = Mat::<C64>::zeros(block, k);
+    let req = qr_in_place_scratch::<C64>(m, n, block, Par::Seq, Default::default());
+    let mut buffer = MemBuffer::new(req);
+    qr_in_place(
+        factors.as_mut(),
+        coeffs.as_mut(),
+        Par::Seq,
+        MemStack::new(&mut buffer),
+        Default::default(),
+    );
+    Mat::from_fn(k, n, |i, j| {
+        if i <= j {
+            factors[(i, j)]
+        } else {
+            C64::new(0.0, 0.0)
+        }
+    })
 }
 
 /// `(U, s, V)` of a thin SVD.
@@ -93,14 +126,14 @@ fn try_svd(a: MatRef<'_, C64>, params: Spec<SvdParams, C64>) -> Result<Svd, SvdE
         par,
         params,
     );
-    let mut buffer = faer::dyn_stack::MemBuffer::new(req);
+    let mut buffer = MemBuffer::new(req);
     faer_svd(
         a,
         s.as_mut(),
         Some(u.as_mut()),
         Some(v.as_mut()),
         par,
-        faer::dyn_stack::MemStack::new(&mut buffer),
+        MemStack::new(&mut buffer),
         params,
     )?;
     let s: Vec<f64> = (0..k).map(|i| s.column_vector()[i].re).collect();
@@ -200,6 +233,27 @@ mod tests {
                 let id = if i == j { 1.0 } else { 0.0 };
                 assert!((uu[(i, j)].re - id).abs() < tol && (vv[(i, j)].re - id).abs() < tol);
             }
+        }
+    }
+
+    #[test]
+    fn qr_factor_is_triangular_with_the_same_gram_matrix() {
+        // Tall (blocked), wide, and smaller than one block.
+        for (m, n) in [(300, 40), (12, 30), (9, 5)] {
+            let a = random(m, n, (m * 7 + n) as u64);
+            let r = qr_r(a.as_ref());
+            assert_eq!((r.nrows(), r.ncols()), (m.min(n), n));
+            for i in 0..r.nrows() {
+                for j in 0..i {
+                    assert_eq!(r[(i, j)], C64::new(0.0, 0.0));
+                }
+            }
+            let (want, got) = (
+                matmul(a.adjoint(), a.as_ref()),
+                matmul(r.adjoint(), r.as_ref()),
+            );
+            let diff = (want - got).norm_max();
+            assert!(diff < 1e-11, "{m} × {n}: {diff}");
         }
     }
 

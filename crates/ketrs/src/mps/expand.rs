@@ -17,7 +17,7 @@
 //! loses them geometrically.
 
 use super::dmrg::{Env, left_operator, right_operator};
-use super::linalg::{matmul, thin_svd};
+use super::linalg::{matmul, qr_r, thin_svd};
 use super::mpo::Mpo;
 use super::{Mps, Tensor};
 use faer::{Mat, MatRef};
@@ -194,7 +194,7 @@ fn complement(rows: MatRef<'_, C64>, basis: MatRef<'_, C64>, room: usize) -> Mat
     // same row space and, after any projection on the right, the same
     // singular values and right singular vectors, in far fewer rows.
     let compact = if rows.nrows() > cols {
-        rows.qr().thin_R().to_owned()
+        qr_r(rows)
     } else {
         rows.to_owned()
     };
