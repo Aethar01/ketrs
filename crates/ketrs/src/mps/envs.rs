@@ -9,6 +9,7 @@ use super::gpu::{GpuOperator, GpuSweep};
 use super::mpo::Mpo;
 use super::{Mps, Tensor};
 use crate::error::Error;
+use crate::statevector::eigen::{EigenOptions, lanczos_lowest_from};
 use crate::statevector::evolve::krylov_evolve;
 use crate::statevector::krylov::LinearOperator;
 use num_complex::Complex64 as C64;
@@ -161,6 +162,16 @@ impl Op<'_> {
             Op::Cpu(..) => krylov_evolve(self, x, t, true),
             #[cfg(feature = "gpu")]
             Op::Gpu(op) => op.evolve(x, t),
+        }
+    }
+
+    /// The lowest eigenvector, by Lanczos iteration from the unit vector
+    /// `v0`, with the recurrence in GPU memory for a GPU operator.
+    pub(super) fn lowest(&self, v0: &[C64], options: &EigenOptions) -> Result<Vec<C64>, Error> {
+        match self {
+            Op::Cpu(..) => lanczos_lowest_from(self, v0, &[], options),
+            #[cfg(feature = "gpu")]
+            Op::Gpu(op) => op.lowest(v0, options),
         }
     }
 }

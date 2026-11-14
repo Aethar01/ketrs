@@ -9,10 +9,11 @@
   sweeps' environments then live in GPU memory and the one- and two-site
   effective Hamiltonians are applied there, as complex matrix products
   around a sparse step for the MPO, which is nearly all of a sweep's
-  work. TDVP's Krylov time steps run their Lanczos recurrence in GPU
-  memory as well, bringing back only its scalars. The tensors, SVDs,
-  DMRG's Lanczos iterations, subspace expansion and DMRG noise stay on the
-  CPU, so results match the CPU path up to rounding. It needs 64-bit floats and buffer device addresses
+  work. TDVP's Krylov time steps and DMRG's Lanczos eigensolves run their
+  recurrence in GPU memory as well, bringing back only its scalars; DMRG
+  keeps the Lanczos basis there instead of replaying the recurrence, so it
+  takes half the products. The tensors, SVDs, subspace expansion and DMRG
+  noise stay on the CPU, so results match the CPU path up to rounding. It needs 64-bit floats and buffer device addresses
   (`GpuContext::supports_mps`). The CPU path stays the default.
 - TDVP and DMRG sweeps on the CPU use all cores. The one- and two-site
   effective Hamiltonians split by rows of the left bond, one chunk per

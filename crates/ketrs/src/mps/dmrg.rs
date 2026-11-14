@@ -26,7 +26,7 @@ use super::mpo::{Mpo, MpoSite, left_keyed, pauli_entry, right_keyed};
 use super::{Absorb, Mps, MpsOptions, Tensor};
 use crate::error::Error;
 use crate::observable::PauliSum;
-use crate::statevector::eigen::{EigenOptions, lanczos_lowest_from};
+use crate::statevector::eigen::EigenOptions;
 use crate::statevector::krylov::{LinearOperator, dot, norm};
 use faer::{Mat, MatRef};
 use num_complex::Complex64 as C64;
@@ -205,7 +205,7 @@ impl Mps {
         v0.iter_mut().for_each(|a| *a *= scale);
 
         let op = envs.two_site(i, mpo, l, r);
-        let x = lanczos_lowest_from(&op, &v0, &[], lanczos);
+        let x = op.lowest(&v0, lanczos);
         envs.check()?;
         let x = x?;
         let mut hx = vec![ZERO; x.len()];

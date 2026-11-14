@@ -207,7 +207,7 @@ fn start_vector<T: Scalar>(dim: usize, locked: &[&[T]], seed: u64) -> Result<Vec
 /// The lowest eigenvalue and unit eigenvector of the symmetric tridiagonal
 /// matrix with diagonal `a` and off-diagonal `b`: bisection on the Sturm
 /// sequence, then inverse iteration.
-fn tridiagonal_lowest(a: &[f64], b: &[f64]) -> (f64, Vec<f64>) {
+pub(crate) fn tridiagonal_lowest(a: &[f64], b: &[f64]) -> (f64, Vec<f64>) {
     let m = a.len();
     let off = |i: usize| if i < b.len() { b[i].abs() } else { 0.0 };
     let radius = |i: usize| off(i) + if i > 0 { off(i - 1) } else { 0.0 };
