@@ -31,6 +31,13 @@
   right bases before the right half-sweep and the left bases before the
   left half-sweep. From a product state, the error now falls as for a
   second-order integrator.
+- MPS SVDs no longer panic or return NaN on finite, rank-deficient
+  tensors (for example two-site tensors whose bonds an expansion padded with
+  zero-weight directions). faer's divide-and-conquer SVD can stop with
+  `NoConvergence` or report success with NaN singular vectors there; the
+  output is now checked, and the SVD is retried with QR iteration, then on
+  the triangular factor of a QR decomposition, then through the Gram
+  matrix's eigendecomposition.
 
 ## 0.1.6 (2026-11-13)
 

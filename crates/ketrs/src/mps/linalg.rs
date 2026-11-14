@@ -8,9 +8,9 @@
 
 use faer::diag::Diag;
 use faer::linalg::matmul::matmul as faer_matmul;
-use faer::linalg::svd::{ComputeSvdVectors, svd as faer_svd, svd_scratch};
+use faer::linalg::svd::{ComputeSvdVectors, SvdError, SvdParams, svd as faer_svd, svd_scratch};
 use faer::traits::Conjugate;
-use faer::{Accum, Mat, MatRef, Par};
+use faer::{Accum, Mat, MatRef, Par, Side, Spec};
 use num_complex::Complex64 as C64;
 
 /// Matrices with at least this many entries (rows × columns of the larger
@@ -61,9 +61,41 @@ where
     );
 }
 
+/// `(U, s, V)` of a thin SVD.
+type Svd = (Mat<C64>, Vec<f64>, Mat<C64>);
+
 /// The thin SVD `a = U diag(s) V†`, with singular values in decreasing
 /// order.
-pub(crate) fn thin_svd(a: MatRef<'_, C64>) -> (Mat<C64>, Vec<f64>, Mat<C64>) {
+///
+/// faer's divide-and-conquer SVD can fail on finite, rank-deficient
+/// matrices, such as two-site tensors after a subspace expansion pads a bond
+/// with directions of zero weight: it either stops with `NoConvergence` or
+/// reports success with NaN singular vectors. Either is caught here, and the
+/// SVD is retried with plain QR iteration, then on the triangular factor of
+/// a QR decomposition, and last through the eigendecomposition of the
+/// smaller Gram matrix, which loses the relative accuracy of singular values
+/// below √ε of the largest (those are truncated anyway). Only non-finite
+/// input panics.
+pub(crate) fn thin_svd(a: MatRef<'_, C64>) -> Svd {
+    if let Ok(out) = try_svd(a, Default::default()) {
+        return out;
+    }
+    assert!(
+        all_finite(a),
+        "MPS tensor has non-finite entries: the state has diverged"
+    );
+    let mut params = <SvdParams as faer::Auto<C64>>::auto();
+    params.recursion_threshold = usize::MAX;
+    if let Ok(out) = try_svd(a, params.into()) {
+        return out;
+    }
+    if let Some(out) = svd_via_qr(a) {
+        return out;
+    }
+    svd_via_gram(a)
+}
+
+fn try_svd(a: MatRef<'_, C64>, params: Spec<SvdParams, C64>) -> Result<Svd, SvdError> {
     let (m, n) = (a.nrows(), a.ncols());
     let k = m.min(n);
     let par = par(m * n);
@@ -76,7 +108,7 @@ pub(crate) fn thin_svd(a: MatRef<'_, C64>) -> (Mat<C64>, Vec<f64>, Mat<C64>) {
         ComputeSvdVectors::Thin,
         ComputeSvdVectors::Thin,
         par,
-        Default::default(),
+        params,
     );
     let mut buffer = faer::dyn_stack::MemBuffer::new(req);
     faer_svd(
@@ -86,9 +118,134 @@ pub(crate) fn thin_svd(a: MatRef<'_, C64>) -> (Mat<C64>, Vec<f64>, Mat<C64>) {
         Some(v.as_mut()),
         par,
         faer::dyn_stack::MemStack::new(&mut buffer),
-        Default::default(),
-    )
-    .expect("SVD converges");
-    let s = (0..k).map(|i| s.column_vector()[i].re).collect();
-    (u, s, v)
+        params,
+    )?;
+    let s: Vec<f64> = (0..k).map(|i| s.column_vector()[i].re).collect();
+    if !(s.iter().all(|x| x.is_finite()) && all_finite(u.as_ref()) && all_finite(v.as_ref())) {
+        return Err(SvdError::NoConvergence);
+    }
+    Ok((u, s, v))
+}
+
+/// SVD of the square triangular factor: `a = Q R` (tall) or `a† = Q R`
+/// (wide), with the factor's singular vectors rotated back by `Q`.
+fn svd_via_qr(a: MatRef<'_, C64>) -> Option<Svd> {
+    if a.nrows() >= a.ncols() {
+        let qr = a.qr();
+        let (ur, s, v) = try_svd(qr.thin_R(), Default::default()).ok()?;
+        Some((matmul(qr.compute_thin_Q().as_ref(), ur.as_ref()), s, v))
+    } else {
+        let qr = a.adjoint().qr();
+        let r = qr.thin_R().adjoint().to_owned();
+        let (u, s, w) = try_svd(r.as_ref(), Default::default()).ok()?;
+        Some((u, s, matmul(qr.compute_thin_Q().as_ref(), w.as_ref())))
+    }
+}
+
+fn svd_via_gram(a: MatRef<'_, C64>) -> Svd {
+    let wide = a.nrows() < a.ncols();
+    // b is the tall one of a and a†; b = U s V†.
+    let b = if wide {
+        a.adjoint().to_owned()
+    } else {
+        a.to_owned()
+    };
+    let gram = matmul(b.adjoint(), b.as_ref());
+    let eig = gram
+        .self_adjoint_eigen(Side::Lower)
+        .expect("Hermitian eigendecomposition converges");
+    let k = b.ncols();
+    let order: Vec<usize> = (0..k).rev().collect(); // eigenvalues ascend
+    let s: Vec<f64> = order
+        .iter()
+        .map(|&i| eig.S().column_vector()[i].re.max(0.0).sqrt())
+        .collect();
+    let v = Mat::<C64>::from_fn(k, k, |i, j| eig.U()[(i, order[j])]);
+    // b V = U diag(s): orthonormalise its columns by QR rather than dividing
+    // by s, which would blow up the directions with s ≈ 0. R is then
+    // diagonal up to rounding, and its phases go into U.
+    let bv = matmul(b.as_ref(), v.as_ref());
+    let qr = bv.qr();
+    let mut u = qr.compute_thin_Q();
+    let r = qr.thin_R();
+    for j in 0..k {
+        let d = r[(j, j)];
+        if d.norm() > 0.0 {
+            let phase = d / d.norm();
+            for i in 0..u.nrows() {
+                u[(i, j)] *= phase;
+            }
+        }
+    }
+    if wide { (v, s, u) } else { (u, s, v) }
+}
+
+fn all_finite(a: MatRef<'_, C64>) -> bool {
+    (0..a.ncols()).all(|j| (0..a.nrows()).all(|i| a[(i, j)].is_finite()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn random(m: usize, n: usize, seed: u64) -> Mat<C64> {
+        let mut x = seed;
+        let mut next = move || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (x >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        Mat::from_fn(m, n, |_, _| C64::new(next(), next()))
+    }
+
+    fn check(a: &Mat<C64>, (u, s, v): (Mat<C64>, Vec<f64>, Mat<C64>), tol: f64) {
+        let k = s.len();
+        assert_eq!((u.ncols(), v.ncols()), (k, k));
+        assert!(s.windows(2).all(|w| w[0] >= w[1]));
+        let us = Mat::from_fn(u.nrows(), k, |i, j| u[(i, j)] * s[j]);
+        let back = matmul(us.as_ref(), v.adjoint());
+        let err = (0..a.nrows())
+            .flat_map(|i| (0..a.ncols()).map(move |j| (i, j)))
+            .map(|(i, j)| (back[(i, j)] - a[(i, j)]).norm())
+            .fold(0.0, f64::max);
+        assert!(err < tol, "reconstruction error {err}");
+        let uu = matmul(u.adjoint(), u.as_ref());
+        let vv = matmul(v.adjoint(), v.as_ref());
+        for i in 0..k {
+            for j in 0..k {
+                let id = if i == j { 1.0 } else { 0.0 };
+                assert!((uu[(i, j)].re - id).abs() < tol && (vv[(i, j)].re - id).abs() < tol);
+            }
+        }
+    }
+
+    #[test]
+    fn svd_fallbacks_reconstruct_tall_and_wide_matrices() {
+        for (m, n) in [(40, 12), (12, 40), (20, 20)] {
+            let a = random(m, n, (m * 100 + n) as u64);
+            check(&a, thin_svd(a.as_ref()), 1e-12);
+            check(&a, svd_via_qr(a.as_ref()).unwrap(), 1e-12);
+            check(&a, svd_via_gram(a.as_ref()), 1e-10);
+        }
+    }
+
+    #[test]
+    fn svd_fallbacks_handle_rank_deficient_matrices() {
+        // Rank 5 with zero-padded rows and columns, as after an expansion.
+        let (m, n, rank) = (48, 36, 5);
+        let x = random(m - 8, rank, 7);
+        let y = random(rank, n - 6, 8);
+        let core = matmul(x.as_ref(), y.as_ref());
+        let a = Mat::from_fn(m, n, |i, j| {
+            if i < m - 8 && j < n - 6 {
+                core[(i, j)]
+            } else {
+                C64::new(0.0, 0.0)
+            }
+        });
+        check(&a, thin_svd(a.as_ref()), 1e-12);
+        check(&a, svd_via_qr(a.as_ref()).unwrap(), 1e-12);
+        check(&a, svd_via_gram(a.as_ref()), 1e-7);
+    }
 }
