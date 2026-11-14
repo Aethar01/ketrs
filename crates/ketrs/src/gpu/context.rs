@@ -129,9 +129,16 @@ pub(crate) enum MpsKernel {
     Mix = 1,
     /// Sum of the partial products of a k-split `Gemm`.
     Sum = 2,
+    /// Dot products and vector updates of a Lanczos recurrence.
+    Krylov = 3,
 }
 
-const MPS_SHADERS: [&[u8]; 3] = [spirv!("mps_gemm"), spirv!("mps_mix"), spirv!("mps_sum")];
+const MPS_SHADERS: [&[u8]; 4] = [
+    spirv!("mps_gemm"),
+    spirv!("mps_mix"),
+    spirv!("mps_sum"),
+    spirv!("mps_krylov"),
+];
 
 /// Push-constant bytes of the MPS kernels' layout (Vulkan's guaranteed
 /// minimum).

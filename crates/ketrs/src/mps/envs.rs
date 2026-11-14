@@ -9,6 +9,7 @@ use super::gpu::{GpuOperator, GpuSweep};
 use super::mpo::Mpo;
 use super::{Mps, Tensor};
 use crate::error::Error;
+use crate::statevector::evolve::krylov_evolve;
 use crate::statevector::krylov::LinearOperator;
 use num_complex::Complex64 as C64;
 use std::borrow::Cow;
@@ -150,6 +151,18 @@ pub(super) enum Op<'a> {
     Cpu(Effective, PhantomData<&'a ()>),
     #[cfg(feature = "gpu")]
     Gpu(GpuOperator<'a>),
+}
+
+impl Op<'_> {
+    /// `x ← exp(-iHt) x` by Krylov time-stepping, with the recurrence in
+    /// GPU memory for a GPU operator.
+    pub(super) fn evolve(&self, x: &mut [C64], t: f64) -> Result<(), Error> {
+        match self {
+            Op::Cpu(..) => krylov_evolve(self, x, t, true),
+            #[cfg(feature = "gpu")]
+            Op::Gpu(op) => op.evolve(x, t),
+        }
+    }
 }
 
 impl LinearOperator<C64> for Op<'_> {

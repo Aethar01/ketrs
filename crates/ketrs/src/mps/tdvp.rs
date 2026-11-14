@@ -28,7 +28,6 @@ use super::mpo::Mpo;
 use super::{Absorb, Mps};
 use crate::error::Error;
 use crate::observable::PauliSum;
-use crate::statevector::evolve::krylov_evolve;
 use faer::MatRef;
 use num_complex::Complex64 as C64;
 
@@ -133,7 +132,7 @@ impl Mps {
         let (l, r) = (self.tensors[i].left, self.tensors[i + 1].right);
         let mut x = two_site_vector(&self.tensors[i], &self.tensors[i + 1]);
         let op = envs.two_site(i, mpo, l, r);
-        let evolved = krylov_evolve(&op, &mut x, t, true);
+        let evolved = op.evolve(&mut x, t);
         envs.check()?;
         evolved?;
         self.split(i, MatRef::from_row_major_slice(&x, l * 2, 2 * r), absorb);
@@ -144,7 +143,7 @@ impl Mps {
     /// Hamiltonian.
     fn evolve_site(&mut self, i: usize, mpo: &Mpo, envs: &Envs, t: f64) -> Result<(), Error> {
         let op = envs.one_site(i, mpo, self.tensors[i].left, self.tensors[i].right);
-        let evolved = krylov_evolve(&op, &mut self.tensors[i].data, t, true);
+        let evolved = op.evolve(&mut self.tensors[i].data, t);
         envs.check()?;
         evolved
     }

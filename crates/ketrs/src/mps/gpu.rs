@@ -6,11 +6,14 @@
 //! is two dense contractions with the environments, `Σ_a L_a θ` and
 //! `Σ_c Z_c R_cᵀ`, around a sparse step for the MPO sites. Here the
 //! environments live in GPU memory, built there as the sweep moves, and an
-//! application uploads the vector, runs the two contractions as complex
-//! matrix products (`mps_gemm.comp`) around the sparse step (`mps_mix.comp`)
-//! and downloads the result. Krylov and Lanczos iterations, SVDs and the
-//! tensors themselves stay on the CPU, so the algorithms are exactly those
-//! of the CPU path, with results equal up to rounding.
+//! application runs the two contractions as complex matrix products
+//! (`mps_gemm.comp`) around the sparse step (`mps_mix.comp`). TDVP's Krylov
+//! time steps keep their whole Lanczos recurrence there too
+//! (`mps_krylov.comp`, [`GpuOperator::evolve`]), so only the recurrence's
+//! scalars cross to the CPU; DMRG's Lanczos iterations upload and download
+//! each vector. SVDs, the subspace expansion and the tensors themselves stay
+//! on the CPU. The algorithms are exactly those of the CPU path, with
+//! results equal up to rounding.
 //!
 //! Layouts, all row-major complex doubles: a left environment with `D`
 //! channels on a bond of dimension `l` is the `D·l × l` stack of its
@@ -23,7 +26,8 @@ use super::dmrg::Env;
 use super::mpo::{Mpo, Rows, left_keyed, pair_keyed, right_keyed};
 use crate::error::Error;
 use crate::gpu::{Buffer, GpuContext, MPS_PUSH_BYTES, Memory, MpsKernel};
-use crate::statevector::krylov::LinearOperator;
+use crate::statevector::evolve::{KRYLOV_DIM, STEP_TOLERANCE, tridiagonal_exp};
+use crate::statevector::krylov::{LinearOperator, breakdown};
 use ash::vk;
 use faer::Mat;
 use num_complex::Complex64 as C64;
@@ -139,7 +143,9 @@ impl DeviceEnv {
     }
 }
 
-/// Device scratch for one contraction, grown as needed.
+/// Device scratch, grown as needed: for one contraction, and for the
+/// Lanczos recurrence of [`GpuOperator::evolve`].
+#[derive(Default)]
 struct Scratch {
     x: Option<Buffer>,
     y: Option<Buffer>,
@@ -148,6 +154,16 @@ struct Scratch {
     out: Option<Buffer>,
     up: Option<Buffer>,
     down: Option<Buffer>,
+    /// The Lanczos vectors `v_0 … v_KRYLOV_DIM`.
+    basis: Option<Buffer>,
+    /// Per-workgroup partial dot products.
+    partials: Option<Buffer>,
+    /// The recurrence's scalars (see [`Slots`]), on the device and copied
+    /// back.
+    scalars: Option<Buffer>,
+    scalars_down: Option<Buffer>,
+    /// The coefficients of a new state in the basis.
+    coeffs: Option<Buffer>,
 }
 
 /// A buffer of at least `bytes`, reusing `slot`'s if it is large enough.
@@ -253,15 +269,7 @@ impl GpuSweep {
             by_right,
             by_left,
             pairs,
-            scratch: Mutex::new(Scratch {
-                x: None,
-                y: None,
-                z: None,
-                parts: None,
-                out: None,
-                up: None,
-                down: None,
-            }),
+            scratch: Mutex::default(),
             error: Mutex::new(None),
         };
         let one = [C64::new(1.0, 0.0)];
@@ -707,95 +715,407 @@ pub(super) struct GpuOperator<'a> {
     r: usize,
 }
 
+/// Device scratch for one application of an operator.
+#[derive(Clone, Copy)]
+struct ApplyScratch {
+    y: u64,
+    z: u64,
+    parts: u64,
+    max_splits: usize,
+}
+
+/// Indices into the Lanczos scalars buffer.
+struct Slots;
+
+impl Slots {
+    const ZERO: usize = 2 * KRYLOV_DIM;
+    const NORM: usize = 2 * KRYLOV_DIM + 1;
+    const COUNT: usize = 2 * KRYLOV_DIM + 2;
+    fn alpha(j: usize) -> usize {
+        j
+    }
+    fn beta(j: usize) -> usize {
+        KRYLOV_DIM + j
+    }
+}
+
+/// `mps_krylov.comp` on vectors of `n` elements.
+#[derive(Clone, Copy)]
+struct Vectors {
+    n: usize,
+    /// Workgroups of a dot product's first pass (at most 256).
+    groups: usize,
+    partials: u64,
+    scalars: u64,
+}
+
+impl Vectors {
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &self,
+        ctx: &GpuContext,
+        cmd: vk::CommandBuffer,
+        (a, b, c): (u64, u64, u64),
+        mode: usize,
+        (slot0, slot1): (usize, usize),
+        (m, stride, op): (usize, usize, usize),
+        workgroups: u32,
+    ) {
+        let push = PushBytes::default()
+            .addr(a)
+            .addr(b)
+            .addr(c)
+            .addr(self.scalars)
+            .u32s(&[self.n, mode, slot0, slot1, self.groups, m, stride, op]);
+        ctx.mps_dispatch(cmd, MpsKernel::Krylov, &push.0, [workgroups, 1, 1]);
+    }
+
+    /// `s[slot] = re⟨a, b⟩`, or `‖a‖` with `sqrt` (and `a = b`), followed
+    /// by a barrier.
+    fn dot(
+        &self,
+        ctx: &GpuContext,
+        cmd: vk::CommandBuffer,
+        a: u64,
+        b: u64,
+        slot: usize,
+        sqrt: bool,
+    ) {
+        let p = self.partials;
+        self.dispatch(
+            ctx,
+            cmd,
+            (a, b, p),
+            0,
+            (0, 0),
+            (0, 0, 0),
+            self.groups as u32,
+        );
+        compute_barrier(ctx, cmd);
+        self.dispatch(ctx, cmd, (p, p, p), 1, (slot, 0), (0, 0, sqrt as usize), 1);
+        compute_barrier(ctx, cmd);
+    }
+
+    /// `c −= s[x] a + s[y] b`.
+    #[allow(clippy::too_many_arguments)]
+    fn update(
+        &self,
+        ctx: &GpuContext,
+        cmd: vk::CommandBuffer,
+        c: u64,
+        a: u64,
+        b: u64,
+        x: usize,
+        y: usize,
+    ) {
+        self.dispatch(ctx, cmd, (a, b, c), 2, (x, y), (0, 0, 0), groups(self.n));
+    }
+
+    /// `c = a / s[slot]`, or zero when `s[slot]` is zero.
+    fn scale(&self, ctx: &GpuContext, cmd: vk::CommandBuffer, a: u64, c: u64, slot: usize) {
+        self.dispatch(ctx, cmd, (a, a, c), 3, (slot, 0), (0, 0, 0), groups(self.n));
+    }
+
+    /// `c = Σ_{k < m} coeffs[k] v_k` for vectors `v_k` stored back to back
+    /// from `basis`.
+    fn combine(
+        &self,
+        ctx: &GpuContext,
+        cmd: vk::CommandBuffer,
+        basis: u64,
+        coeffs: u64,
+        m: usize,
+        c: u64,
+    ) {
+        self.dispatch(
+            ctx,
+            cmd,
+            (basis, coeffs, c),
+            4,
+            (0, 0),
+            (m, self.n, 0),
+            groups(self.n),
+        );
+    }
+}
+
 impl GpuOperator<'_> {
-    fn try_apply(&self, x: &[C64], out: &mut [C64]) -> Result<(), Error> {
+    fn len(&self) -> usize {
+        self.l * self.phys * self.r
+    }
+
+    /// Scratch for [`record_apply`](Self::record_apply), allocated in `s`.
+    fn apply_scratch(&self, s: &mut Scratch) -> Result<ApplyScratch, Error> {
+        let ctx = &self.sweep.ctx;
         let (l, r, phys) = (self.l, self.r, self.phys);
         let (dl, dr) = (self.left.blocks, self.right.blocks);
-        let len = l * phys * r;
+        let bytes = self.len() as u64 * COMPLEX;
+        // At most this many partial products of the second contraction.
+        let max_splits = (dr * r / MIN_SPLIT_K as usize).max(1);
+        let y = (dl * l * phys * r) as u64 * COMPLEX;
+        Ok(ApplyScratch {
+            y: ensure(ctx, &mut s.y, y, Memory::Device)?.device_address(),
+            z: ensure(ctx, &mut s.z, bytes * dr as u64, Memory::Device)?.device_address(),
+            parts: ensure(ctx, &mut s.parts, bytes * max_splits as u64, Memory::Device)?
+                .device_address(),
+            max_splits,
+        })
+    }
+
+    /// Record `out = H x` for vectors at device addresses `x` and `out`.
+    fn record_apply(&self, cmd: vk::CommandBuffer, x: u64, out: u64, s: ApplyScratch) {
+        let ctx = &self.sweep.ctx;
+        let (l, r, phys) = (self.l, self.r, self.phys);
+        let (dl, dr) = (self.left.blocks, self.right.blocks);
+        let (left, right) = (self.left.addr(), self.right.addr());
+        // y_a = L_a θ, θ as l × phys·r.
+        gemm(
+            ctx,
+            cmd,
+            Gemm {
+                a: Operand::new(left, 0, l, 1),
+                b: Operand::new(x, 0, phys * r, 1),
+                c: s.y,
+                c_batch: 0,
+                c_row: phys * r,
+                m: dl * l,
+                n: phys * r,
+                k: l,
+                batch: 1,
+            },
+            None,
+        );
+        compute_barrier(ctx, cmd);
+        // Z[(row, o), (c, col)] = Σ W … y_a[row, (i, col)].
+        mix(
+            ctx,
+            cmd,
+            Mix {
+                input: s.y,
+                output: s.z,
+                table: self.table,
+                blocks: dr,
+                phys,
+                rows: l,
+                cols: r,
+                in_strides: [l * phys * r, phys * r, r, 1],
+                out_strides: [r, phys * dr * r, dr * r, 1],
+            },
+        );
+        compute_barrier(ctx, cmd);
+        // out = Z · [R_0ᵀ; …; R_{D−1}ᵀ].
+        gemm(
+            ctx,
+            cmd,
+            Gemm {
+                a: Operand::new(s.z, 0, dr * r, 1),
+                b: Operand::new(right, 0, r, 1),
+                c: out,
+                c_batch: 0,
+                c_row: r,
+                m: phys * l,
+                n: r,
+                k: dr * r,
+                batch: 1,
+            },
+            Some((s.parts, s.max_splits)),
+        );
+    }
+
+    fn try_apply(&self, x: &[C64], out: &mut [C64]) -> Result<(), Error> {
+        let len = self.len();
         let bytes = len as u64 * COMPLEX;
         let ctx = &self.sweep.ctx;
         let mut guard = self.sweep.scratch.lock().expect("GPU scratch lock");
         let s = &mut *guard;
-        // At most this many partial products of the second contraction.
-        let max_splits = (dr * r / MIN_SPLIT_K as usize).max(1);
+        let scratch = self.apply_scratch(s)?;
         let xa = ensure(ctx, &mut s.x, bytes, Memory::Device)?.device_address();
-        let y = ensure(
-            ctx,
-            &mut s.y,
-            (dl * l) as u64 * phys as u64 * r as u64 * COMPLEX,
-            Memory::Device,
-        )?
-        .device_address();
-        let z = ensure(ctx, &mut s.z, bytes * dr as u64, Memory::Device)?.device_address();
-        let parts =
-            ensure(ctx, &mut s.parts, bytes * max_splits as u64, Memory::Device)?.device_address();
         let outa = ensure(ctx, &mut s.out, bytes, Memory::Device)?.device_address();
         ensure(ctx, &mut s.down, bytes, Memory::Download)?;
         let up = ensure(ctx, &mut s.up, bytes, Memory::Upload)?;
         up.write(bytes_of(x));
         let buffer = |b: &Option<Buffer>| b.as_ref().expect("allocated").buffer;
         let (up, xb, outb, down) = (buffer(&s.up), buffer(&s.x), buffer(&s.out), buffer(&s.down));
-        let (left, right) = (self.left.addr(), self.right.addr());
         ctx.submit(|cmd| {
             copy(ctx, cmd, up, xb, bytes);
             compute_barrier(ctx, cmd);
-            // y_a = L_a θ, θ as l × phys·r.
-            gemm(
-                ctx,
-                cmd,
-                Gemm {
-                    a: Operand::new(left, 0, l, 1),
-                    b: Operand::new(xa, 0, phys * r, 1),
-                    c: y,
-                    c_batch: 0,
-                    c_row: phys * r,
-                    m: dl * l,
-                    n: phys * r,
-                    k: l,
-                    batch: 1,
-                },
-                None,
-            );
-            compute_barrier(ctx, cmd);
-            // Z[(row, o), (c, col)] = Σ W … y_a[row, (i, col)].
-            mix(
-                ctx,
-                cmd,
-                Mix {
-                    input: y,
-                    output: z,
-                    table: self.table,
-                    blocks: dr,
-                    phys,
-                    rows: l,
-                    cols: r,
-                    in_strides: [l * phys * r, phys * r, r, 1],
-                    out_strides: [r, phys * dr * r, dr * r, 1],
-                },
-            );
-            compute_barrier(ctx, cmd);
-            // out = Z · [R_0ᵀ; …; R_{D−1}ᵀ].
-            gemm(
-                ctx,
-                cmd,
-                Gemm {
-                    a: Operand::new(z, 0, dr * r, 1),
-                    b: Operand::new(right, 0, r, 1),
-                    c: outa,
-                    c_batch: 0,
-                    c_row: r,
-                    m: phys * l,
-                    n: r,
-                    k: dr * r,
-                    batch: 1,
-                },
-                Some((parts, max_splits)),
-            );
+            self.record_apply(cmd, xa, outa, scratch);
             compute_barrier(ctx, cmd);
             copy(ctx, cmd, outb, down, bytes);
         })?;
         let result = s.down.as_ref().expect("allocated").mapped(bytes as usize)?;
         out.copy_from_slice(&read_complex(result, len));
+        Ok(())
+    }
+
+    /// `amps ← exp(-iHt) amps` by the same Lanczos time-stepping as
+    /// [`krylov_evolve`](crate::statevector::evolve::krylov_evolve), with
+    /// the recurrence in GPU memory: each batch of steps is one submission,
+    /// and only its scalars α and β come back. The step size and the small
+    /// exponential `exp(-iTΔt)` are worked out on the CPU, and the new state
+    /// is combined from the basis on the GPU.
+    pub(super) fn evolve(&self, amps: &mut [C64], time: f64) -> Result<(), Error> {
+        let len = self.len();
+        assert_eq!(amps.len(), len);
+        let bytes = len as u64 * COMPLEX;
+        let ctx = &self.sweep.ctx;
+        let mut guard = self.sweep.scratch.lock().expect("GPU scratch lock");
+        let s = &mut *guard;
+        let scratch = self.apply_scratch(s)?;
+        let psi = ensure(ctx, &mut s.x, bytes, Memory::Device)?.device_address();
+        let w = ensure(ctx, &mut s.out, bytes, Memory::Device)?.device_address();
+        let basis_bytes = bytes * (KRYLOV_DIM + 1) as u64;
+        let basis = ensure(ctx, &mut s.basis, basis_bytes, Memory::Device)?.device_address();
+        let partials =
+            ensure(ctx, &mut s.partials, 256 * COMPLEX, Memory::Device)?.device_address();
+        let scalar_bytes = Slots::COUNT as u64 * 8;
+        let scalars = ensure(ctx, &mut s.scalars, scalar_bytes, Memory::Device)?;
+        let (scalars, scalars_buffer) = (scalars.device_address(), scalars.buffer);
+        let scalars_down = ensure(ctx, &mut s.scalars_down, scalar_bytes, Memory::Download)?.buffer;
+        let coeffs = ensure(
+            ctx,
+            &mut s.coeffs,
+            KRYLOV_DIM as u64 * COMPLEX,
+            Memory::Upload,
+        )?
+        .device_address();
+        ensure(ctx, &mut s.down, bytes, Memory::Download)?;
+        let up = ensure(ctx, &mut s.up, bytes, Memory::Upload)?;
+        up.write(bytes_of(amps));
+        let buffer = |b: &Option<Buffer>| b.as_ref().expect("allocated").buffer;
+        let (up, psi_buffer, down) = (buffer(&s.up), buffer(&s.x), buffer(&s.down));
+
+        let v = |k: usize| basis + (k * len) as u64 * COMPLEX;
+        let vectors = Vectors {
+            n: len,
+            groups: len.div_ceil(256).clamp(1, 256),
+            partials,
+            scalars,
+        };
+        // `v_0 = ψ / ‖ψ‖`, with ‖ψ‖ in its slot; the scalars then come back.
+        let normalise = |cmd| {
+            vectors.dot(ctx, cmd, psi, psi, Slots::NORM, true);
+            vectors.scale(ctx, cmd, psi, v(0), Slots::NORM);
+            compute_barrier(ctx, cmd);
+            copy(ctx, cmd, scalars_buffer, scalars_down, scalar_bytes);
+        };
+        let read_scalars = |s: &Scratch| -> Result<Vec<f64>, Error> {
+            let raw = s
+                .scalars_down
+                .as_ref()
+                .expect("allocated")
+                .mapped(Slots::COUNT * 8)?;
+            Ok(raw
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|b| f64::from_le_bytes(*b))
+                .collect())
+        };
+
+        ctx.submit(|cmd| {
+            // SAFETY: recording; the buffer holds `scalar_bytes`.
+            unsafe {
+                ctx.device
+                    .cmd_fill_buffer(cmd, scalars_buffer, 0, scalar_bytes, 0)
+            };
+            copy(ctx, cmd, up, psi_buffer, bytes);
+            compute_barrier(ctx, cmd);
+            normalise(cmd);
+        })?;
+        let mut beta0 = read_scalars(s)?[Slots::NORM];
+
+        let tolerance = STEP_TOLERANCE.max(10.0 * f64::EPSILON);
+        // Steps per submission: about 20 GFLOP of products, so a submission
+        // stays well inside driver timeouts at any bond dimension.
+        let (l, r, phys) = (self.l, self.r, self.phys);
+        let (dl, dr) = (self.left.blocks, self.right.blocks);
+        let flops = 8 * phys * l * r * (dl * l + dr * r);
+        let batch = (20_000_000_000 / flops.max(1)).clamp(1, KRYLOV_DIM);
+        let mut remaining = time;
+        while remaining != 0.0 {
+            if beta0 == 0.0 {
+                break;
+            }
+            let (mut alphas, mut betas) = (Vec::new(), Vec::new());
+            let mut closed = false;
+            // The Krylov space closes after at most `len` steps.
+            let steps = KRYLOV_DIM.min(len);
+            let mut k = 0;
+            while k < steps && !closed {
+                let end = (k + batch).min(steps);
+                ctx.submit(|cmd| {
+                    for j in k..end {
+                        self.record_apply(cmd, v(j), w, scratch);
+                        compute_barrier(ctx, cmd);
+                        // α_j = ⟨v_j, w⟩; w −= α_j v_j + β_{j−1} v_{j−1}.
+                        vectors.dot(ctx, cmd, v(j), w, Slots::alpha(j), false);
+                        let previous = if j == 0 {
+                            Slots::ZERO
+                        } else {
+                            Slots::beta(j - 1)
+                        };
+                        vectors.update(
+                            ctx,
+                            cmd,
+                            w,
+                            v(j),
+                            v(j.saturating_sub(1)),
+                            Slots::alpha(j),
+                            previous,
+                        );
+                        compute_barrier(ctx, cmd);
+                        // β_j = ‖w‖; v_{j+1} = w / β_j.
+                        vectors.dot(ctx, cmd, w, w, Slots::beta(j), true);
+                        vectors.scale(ctx, cmd, w, v(j + 1), Slots::beta(j));
+                        compute_barrier(ctx, cmd);
+                    }
+                    copy(ctx, cmd, scalars_buffer, scalars_down, scalar_bytes);
+                })?;
+                let values = read_scalars(s)?;
+                for j in k..end {
+                    alphas.push(values[Slots::alpha(j)]);
+                    betas.push(values[Slots::beta(j)]);
+                    if betas[j] <= breakdown(&alphas) {
+                        closed = true;
+                        break;
+                    }
+                }
+                k = end;
+            }
+            let m = alphas.len();
+            // β coupling the basis to the next Lanczos vector; zero when the
+            // Krylov space is invariant and the step is exact.
+            let residual = if closed { 0.0 } else { betas[m - 1] };
+
+            let mut dt = remaining;
+            let y = loop {
+                let y = tridiagonal_exp(&alphas, &betas[..m - 1], dt);
+                if residual * y[m - 1].norm() <= tolerance {
+                    break y;
+                }
+                dt /= 2.0;
+                if dt.abs() <= f64::EPSILON * time.abs() {
+                    return Err(Error::NotConverged(
+                        "Krylov evolution step shrank to zero".into(),
+                    ));
+                }
+            };
+
+            // ψ ← ‖ψ‖ Σₖ yₖ vₖ, then the next step's ‖ψ‖ and v_0.
+            let c: Vec<C64> = y.iter().map(|&yk| yk * beta0).collect();
+            s.coeffs.as_mut().expect("allocated").write(bytes_of(&c));
+            ctx.submit(|cmd| {
+                vectors.combine(ctx, cmd, basis, coeffs, m, psi);
+                compute_barrier(ctx, cmd);
+                normalise(cmd);
+            })?;
+            beta0 = read_scalars(s)?[Slots::NORM];
+            remaining = if dt == remaining { 0.0 } else { remaining - dt };
+        }
+        ctx.submit(|cmd| copy(ctx, cmd, psi_buffer, down, bytes))?;
+        let result = s.down.as_ref().expect("allocated").mapped(bytes as usize)?;
+        amps.copy_from_slice(&read_complex(result, len));
         Ok(())
     }
 }
@@ -870,6 +1190,10 @@ mod tests {
             .zip(b)
             .map(|(x, y)| (x - y).norm())
             .fold(0.0, f64::max)
+    }
+
+    fn norm(a: &[C64]) -> f64 {
+        a.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt()
     }
 
     fn env_diff(a: &Env, b: &Env) -> f64 {
@@ -949,6 +1273,13 @@ mod tests {
                 "one site {i}: {}",
                 max_diff(&want, &got)
             );
+            // Krylov evolution with the recurrence on the GPU, against the
+            // CPU's; long enough to take several Krylov steps.
+            let (mut want, mut got) = (x.clone(), x.clone());
+            cpu.one_site(i, &mpo, l, r).evolve(&mut want, -0.9).unwrap();
+            gpu.one_site(i, &mpo, l, r).evolve(&mut got, -0.9).unwrap();
+            let diff = max_diff(&want, &got);
+            assert!(diff < 1e-10 * norm(&x), "evolve one site {i}: {diff}");
 
             if i + 1 < n {
                 let r2 = mps.tensors[i + 1].right;
@@ -963,6 +1294,12 @@ mod tests {
                     "two sites {i}: {}",
                     max_diff(&want, &got)
                 );
+
+                let (mut want, mut got) = (x.clone(), x.clone());
+                cpu.two_site(i, &mpo, l, r2).evolve(&mut want, 0.9).unwrap();
+                gpu.two_site(i, &mpo, l, r2).evolve(&mut got, 0.9).unwrap();
+                let diff = max_diff(&want, &got);
+                assert!(diff < 1e-10 * norm(&x), "evolve two sites {i}: {diff}");
             }
         }
     }

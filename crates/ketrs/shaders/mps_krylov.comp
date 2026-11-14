@@ -1,0 +1,87 @@
+#version 460
+// Vector steps of a Lanczos recurrence kept in GPU memory, chosen by `mode`
+// (`s` is an array of doubles, the recurrence's scalars):
+//   0: c[g] = Σ conj(a[i]) b[i] over workgroup g's share of [0, n), for
+//      `groups` workgroups;
+//   1: s[slot0] = re(Σ_{g < groups} a[g]), or its square root when `op` is
+//      1 (one workgroup, after mode 0);
+//   2: c[i] -= s[slot0] a[i] + s[slot1] b[i];
+//   3: c[i] = a[i] · (1 / s[slot0]), or 0 when s[slot0] is 0;
+//   4: c[i] = Σ_{k < m} b[k] a[k · stride + i].
+// Sums run in a fixed order, so results don't depend on scheduling.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer Vec { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer Scalars { double s[]; };
+
+layout(push_constant) uniform Push {
+    uvec2 a_addr, b_addr, c_addr, s_addr;
+    uint n, mode, slot0, slot1, groups, m, stride, op;
+};
+
+shared dvec2 part[256];
+
+dvec2 cmul(dvec2 x, dvec2 y) {
+    return dvec2(x.x * y.x - x.y * y.y, x.x * y.y + x.y * y.x);
+}
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    if (mode <= 1u) {
+        dvec2 acc = dvec2(0.0);
+        if (mode == 0u) {
+            Vec a = Vec(a_addr);
+            Vec b = Vec(b_addr);
+            uint chunk = (n + groups - 1u) / groups;
+            uint begin = gl_WorkGroupID.x * chunk;
+            uint end = min(begin + chunk, n);
+            for (uint i = begin + t; i < end; i += 256u) {
+                dvec2 x = a.v[i];
+                dvec2 y = b.v[i];
+                acc += dvec2(x.x * y.x + x.y * y.y, x.x * y.y - x.y * y.x);
+            }
+        } else if (t < groups) {
+            acc = Vec(a_addr).v[t];
+        }
+        part[t] = acc;
+        barrier();
+        for (uint width = 128u; width > 0u; width >>= 1u) {
+            if (t < width) {
+                part[t] += part[t + width];
+            }
+            barrier();
+        }
+        if (t == 0u) {
+            if (mode == 0u) {
+                Vec(c_addr).v[gl_WorkGroupID.x] = part[0];
+            } else {
+                double r = part[0].x;
+                Scalars(s_addr).s[slot0] = op == 1u ? sqrt(r) : r;
+            }
+        }
+        return;
+    }
+
+    Vec a = Vec(a_addr);
+    Vec b = Vec(b_addr);
+    Vec c = Vec(c_addr);
+    Scalars s = Scalars(s_addr);
+    uint step = gl_NumWorkGroups.x * 256u;
+    for (uint i = gl_GlobalInvocationID.x; i < n; i += step) {
+        if (mode == 2u) {
+            c.v[i] = c.v[i] - s.s[slot0] * a.v[i] - s.s[slot1] * b.v[i];
+        } else if (mode == 3u) {
+            double d = s.s[slot0];
+            c.v[i] = d == 0.0 ? dvec2(0.0) : a.v[i] * (1.0 / d);
+        } else {
+            dvec2 acc = dvec2(0.0);
+            for (uint k = 0u; k < m; k++) {
+                acc += cmul(b.v[k], a.v[k * stride + i]);
+            }
+            c.v[i] = acc;
+        }
+    }
+}
