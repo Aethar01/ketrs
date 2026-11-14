@@ -1033,3 +1033,23 @@ def test_register_condition_else_branch_and_reset():
     bits = state.run(from_qiskit(qc))
     assert bits == [0, 1, 1]
     assert state.probability_one(1) == pytest.approx(0.0)  # reset after measuring
+
+
+@gpu
+def test_mps_sweeps_on_gpu_match_cpu():
+    n = 10
+    terms = [("ZZ", [i, j], 1.0 / (j - i)) for i in range(n) for j in range(i + 1, min(n, i + 5))]
+    terms += [("XZZY", [i, i + 1, i + 2, i + 4], 0.3) for i in range(n - 4)]
+    terms += [("X", [q], 0.7) for q in range(n)]
+    h = pauli_sum_from_qiskit(SparsePauliOp.from_sparse_list(terms, num_qubits=n))
+    states = []
+    for use_gpu in (False, True):
+        mps = ketrs.MPS.random(n, bond=4, seed=2, max_bond=16, cutoff=1e-12)
+        mps.gpu = use_gpu
+        assert mps.gpu == use_gpu
+        energy, _, _ = mps.dmrg(h, max_bond=16, max_sweeps=4)
+        mps.tdvp(h, 0.5, steps=2)
+        states.append((energy, mps.to_statevector().amplitudes()))
+    (e_cpu, cpu), (e_gpu, gpu_amps) = states
+    assert e_gpu == pytest.approx(e_cpu, abs=1e-9)
+    np.testing.assert_allclose(gpu_amps, cpu, atol=1e-8)

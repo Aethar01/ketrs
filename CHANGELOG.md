@@ -4,6 +4,16 @@
 
 ### MPS
 
+- `Mps::tdvp` and `Mps::dmrg` can run on a GPU (the `gpu` feature):
+  `Mps::set_gpu(Some(ctx))` in Rust, `mps.gpu = True` in Python. The
+  sweeps' environments then live in GPU memory and the one- and two-site
+  effective Hamiltonians are applied there, as complex matrix products
+  around a sparse step for the MPO, which is nearly all of a sweep's
+  work. The tensors, SVDs, Krylov and Lanczos iterations, subspace
+  expansion and DMRG noise stay on the CPU, so results match the CPU path
+  up to rounding. It needs 64-bit floats and buffer device addresses
+  (`GpuContext::supports_mps`). The CPU path is unchanged and stays the
+  default.
 - `Mps::dmrg` adds noise in early sweeps, so Hamiltonians whose terms span
   more than two sites no longer trap it in metastable states. One example
   is a lattice gauge theory whose hops act on four qubits: from its

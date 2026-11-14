@@ -186,6 +186,41 @@ impl PyMps {
         self.inner.truncation_error()
     }
 
+    /// Whether `tdvp` and `dmrg` run on the GPU (default False). Setting it
+    /// True keeps their environments in GPU memory and applies the
+    /// effective Hamiltonians there, nearly all of a sweep's work; tensors,
+    /// SVDs and Krylov steps stay on the CPU, so results match the CPU's up
+    /// to rounding. Worth it from bond dimensions of a few tens. Needs a
+    /// build with the `gpu` feature and a GPU with 64-bit floats.
+    #[getter]
+    fn gpu(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        return self.inner.gpu().is_some();
+        #[cfg(not(feature = "gpu"))]
+        false
+    }
+
+    #[setter]
+    fn set_gpu(&mut self, enabled: bool) -> PyResult<()> {
+        #[cfg(feature = "gpu")]
+        {
+            let ctx = if enabled {
+                Some(super::gpu::context()?)
+            } else {
+                None
+            };
+            self.inner.set_gpu(ctx).map_err(to_py_err)
+        }
+        #[cfg(not(feature = "gpu"))]
+        if enabled {
+            Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "ketrs was built without GPU support (the `gpu` feature)",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     #[getter]
     fn max_bond(&self) -> usize {
         self.inner.options().max_bond

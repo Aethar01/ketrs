@@ -10,7 +10,7 @@ use rand::rngs::StdRng;
 use std::sync::{Arc, OnceLock};
 
 /// One GPU context per process, created on first use.
-fn context() -> PyResult<Arc<GpuContext>> {
+pub(crate) fn context() -> PyResult<Arc<GpuContext>> {
     static CONTEXT: OnceLock<Result<Arc<GpuContext>, String>> = OnceLock::new();
     CONTEXT
         .get_or_init(|| GpuContext::new().map_err(|e| e.to_string()))
