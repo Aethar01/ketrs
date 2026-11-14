@@ -22,6 +22,7 @@ use super::mpo::Mpo;
 use super::{Mps, Tensor};
 use faer::{Mat, MatRef};
 use num_complex::Complex64 as C64;
+use rayon::prelude::*;
 
 /// Directions of `H|ψ⟩` whose singular value is below this, relative to
 /// the norm of all its channels at the bond, are not added.
@@ -73,7 +74,7 @@ impl Mps {
             };
             env = Env {
                 blocks: y
-                    .iter()
+                    .par_iter()
                     .map(|ya| matmul(expanded.as_right_matrix().conjugate(), ya.transpose()))
                     .collect(),
             };
@@ -124,7 +125,7 @@ impl Mps {
             let expanded = Tensor::from_matrix(expanded.as_ref(), l, r + k);
             env = Env {
                 blocks: y
-                    .iter()
+                    .par_iter()
                     .map(|yb| matmul(expanded.as_left_matrix().adjoint(), yb.as_ref()))
                     .collect(),
             };

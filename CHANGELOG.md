@@ -12,8 +12,15 @@
   work. The tensors, SVDs, Krylov and Lanczos iterations, subspace
   expansion and DMRG noise stay on the CPU, so results match the CPU path
   up to rounding. It needs 64-bit floats and buffer device addresses
-  (`GpuContext::supports_mps`). The CPU path is unchanged and stays the
-  default.
+  (`GpuContext::supports_mps`). The CPU path stays the default.
+- TDVP and DMRG sweeps on the CPU use all cores. The one- and two-site
+  effective Hamiltonians split by rows of the left bond, one chunk per
+  thread with nothing to combine, and environment updates and the subspace
+  expansion split by MPO channel. Before, nearly every matrix product in a
+  sweep was too small for faer to split, so sweeps ran on one core. A
+  192-qubit TDVP step at bond dimension 64 went from 416 s to 132 s on
+  three threads; one thread is also about 25% faster on two-site
+  products, as the sparse MPO step now runs along contiguous rows.
 - `Mps::dmrg` adds noise in early sweeps, so Hamiltonians whose terms span
   more than two sites no longer trap it in metastable states. One example
   is a lattice gauge theory whose hops act on four qubits: from its

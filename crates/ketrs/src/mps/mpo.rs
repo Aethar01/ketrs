@@ -149,6 +149,58 @@ impl Mpo {
     }
 }
 
+/// A sparse mixing table for the effective Hamiltonians: for each output
+/// key `block · phys + o`, the `(input block, input physical index,
+/// factor)` terms.
+pub(super) type Rows = Vec<Vec<(usize, usize, C64)>>;
+
+/// For a single MPO site, keyed by its right channel and output physical
+/// index: `out[b][p_out] = Σ W[a][b] … in[a][p_in]`.
+pub(super) fn right_keyed(w: &MpoSite) -> Rows {
+    let mut rows = vec![Vec::new(); w.right * 2];
+    for &(a, b, p, coeff) in &w.entries {
+        for p_out in 0..2 {
+            let (p_in, v) = pauli_entry(p, p_out);
+            rows[b * 2 + p_out].push((a, p_in, coeff * v));
+        }
+    }
+    rows
+}
+
+/// The mirror of [`right_keyed`], keyed by the left channel.
+pub(super) fn left_keyed(w: &MpoSite) -> Rows {
+    let mut rows = vec![Vec::new(); w.left * 2];
+    for &(a, b, p, coeff) in &w.entries {
+        for p_out in 0..2 {
+            let (p_in, v) = pauli_entry(p, p_out);
+            rows[a * 2 + p_out].push((b, p_in, coeff * v));
+        }
+    }
+    rows
+}
+
+/// Two neighbouring MPO sites contracted over their shared bond, keyed by
+/// the right channel of the second and the output pair `2 p_out + q_out`.
+pub(super) fn pair_keyed(w1: &MpoSite, w2: &MpoSite) -> Rows {
+    let mut by_left = vec![Vec::new(); w2.left];
+    for &(b, c, p, coeff) in &w2.entries {
+        by_left[b].push((c, p, coeff));
+    }
+    let mut rows = vec![Vec::new(); w2.right * 4];
+    for &(a, b, p1, c1) in &w1.entries {
+        for &(c, p2, c2) in &by_left[b] {
+            for p_out in 0..2 {
+                let (p_in, v1) = pauli_entry(p1, p_out);
+                for q_out in 0..2 {
+                    let (q_in, v2) = pauli_entry(p2, q_out);
+                    rows[c * 4 + 2 * p_out + q_out].push((a, 2 * p_in + q_in, c1 * c2 * v1 * v2));
+                }
+            }
+        }
+    }
+    rows
+}
+
 /// The single non-zero entry in row `p_out` of a Pauli matrix:
 /// `(column, value)`.
 #[inline]

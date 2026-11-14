@@ -2,16 +2,17 @@
 //! on the CPU, or on a GPU when the state has one (see
 //! [`Mps::set_gpu`](super::Mps::set_gpu)).
 
-use super::dmrg::{Env, TwoSite, update_left, update_right};
+use super::dmrg::{Env, update_left, update_right};
+use super::effective::Effective;
 #[cfg(feature = "gpu")]
 use super::gpu::{GpuOperator, GpuSweep};
 use super::mpo::Mpo;
-use super::tdvp::OneSite;
 use super::{Mps, Tensor};
 use crate::error::Error;
 use crate::statevector::krylov::LinearOperator;
 use num_complex::Complex64 as C64;
 use std::borrow::Cow;
+use std::marker::PhantomData;
 
 /// The environments of a sweep: `left[i]` covers sites `< i` and
 /// `right[i]` sites `> i`.
@@ -76,14 +77,17 @@ impl Envs {
     /// dimension `l` and `r`.
     pub(super) fn two_site<'a>(&'a self, i: usize, mpo: &Mpo, l: usize, r: usize) -> Op<'a> {
         match self {
-            Envs::Cpu { left, right } => Op::Two(TwoSite::new(
-                left[i].as_ref().expect("left environment built"),
-                right[i + 1].as_ref().expect("right environment built"),
-                &mpo.sites[i],
-                &mpo.sites[i + 1],
-                l,
-                r,
-            )),
+            Envs::Cpu { left, right } => Op::Cpu(
+                Effective::two_site(
+                    left[i].as_ref().expect("left environment built"),
+                    right[i + 1].as_ref().expect("right environment built"),
+                    &mpo.sites[i],
+                    &mpo.sites[i + 1],
+                    l,
+                    r,
+                ),
+                PhantomData,
+            ),
             #[cfg(feature = "gpu")]
             Envs::Gpu(g) => Op::Gpu(g.two_site(i, l, r)),
         }
@@ -92,13 +96,16 @@ impl Envs {
     /// The effective Hamiltonian of site `i`.
     pub(super) fn one_site<'a>(&'a self, i: usize, mpo: &'a Mpo, l: usize, r: usize) -> Op<'a> {
         match self {
-            Envs::Cpu { left, right } => Op::One(OneSite {
-                left: left[i].as_ref().expect("left environment built"),
-                right: right[i].as_ref().expect("right environment built"),
-                site: &mpo.sites[i],
-                l,
-                r,
-            }),
+            Envs::Cpu { left, right } => Op::Cpu(
+                Effective::one_site(
+                    left[i].as_ref().expect("left environment built"),
+                    right[i].as_ref().expect("right environment built"),
+                    &mpo.sites[i],
+                    l,
+                    r,
+                ),
+                PhantomData,
+            ),
             #[cfg(feature = "gpu")]
             Envs::Gpu(g) => Op::Gpu(g.one_site(i, l, r)),
         }
@@ -139,8 +146,8 @@ impl Envs {
 
 /// An effective Hamiltonian from [`Envs`].
 pub(super) enum Op<'a> {
-    Two(TwoSite<'a>),
-    One(OneSite<'a>),
+    /// The marker keeps `'a` used in builds without the `gpu` feature.
+    Cpu(Effective, PhantomData<&'a ()>),
     #[cfg(feature = "gpu")]
     Gpu(GpuOperator<'a>),
 }
@@ -148,8 +155,7 @@ pub(super) enum Op<'a> {
 impl LinearOperator<C64> for Op<'_> {
     fn apply(&self, x: &[C64], out: &mut [C64]) {
         match self {
-            Op::Two(op) => op.apply(x, out),
-            Op::One(op) => op.apply(x, out),
+            Op::Cpu(op, _) => op.apply(x, out),
             #[cfg(feature = "gpu")]
             Op::Gpu(op) => op.apply(x, out),
         }

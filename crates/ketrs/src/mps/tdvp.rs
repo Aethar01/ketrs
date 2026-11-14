@@ -22,16 +22,14 @@
 //! that starts from a product state still makes an `O(dt²)` error;
 //! overall the integrator stays second order.
 
-use super::dmrg::{Env, two_site_vector};
+use super::dmrg::two_site_vector;
 use super::envs::Envs;
-use super::linalg::{matmul, matmul_add};
-use super::mpo::{Mpo, MpoSite, pauli_entry};
+use super::mpo::Mpo;
 use super::{Absorb, Mps};
 use crate::error::Error;
 use crate::observable::PauliSum;
 use crate::statevector::evolve::krylov_evolve;
-use crate::statevector::krylov::LinearOperator;
-use faer::{Mat, MatRef};
+use faer::MatRef;
 use num_complex::Complex64 as C64;
 
 impl Mps {
@@ -149,51 +147,5 @@ impl Mps {
         let evolved = krylov_evolve(&op, &mut self.tensors[i].data, t, true);
         envs.check()?;
         evolved
-    }
-}
-
-/// The effective Hamiltonian on one site, between the environments of the
-/// sites either side.
-pub(super) struct OneSite<'a> {
-    pub(super) left: &'a Env,
-    pub(super) right: &'a Env,
-    pub(super) site: &'a MpoSite,
-    pub(super) l: usize,
-    pub(super) r: usize,
-}
-
-impl LinearOperator<C64> for OneSite<'_> {
-    fn apply(&self, x: &[C64], out: &mut [C64]) {
-        let (l, r) = (self.l, self.r);
-        let a = MatRef::from_row_major_slice(x, l, 2 * r);
-        // y_a[l, (p, r')] = Σ_l' L_a[l, l'] A[l', p, r']
-        let y: Vec<Mat<C64>> = self
-            .left
-            .blocks
-            .iter()
-            .map(|e| matmul(e.as_ref(), a))
-            .collect();
-        let mut z = vec![Mat::<C64>::zeros(l * 2, r); self.right.blocks.len()];
-        for &(ai, bi, p, coeff) in &self.site.entries {
-            for p_out in 0..2 {
-                let (p_in, v) = pauli_entry(p, p_out);
-                let f = coeff * v;
-                for row in 0..l {
-                    for col in 0..r {
-                        z[bi][(2 * row + p_out, col)] += f * y[ai][(row, p_in * r + col)];
-                    }
-                }
-            }
-        }
-        // out[(l, p), r] = Σ_b Σ_r' z_b[(l, p), r'] R_b[r, r']
-        let mut result = Mat::<C64>::zeros(l * 2, r);
-        for (zb, rb) in z.iter().zip(&self.right.blocks) {
-            matmul_add(&mut result, zb.as_ref(), rb.transpose());
-        }
-        for row in 0..l * 2 {
-            for col in 0..r {
-                out[row * r + col] = result[(row, col)];
-            }
-        }
     }
 }

@@ -44,23 +44,6 @@ where
     out
 }
 
-/// `out += a · b`.
-pub(crate) fn matmul_add<L, R>(out: &mut Mat<C64>, a: MatRef<'_, L>, b: MatRef<'_, R>)
-where
-    L: Conjugate<Canonical = C64>,
-    R: Conjugate<Canonical = C64>,
-{
-    let size = (a.nrows() * a.ncols()).max(b.nrows() * b.ncols());
-    faer_matmul(
-        out.as_mut(),
-        Accum::Add,
-        a,
-        b,
-        C64::new(1.0, 0.0),
-        par(size),
-    );
-}
-
 /// `(U, s, V)` of a thin SVD.
 type Svd = (Mat<C64>, Vec<f64>, Mat<C64>);
 

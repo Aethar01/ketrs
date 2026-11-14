@@ -18,6 +18,7 @@
 //! disjoint bonds run in parallel, in Hastings' form of TEBD.
 
 mod dmrg;
+mod effective;
 mod envs;
 mod expand;
 #[cfg(feature = "gpu")]
