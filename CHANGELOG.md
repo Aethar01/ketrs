@@ -62,6 +62,18 @@
   the triangular factor of a QR decomposition, then through the Gram
   matrix's eigendecomposition.
 
+### Time evolution
+
+- Krylov time evolution (`Statevector.evolve`, sparse-operator evolution
+  and MPS TDVP on the CPU or the GPU) grows each Lanczos basis only until
+  it covers the remaining time, checked every 8 vectors, up to 64 vectors.
+  It used to build 40 every time, and a basis that fell short took half or
+  a quarter of the time; now it takes about the longest step it covers.
+  The tolerance is unchanged (1e-13 per step). Each check is a small
+  Taylor-series exponential, and an eigendecomposition screens out the
+  checks that clearly fail first. A 192-qubit TDVP step at bond dimension
+  64 took 27% less time on the CPU and 17% less on the GPU.
+
 ## 0.1.6 (2026-11-13)
 
 ### Features

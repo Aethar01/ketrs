@@ -1,7 +1,7 @@
 //! Statevector methods for [`SparseOperator`]s.
 
 use super::DenseState;
-use super::evolve::{KRYLOV_DIM, krylov_evolve};
+use super::evolve::{KRYLOV_MAX, krylov_evolve};
 use super::krylov::LinearOperator;
 use crate::error::Error;
 use crate::scalar::{ComplexScalar, Scalar};
@@ -50,7 +50,7 @@ impl<T: ComplexScalar> DenseState<T> {
     /// same Lanczos time-stepping as [`evolve`](Self::evolve).
     pub fn evolve_sparse(&mut self, op: &SparseOperator, time: f64) -> Result<(), Error> {
         self.check_width(op)?;
-        let store = (KRYLOV_DIM + 3) * self.amps.len() * size_of::<T>() <= BASIS_MEMORY;
+        let store = (KRYLOV_MAX + 3) * self.amps.len() * size_of::<T>() <= BASIS_MEMORY;
         krylov_evolve(&op.prepare::<T>(), &mut self.amps, time, store)
     }
 }

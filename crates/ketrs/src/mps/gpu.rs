@@ -27,7 +27,9 @@ use super::mpo::{Mpo, Rows, left_keyed, pair_keyed, right_keyed};
 use crate::error::Error;
 use crate::gpu::{Buffer, GpuContext, MPS_PUSH_BYTES, Memory, MpsKernel};
 use crate::statevector::eigen::{EigenOptions, lanczos_lowest_from, tridiagonal_lowest};
-use crate::statevector::evolve::{KRYLOV_DIM, STEP_TOLERANCE, tridiagonal_exp};
+use crate::statevector::evolve::{
+    KRYLOV_CHECK, KRYLOV_MAX, STEP_TOLERANCE, krylov_covers, krylov_partial_step,
+};
 use crate::statevector::krylov::{LinearOperator, breakdown};
 use ash::vk;
 use faer::Mat;
@@ -156,7 +158,7 @@ struct Scratch {
     out: Option<Buffer>,
     up: Option<Buffer>,
     down: Option<Buffer>,
-    /// The Lanczos vectors `v_0 … v_KRYLOV_DIM`.
+    /// The Lanczos basis `v_0, v_1, …`.
     basis: Option<Buffer>,
     /// Per-workgroup partial dot products.
     partials: Option<Buffer>,
@@ -730,16 +732,17 @@ struct ApplyScratch {
 struct Slots;
 
 impl Slots {
-    const ZERO: usize = 2 * KRYLOV_DIM;
-    const NORM: usize = 2 * KRYLOV_DIM + 1;
-    const COUNT: usize = 2 * KRYLOV_DIM + 2;
-    // Step `j`'s α and β, reused every `KRYLOV_DIM` steps: a submission
-    // takes at most that many steps and needs only the previous β.
+    const PERIOD: usize = KRYLOV_MAX;
+    const ZERO: usize = 2 * Self::PERIOD;
+    const NORM: usize = 2 * Self::PERIOD + 1;
+    const COUNT: usize = 2 * Self::PERIOD + 2;
+    // Step `j`'s α and β, reused every `PERIOD` steps: a submission takes
+    // fewer steps than that and needs only the previous β.
     fn alpha(j: usize) -> usize {
-        j % KRYLOV_DIM
+        j % Self::PERIOD
     }
     fn beta(j: usize) -> usize {
-        KRYLOV_DIM + j % KRYLOV_DIM
+        Self::PERIOD + j % Self::PERIOD
     }
 }
 
@@ -1019,7 +1022,7 @@ impl GpuOperator<'_> {
         assert_eq!(amps.len(), len);
         let mut guard = self.sweep.scratch.lock().expect("GPU scratch lock");
         let s = &mut *guard;
-        let rec = self.recurrence(s, KRYLOV_DIM + 1, KRYLOV_DIM)?;
+        let rec = self.recurrence(s, KRYLOV_MAX + 1, KRYLOV_CHECK)?;
         let mut beta0 = rec.start(s, amps, true)?;
 
         let tolerance = STEP_TOLERANCE.max(10.0 * f64::EPSILON);
@@ -1028,40 +1031,42 @@ impl GpuOperator<'_> {
             if beta0 == 0.0 {
                 break;
             }
+            // As `krylov_evolve`: grow the basis until it covers the
+            // remaining time, checking every `KRYLOV_CHECK` vectors.
             let (mut alphas, mut betas) = (Vec::new(), Vec::new());
-            let mut closed = false;
+            let mut covered = None;
             // The Krylov space closes after at most `len` steps.
-            let steps = KRYLOV_DIM.min(len);
+            let steps = KRYLOV_MAX.min(len);
             let mut k = 0;
-            while k < steps && !closed {
+            'basis: while k < steps {
                 let end = (k + rec.batch).min(steps);
                 for (alpha, beta) in rec.steps(s, k..end)? {
                     alphas.push(alpha);
                     betas.push(beta);
-                    if beta <= breakdown(&alphas) {
-                        closed = true;
-                        break;
+                    let m = alphas.len();
+                    let closed = beta <= breakdown(&alphas);
+                    if closed || m.is_multiple_of(KRYLOV_CHECK) || m == steps {
+                        let residual = if closed { 0.0 } else { beta };
+                        covered =
+                            krylov_covers(&alphas, &betas[..m - 1], residual, remaining, tolerance);
+                        if covered.is_some() || closed {
+                            break 'basis;
+                        }
                     }
                 }
                 k = end;
             }
             let m = alphas.len();
-            // β coupling the basis to the next Lanczos vector; zero when the
-            // Krylov space is invariant and the step is exact.
-            let residual = if closed { 0.0 } else { betas[m - 1] };
-
-            let mut dt = remaining;
-            let y = loop {
-                let y = tridiagonal_exp(&alphas, &betas[..m - 1], dt);
-                if residual * y[m - 1].norm() <= tolerance {
-                    break y;
-                }
-                dt /= 2.0;
-                if dt.abs() <= f64::EPSILON * time.abs() {
-                    return Err(Error::NotConverged(
-                        "Krylov evolution step shrank to zero".into(),
-                    ));
-                }
+            let (dt, y) = match covered {
+                Some(y) => (remaining, y),
+                None => krylov_partial_step(
+                    &alphas,
+                    &betas[..m - 1],
+                    betas[m - 1],
+                    remaining,
+                    time,
+                    tolerance,
+                )?,
             };
 
             // ψ ← ‖ψ‖ Σₖ yₖ vₖ, then the next step's ‖ψ‖ and v_0.

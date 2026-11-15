@@ -13,10 +13,13 @@ use super::gradient::{Sets, hamil_params, hamil_push};
 use super::{BATCH_UNITS, GpuStatevector};
 use crate::error::Error;
 use crate::observable::PauliSum;
-use crate::statevector::evolve::{KRYLOV_DIM, STEP_TOLERANCE, tridiagonal_exp};
+use crate::statevector::evolve::{STEP_TOLERANCE, tridiagonal_exp};
 use crate::statevector::krylov::breakdown;
 use ash::vk;
 use num_complex::Complex64 as C64;
+
+/// Lanczos vectors per step.
+const KRYLOV_DIM: usize = 40;
 
 /// Room for the dispatches' own parameters after the Hamiltonian's: a
 /// replay takes at most ten doubles per Lanczos vector.
