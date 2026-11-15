@@ -22,7 +22,7 @@
 
 use super::envs::Envs;
 use super::linalg::{matmul, thin_svd};
-use super::mpo::{Mpo, MpoSite, left_keyed, pauli_entry, right_keyed};
+use super::mpo::{Mpo, MpoSite, left_keyed, right_keyed};
 use super::{Absorb, Mps, MpsOptions, Tensor};
 use crate::error::Error;
 use crate::observable::PauliSum;
@@ -272,19 +272,37 @@ impl Mps {
             // Each channel (partial term) gets weight `noise`, however small
             // its coefficients: normalised over all of P together, hops
             // would be drowned by large penalty terms.
-            let mut rho = Mat::<C64>::zeros(side, side);
-            for p in perturbation {
-                let w = weight(p.as_ref());
-                if w == 0.0 {
-                    continue;
-                }
-                let scale = C64::new(noise * total / w, 0.0);
-                let gram = match absorb {
-                    Absorb::Right => matmul(p.as_ref(), p.adjoint()),
-                    Absorb::Left => matmul(p.adjoint(), p.as_ref()),
-                };
-                rho += Mat::<C64>::from_fn(side, side, |r, c| scale * gram[(r, c)]);
+            // ρ = Σ_c s_c P_c P_c† (P_c† P_c moving left) is one product of
+            // the channels side by side, each scaled by √s_c.
+            let blocks: Vec<Mat<C64>> = perturbation
+                .iter()
+                .filter_map(|p| {
+                    let w = weight(p.as_ref());
+                    if w == 0.0 {
+                        return None;
+                    }
+                    let scale = (noise * total / w).sqrt();
+                    Some(match absorb {
+                        Absorb::Right => {
+                            Mat::<C64>::from_fn(side, p.ncols(), |r, c| p[(r, c)] * scale)
+                        }
+                        Absorb::Left => {
+                            Mat::<C64>::from_fn(side, p.nrows(), |r, c| p[(c, r)].conj() * scale)
+                        }
+                    })
+                })
+                .collect();
+            let width: usize = blocks.iter().map(|b| b.ncols()).sum();
+            let mut stacked = Mat::<C64>::zeros(side, width);
+            let mut at = 0;
+            for block in &blocks {
+                stacked
+                    .as_mut()
+                    .subcols_mut(at, block.ncols())
+                    .copy_from(block);
+                at += block.ncols();
             }
+            let rho = matmul(stacked.as_ref(), stacked.adjoint());
             // Off θ's basis: Q ρ Q with Q = 1 − own·own†.
             let project = |m: MatRef<'_, C64>| -> Mat<C64> {
                 let mut out = m.to_owned();
@@ -358,25 +376,30 @@ fn left_perturbation(env: &Env, w: &MpoSite, theta: &[C64], l: usize, r: usize) 
     // y_a[l, (p, q, r)] = Σ_l' L_a[l, l'] θ[l', p, q, r]
     let y: Vec<Mat<C64>> = env
         .blocks
-        .iter()
+        .par_iter()
         .map(|e| matmul(e.as_ref(), theta))
         .collect();
-    let mut out = vec![Mat::<C64>::zeros(2 * l, 2 * r); w.right];
-    for &(a, b, p, coeff) in &w.entries {
-        for p_out in 0..2 {
-            let (p_in, val) = pauli_entry(p, p_out);
-            let f = coeff * val;
-            for row in 0..l {
-                for q in 0..2 {
-                    for col in 0..r {
-                        out[b][(2 * row + p_out, q * r + col)] +=
-                            f * y[a][(row, (2 * p_in + q) * r + col)];
+    let rows = right_keyed(w);
+    (0..w.right)
+        .into_par_iter()
+        .map(|b| {
+            let mut out = Mat::<C64>::zeros(2 * l, 2 * r);
+            for p_out in 0..2 {
+                for &(a, p_in, f) in &rows[b * 2 + p_out] {
+                    for q in 0..2 {
+                        for col in 0..r {
+                            let y_col = y[a].col_as_slice((2 * p_in + q) * r + col);
+                            let out_col = out.col_as_slice_mut(q * r + col);
+                            for (row, &v) in y_col.iter().enumerate() {
+                                out_col[2 * row + p_out] += f * v;
+                            }
+                        }
                     }
                 }
             }
-        }
-    }
-    out
+            out
+        })
+        .collect()
 }
 
 /// The mirror of [`left_perturbation`] for a split moving left: for each
@@ -386,22 +409,28 @@ fn right_perturbation(env: &Env, w: &MpoSite, theta: &[C64], l: usize, r: usize)
     // z_c[(l, p, q), r] = Σ_r' θ[l, p, q, r'] R_c[r, r']
     let z: Vec<Mat<C64>> = env
         .blocks
-        .iter()
+        .par_iter()
         .map(|e| matmul(theta, e.transpose()))
         .collect();
-    let mut out = vec![Mat::<C64>::zeros(2 * l, 2 * r); w.left];
-    for &(a, c, p, coeff) in &w.entries {
-        for q_out in 0..2 {
-            let (q_in, val) = pauli_entry(p, q_out);
-            let f = coeff * val;
-            for row in 0..2 * l {
-                for col in 0..r {
-                    out[a][(row, q_out * r + col)] += f * z[c][(2 * row + q_in, col)];
+    let rows = left_keyed(w);
+    (0..w.left)
+        .into_par_iter()
+        .map(|a| {
+            let mut out = Mat::<C64>::zeros(2 * l, 2 * r);
+            for q_out in 0..2 {
+                for &(c, q_in, f) in &rows[a * 2 + q_out] {
+                    for col in 0..r {
+                        let z_col = z[c].col_as_slice(col);
+                        let out_col = out.col_as_slice_mut(q_out * r + col);
+                        for (row, v) in out_col.iter_mut().enumerate() {
+                            *v += f * z_col[2 * row + q_in];
+                        }
+                    }
                 }
             }
-        }
-    }
-    out
+            out
+        })
+        .collect()
 }
 
 /// Two neighbouring sites contracted, row-major `(l, p, q, r)` to match
