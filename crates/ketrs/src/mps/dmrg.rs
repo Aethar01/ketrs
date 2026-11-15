@@ -130,11 +130,6 @@ impl Mps {
             ));
         }
         let mpo = self.mpo(hamiltonian)?;
-        if self.symmetry.is_some() && options.noise > 0.0 {
-            return Err(Error::InvalidArgument(
-                "DMRG noise on an MPS with charges isn't supported yet".into(),
-            ));
-        }
         self.set_options(MpsOptions {
             max_bond: options.max_bond,
             cutoff: options.cutoff,
@@ -259,6 +254,9 @@ impl Mps {
         noise: f64,
         absorb: Absorb,
     ) {
+        if self.symmetry.is_some() {
+            return self.split_perturbed_symmetric(i, theta, perturbation, noise, absorb);
+        }
         let (rows, cols) = (theta.nrows(), theta.ncols());
         let weight = |m: MatRef<'_, C64>| -> f64 {
             (0..m.nrows())
@@ -371,7 +369,7 @@ impl Mps {
 /// of its own. Directions are ranked by noise weight, which only roughly
 /// tracks usefulness, so fewer than twice `keep` can miss the one a trapped
 /// state needs; more makes every noisy sweep slower.
-fn noise_room(keep: usize) -> usize {
+pub(super) fn noise_room(keep: usize) -> usize {
     (2 * keep).max(4)
 }
 

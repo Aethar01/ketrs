@@ -28,7 +28,7 @@ use rayon::prelude::*;
 
 /// Directions of `H|ψ⟩` whose singular value is below this, relative to
 /// the norm of all its channels at the bond, are not added.
-const EXPAND_TOLERANCE: f64 = 1e-10;
+pub(super) const EXPAND_TOLERANCE: f64 = 1e-10;
 
 impl Mps {
     /// Enlarge every bond's right basis with the directions of `H|ψ⟩`,
@@ -36,6 +36,10 @@ impl Mps {
     /// site 0. No bond grows past `max_bond`. With `envs` on a GPU, the
     /// channels and their factorisation are computed there.
     pub(super) fn expand_right_bases(&mut self, mpo: &Mpo, envs: &Envs) -> Result<(), Error> {
+        if self.symmetry.is_some() {
+            self.expand_right_symmetric(mpo);
+            return Ok(());
+        }
         let n = self.n_qubits();
         self.move_center(0);
         let max_bond = self.options.max_bond;
@@ -80,6 +84,10 @@ impl Mps {
     // replaced as the loop goes.
     #[allow(clippy::needless_range_loop)]
     pub(super) fn expand_left_bases(&mut self, mpo: &Mpo, envs: &Envs) -> Result<(), Error> {
+        if self.symmetry.is_some() {
+            self.expand_left_symmetric(mpo);
+            return Ok(());
+        }
         let n = self.n_qubits();
         self.move_center(n - 1);
         let max_bond = self.options.max_bond;
@@ -148,10 +156,11 @@ pub(super) trait Chain {
 
 fn chain<'a>(envs: &'a Envs) -> Result<Box<dyn Chain + 'a>, Error> {
     match envs {
-        Envs::Cpu { .. } | Envs::Blocks { .. } => Ok(Box::new(CpuChain {
+        Envs::Cpu { .. } => Ok(Box::new(CpuChain {
             env: Env::boundary(),
             channels: Vec::new(),
         })),
+        Envs::Blocks { .. } => unreachable!("symmetric expansions have their own chain"),
         #[cfg(feature = "gpu")]
         Envs::Gpu(g) => Ok(Box::new(g.chain()?)),
     }

@@ -124,6 +124,29 @@ impl BlockEnv {
         MatRef::from_row_major_slice(&self.data[s.offset..][..s.rows * s.cols], s.rows, s.cols)
     }
 
+    /// The same environment, dense: one `bra × ket` matrix per channel.
+    pub(super) fn to_env(&self) -> super::dmrg::Env {
+        let dim = self.bond.dim();
+        let n_channels = self.stacks.first().map_or(0, |s| s.channels.len());
+        let mut blocks = vec![Mat::<C64>::zeros(dim, dim); n_channels];
+        for (j, s) in self.stacks.iter().enumerate() {
+            let stack = self.stack(j);
+            for (ch, entry) in s.channels.iter().enumerate() {
+                let Some((row, k)) = *entry else { continue };
+                for (a, r) in self.bond.range(k).enumerate() {
+                    for (b, c) in self.bond.range(j).enumerate() {
+                        let v = stack[(row + a, b)];
+                        match self.side {
+                            Side::Left => blocks[ch][(r, c)] = v,
+                            Side::Right => blocks[ch][(c, r)] = v,
+                        }
+                    }
+                }
+            }
+        }
+        super::dmrg::Env { blocks }
+    }
+
     /// Every stack's slice of `data`, to fill in parallel.
     fn stacks_mut(&mut self) -> Vec<(&Stack, &mut [C64])> {
         let mut rest = self.data.as_mut_slice();
@@ -664,28 +687,6 @@ mod tests {
     use crate::mps::{Charge, Mps, MpsOptions};
     use crate::observable::{PauliString, PauliSum};
 
-    /// A block environment as a dense one: `Σ` of its blocks per channel.
-    fn to_dense(env: &BlockEnv, n_channels: usize) -> Env {
-        let dim = env.bond.dim();
-        let mut blocks = vec![Mat::<C64>::zeros(dim, dim); n_channels];
-        for (j, s) in env.stacks.iter().enumerate() {
-            let stack = env.stack(j);
-            for (ch, entry) in s.channels.iter().enumerate() {
-                let Some((row, k)) = *entry else { continue };
-                for (a, r) in env.bond.range(k).enumerate() {
-                    for (b, c) in env.bond.range(j).enumerate() {
-                        let v = stack[(row + a, b)];
-                        match env.side {
-                            Side::Left => blocks[ch][(r, c)] = v,
-                            Side::Right => blocks[ch][(c, r)] = v,
-                        }
-                    }
-                }
-            }
-        }
-        Env { blocks }
-    }
-
     /// A Heisenberg-like chain with a current and a longer hop, in a state
     /// with several sectors per bond.
     fn setup(n: usize) -> (Mps, PauliSum) {
@@ -772,7 +773,7 @@ mod tests {
             .zip(&dense_left)
             .chain(right.iter().zip(&dense_right))
         {
-            let got = to_dense(b, d.blocks.len());
+            let got = b.to_env();
             for (g, w) in got.blocks.iter().zip(&d.blocks) {
                 assert!((g - w).norm_max() < 1e-12, "{:?}", b.side);
             }

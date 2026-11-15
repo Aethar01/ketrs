@@ -63,11 +63,16 @@ impl Mps {
         self.move_center(0);
         let mut envs = Envs::new(self, &mpo)?;
         let mut stale = true;
+        // The largest each bond can be, within the sector for a symmetric MPS.
+        let caps = match self.symmetry {
+            Some(_) => self.sector_caps()[1..n].to_vec(),
+            None => (0..n - 1)
+                .map(|i| (1usize << (i + 1).min(n - 1 - i).min(30)).min(self.options.max_bond))
+                .collect(),
+        };
 
         for _ in 0..steps {
-            // The expansion of a symmetric MPS comes with its block-wise
-            // complement; until then its bonds grow only through splits.
-            let growing = self.symmetry.is_none() && self.bonds_growing();
+            let growing = self.bond_dimensions().iter().zip(&caps).any(|(d, c)| d < c);
             if growing {
                 self.expand_right_bases(&mpo, &envs)?;
                 stale = true;
@@ -112,16 +117,6 @@ impl Mps {
                 .for_each(|a| *a *= phase);
         }
         Ok(())
-    }
-
-    /// Whether some bond is below both its largest useful size and
-    /// `max_bond`, so a subspace expansion could still add to it.
-    fn bonds_growing(&self) -> bool {
-        let n = self.n_qubits();
-        self.bond_dimensions().iter().enumerate().any(|(i, &d)| {
-            let full = 1usize << (i + 1).min(n - 1 - i).min(30);
-            d < full.min(self.options.max_bond)
-        })
     }
 
     /// Evolve sites `i` and `i + 1` by `exp(-iH t)` under their effective

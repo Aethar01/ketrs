@@ -13,7 +13,9 @@
   `max_bond`). DMRG and TDVP build a charge-graded MPO (`X` and `Y` become
   ladder operators on qubits a charge sees; a Hamiltonian that doesn't
   conserve the charges is refused, naming terms) and keep their
-  environments block-sparse. Gates need `to_dense` first. For a lattice
+  environments block-sparse, and TDVP's subspace expansion and DMRG's
+  noise add directions sector by sector, ranked across sectors as the
+  dense code ranks them. Gates need `to_dense` first. For a lattice
   gauge theory with its charge and Gauss laws as charges, the graded MPO
   alone is 3–4× narrower than the Pauli one (evolution bond 16 instead
   of 58).

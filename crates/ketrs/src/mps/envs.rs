@@ -193,10 +193,12 @@ impl Envs {
         let _ = i;
     }
 
-    /// `left[i]`, on the CPU.
+    /// `left[i]`, on the CPU (made dense for a symmetric MPS).
     pub(super) fn left(&self, i: usize) -> Result<Cow<'_, Env>, Error> {
         match self {
-            Envs::Blocks { .. } => unreachable!("dense environments of a symmetric MPS"),
+            Envs::Blocks { left, .. } => Ok(Cow::Owned(
+                left[i].as_ref().expect("left environment built").to_env(),
+            )),
             Envs::Cpu { left, .. } => Ok(Cow::Borrowed(
                 left[i].as_ref().expect("left environment built"),
             )),
@@ -208,7 +210,9 @@ impl Envs {
     /// `right[i]`, on the CPU.
     pub(super) fn right(&self, i: usize) -> Result<Cow<'_, Env>, Error> {
         match self {
-            Envs::Blocks { .. } => unreachable!("dense environments of a symmetric MPS"),
+            Envs::Blocks { right, .. } => Ok(Cow::Owned(
+                right[i].as_ref().expect("right environment built").to_env(),
+            )),
             Envs::Cpu { right, .. } => Ok(Cow::Borrowed(
                 right[i].as_ref().expect("right environment built"),
             )),

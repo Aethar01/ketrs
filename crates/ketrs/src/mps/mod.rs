@@ -29,6 +29,7 @@ mod layers;
 mod linalg;
 mod mpo;
 mod symmetric;
+mod symmetric_expand;
 mod tdvp;
 
 use linalg::{matmul, thin_svd};

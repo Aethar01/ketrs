@@ -40,7 +40,7 @@ pub(super) struct Symmetry {
 
 /// Which directions a block-wise factorisation keeps.
 #[derive(Clone, Copy)]
-enum Keep {
+pub(super) enum Keep {
     /// Every one: an exact change of basis.
     All,
     /// The largest, ranked across blocks, under the state's truncation
@@ -52,13 +52,13 @@ enum Keep {
 /// The SVD of a matrix that is block-diagonal in some charge, block by
 /// block: block `b` has rows `rows[b]` and columns `cols[b]` of the
 /// matrix, and is `u[b] diag(s[b]) v[b]†`.
-struct BlockSvd {
-    labels: Vec<Label>,
-    rows: Vec<Vec<usize>>,
-    cols: Vec<Vec<usize>>,
-    u: Vec<Mat<C64>>,
-    s: Vec<Vec<f64>>,
-    v: Vec<Mat<C64>>,
+pub(super) struct BlockSvd {
+    pub(super) labels: Vec<Label>,
+    pub(super) rows: Vec<Vec<usize>>,
+    pub(super) cols: Vec<Vec<usize>>,
+    pub(super) u: Vec<Mat<C64>>,
+    pub(super) s: Vec<Vec<f64>>,
+    pub(super) v: Vec<Mat<C64>>,
     nrows: usize,
     ncols: usize,
 }
@@ -66,7 +66,7 @@ struct BlockSvd {
 impl BlockSvd {
     /// The blocks of `m` whose labels appear among both the row and the
     /// column groups. Entries outside them are taken to be zero.
-    fn new(m: MatRef<'_, C64>, rows: Groups, cols: Groups) -> BlockSvd {
+    pub(super) fn new(m: MatRef<'_, C64>, rows: Groups, cols: Groups) -> BlockSvd {
         let mut matched = Vec::new();
         let mut col_iter = cols.into_iter().peekable();
         for (label, r) in rows {
@@ -107,12 +107,12 @@ impl BlockSvd {
     }
 
     /// `Σ s²` over every block.
-    fn weight(&self) -> f64 {
+    pub(super) fn weight(&self) -> f64 {
         self.s.iter().flatten().map(|x| x * x).sum()
     }
 
     /// How many directions each block keeps.
-    fn counts(&self, keep: Keep, options: &MpsOptions) -> Vec<usize> {
+    pub(super) fn counts(&self, keep: Keep, options: &MpsOptions) -> Vec<usize> {
         match keep {
             Keep::All => self.s.iter().map(Vec::len).collect(),
             Keep::Truncate { floor } => {
@@ -140,7 +140,7 @@ impl BlockSvd {
     }
 
     /// `Σ s²` of the kept directions.
-    fn kept_weight(&self, counts: &[usize]) -> f64 {
+    pub(super) fn kept_weight(&self, counts: &[usize]) -> f64 {
         self.s
             .iter()
             .zip(counts)
