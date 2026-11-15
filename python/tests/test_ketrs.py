@@ -1,5 +1,7 @@
 """Python bindings and Qiskit converter, checked against qiskit.quantum_info."""
 
+import copy
+
 import numpy as np
 import pytest
 from qiskit import QuantumCircuit
@@ -606,6 +608,22 @@ def test_mps_large_ghz_and_amplitudes():
     assert mps.expectation([("Z" + "I" * (n - 2) + "Z", 1.0)]) == pytest.approx(1.0)
 
 
+def test_mps_copy_is_independent():
+    qc = random_circuit(6, depth=6, max_operands=2, seed=3)
+    mps = ketrs.MPS.from_circuit(from_qiskit(qc), max_bond=32, cutoff=0.0, seed=5)
+    before = mps.to_statevector().amplitudes()
+    for twin in (mps.copy(), copy.copy(mps), copy.deepcopy(mps)):
+        assert (twin.max_bond, twin.cutoff, twin.gpu) == (32, 0.0, False)
+        np.testing.assert_array_equal(twin.to_statevector().amplitudes(), before)
+        twin.max_bond = 4
+        twin.run(ketrs.Circuit(6).h(2).cx(2, 5))
+    np.testing.assert_array_equal(mps.to_statevector().amplitudes(), before)
+    assert mps.max_bond == 32
+    # The random generator is copied too, unless reseeded.
+    np.testing.assert_array_equal(mps.copy().sample(100), mps.copy().sample(100))
+    assert (mps.copy(seed=1).sample(100) != mps.copy(seed=2).sample(100)).any()
+
+
 def test_mps_tdvp_matches_exact_evolution():
     # Long-range couplings, from a state with full bond dimension.
     n = 6
@@ -1033,6 +1051,13 @@ def test_register_condition_else_branch_and_reset():
     bits = state.run(from_qiskit(qc))
     assert bits == [0, 1, 1]
     assert state.probability_one(1) == pytest.approx(0.0)  # reset after measuring
+
+
+@gpu
+def test_mps_copy_keeps_the_gpu_setting():
+    mps = ketrs.MPS(4)
+    mps.gpu = True
+    assert mps.copy().gpu and copy.deepcopy(mps).gpu
 
 
 @gpu

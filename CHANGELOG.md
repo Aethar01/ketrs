@@ -4,6 +4,10 @@
 
 ### MPS
 
+- `MPS.copy()`, also `copy.copy` and `copy.deepcopy`: an independent copy
+  of the tensors, settings, `gpu` flag and random generator (`copy(seed=…)`
+  reseeds it), so several states can be prepared from one DMRG ground state
+  without recomputing it.
 - DMRG no longer aborts with "Lanczos did not converge in 1000 iterations"
   when the Hamiltonian's spectrum lies far from zero, as for a lattice
   gauge theory with a strong Gauss penalty (here around −3700, with the

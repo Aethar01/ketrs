@@ -259,6 +259,29 @@ impl PyMps {
         self.inner.norm_sqr()
     }
 
+    /// An independent copy: tensors, settings, the `gpu` flag and the random
+    /// generator, so a copy draws the same samples as the original unless
+    /// given a new `seed`. Cheap next to recomputing a state, e.g. to
+    /// prepare several states from one DMRG ground state.
+    #[pyo3(signature = (seed=None))]
+    fn copy(&self, seed: Option<u64>) -> Self {
+        PyMps {
+            inner: self.inner.clone(),
+            rng: match seed {
+                Some(_) => rng_from_seed(seed),
+                None => self.rng.clone(),
+            },
+        }
+    }
+
+    fn __copy__(&self) -> Self {
+        self.copy(None)
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.copy(None)
+    }
+
     fn __repr__(&self) -> String {
         let max = self.inner.bond_dimensions().into_iter().max().unwrap_or(1);
         format!(
