@@ -3,27 +3,28 @@
 //! The same Krylov time-stepping as on the CPU (see
 //! [`crate::statevector`]'s `evolve`), with every vector on the GPU and
 //! only scalars coming back. Each step runs the Lanczos recurrence once to
-//! build the tridiagonal matrix, downloading `α` and `β` as it goes, then
-//! replays it from the stored coefficients to accumulate `Σₖ yₖ vₖ`, which
-//! needs no downloads at all. Memory is four statevectors (the state and
-//! three Lanczos vectors) however long the basis.
+//! build the tridiagonal matrix, downloading `α` and `β` as it goes, until
+//! the basis covers the remaining time (checked every [`KRYLOV_CHECK`]
+//! vectors, up to [`KRYLOV_MAX`]), then replays it from the stored
+//! coefficients to accumulate `Σₖ yₖ vₖ`, which needs no downloads at all.
+//! Memory is four statevectors (the state and three Lanczos vectors)
+//! however long the basis.
 
 use super::context::{Kernel, Push};
 use super::gradient::{Sets, hamil_params, hamil_push};
 use super::{BATCH_UNITS, GpuStatevector};
 use crate::error::Error;
 use crate::observable::PauliSum;
-use crate::statevector::evolve::{STEP_TOLERANCE, tridiagonal_exp};
+use crate::statevector::evolve::{
+    KRYLOV_CHECK, KRYLOV_MAX, STEP_TOLERANCE, krylov_covers, krylov_partial_step,
+};
 use crate::statevector::krylov::breakdown;
 use ash::vk;
 use num_complex::Complex64 as C64;
 
-/// Lanczos vectors per step.
-const KRYLOV_DIM: usize = 40;
-
 /// Room for the dispatches' own parameters after the Hamiltonian's: a
 /// replay takes at most ten doubles per Lanczos vector.
-const EXTRA_PARAMS: usize = 16 * (KRYLOV_DIM + 2);
+const EXTRA_PARAMS: usize = 16 * (KRYLOV_MAX + 2);
 
 impl GpuStatevector {
     /// Evolve by `exp(-iHt)` exactly (to about 1e-13 per step, or 1e-6 in
@@ -195,11 +196,11 @@ impl<'a> Krylov<'a> {
 
             // Pass 1: the recurrence, with α and β downloaded.
             let (mut alphas, mut betas): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
-            let mut closed = false;
+            let mut covered = None;
             let (mut prev, mut v, mut w) = (0usize, 1usize, 2usize);
             self.copy_psi_to(v)?;
             let mut scale_v = 1.0 / beta0;
-            for k in 0..KRYLOV_DIM {
+            for k in 0..KRYLOV_MAX {
                 // v ← v · scale; w = H v; α = ⟨v|w⟩.
                 let mut extra = Vec::new();
                 let s = scale(&mut extra, C64::new(scale_v, 0.0), amps);
@@ -236,30 +237,34 @@ impl<'a> Krylov<'a> {
                 let beta = self.submit(&extra, &dispatches)?.re.max(0.0).sqrt();
                 alphas.push(alpha);
                 betas.push(beta);
-                if beta <= breakdown(&alphas) {
-                    closed = true;
-                    break;
+                let m = k + 1;
+                // A closed Krylov space is invariant: the step is exact.
+                let closed = beta <= breakdown(&alphas);
+                if closed || m.is_multiple_of(KRYLOV_CHECK) {
+                    let residual = if closed { 0.0 } else { beta };
+                    covered =
+                        krylov_covers(&alphas, &betas[..m - 1], residual, remaining, tolerance);
+                    if covered.is_some() || closed {
+                        break;
+                    }
                 }
-                if k + 1 == KRYLOV_DIM {
+                if m == KRYLOV_MAX {
                     break;
                 }
                 (prev, v, w) = (v, w, prev);
                 scale_v = 1.0 / beta;
             }
             let m = alphas.len();
-            let residual = if closed { 0.0 } else { betas[m - 1] };
-            let mut dt = remaining;
-            let y = loop {
-                let y = tridiagonal_exp(&alphas, &betas[..m - 1], dt);
-                if residual * y[m - 1].norm() <= tolerance {
-                    break y;
-                }
-                dt /= 2.0;
-                if dt.abs() <= f64::EPSILON * time.abs() {
-                    return Err(Error::NotConverged(
-                        "Krylov evolution step shrank to zero".into(),
-                    ));
-                }
+            let (dt, y) = match covered {
+                Some(y) => (remaining, y),
+                None => krylov_partial_step(
+                    &alphas,
+                    &betas[..m - 1],
+                    betas[m - 1],
+                    remaining,
+                    time,
+                    tolerance,
+                )?,
             };
 
             // Pass 2: replay from the stored coefficients, ψ ← β₀ Σ yₖ vₖ.
