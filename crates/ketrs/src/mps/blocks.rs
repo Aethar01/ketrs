@@ -112,6 +112,7 @@ impl EnvLayout {
 
     /// The layout beyond an end of the chain: one channel on a
     /// one-dimensional bond.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     pub(super) fn boundary(side: Side, bond: &Sectors, charges: &Charges) -> Self {
         EnvLayout::new(side, bond, &[charges.zero()], charges)
     }
@@ -248,6 +249,7 @@ impl<'a> SiteBlocks<'a> {
 
     /// The block from left sector `s` with physical state `p`, as its right
     /// sector and its first element in the tensor (rows `2 · right` apart).
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     pub(super) fn offset(&self, s: usize, p: usize) -> Option<(usize, usize)> {
         let t = self.right_of[s * 2 + p]?;
         let start = (self.left.range(s).start * 2 + p) * self.a.right + self.right.range(t).start;

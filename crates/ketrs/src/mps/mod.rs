@@ -27,6 +27,7 @@ mod expand;
 mod gpu;
 mod layers;
 mod linalg;
+mod measure;
 mod mpo;
 mod symmetric;
 mod symmetric_expand;

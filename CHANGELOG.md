@@ -4,6 +4,16 @@
 
 ### MPS
 
+- `Mps::expectations(&[PauliSum])`, in Python `MPS.expectations(list)`:
+  many expectation values at once. Each Pauli string is contracted only
+  over its own span, from environments built by one sweep each way from
+  the orthogonality centre, rather than from the string to the centre;
+  strings with a common start share the contraction of their common
+  prefix, and strings run in parallel. With charges, strings of `I` and
+  `Z` are contracted block by block. Measuring 250 local observables
+  (1150 Z strings) on a 402-qubit lattice gauge theory state at bond
+  dimension 256, with the centre at the chain's end, took 0.28 s instead
+  of 354 s with separate `expectation` calls (7.3 s without charges).
 - Symmetric MPS, with conserved Abelian charges (U(1) or Z_n, any number,
   each a value per qubit state): `Charge::u1`, `Charge::modulo`,
   `Charge::weights`, and `Mps::with_charges` to convert a state, with

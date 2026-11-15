@@ -1156,3 +1156,21 @@ def test_mps_with_charges_matches_dense():
         sym.tdvp(ketrs.PauliSum([("I" * (n - 1) + "X", 1.0)]), 0.1)
     with pytest.raises(ValueError, match="outside"):
         ketrs.MPS.from_circuit(ketrs.Circuit(n).h(0)).with_charges(charges)
+
+
+def test_mps_expectations_match_expectation():
+    n = 8
+    neel = ketrs.Circuit(n)
+    for q in range(1, n, 2):
+        neel.x(q)
+    mps = ketrs.MPS.from_circuit(neel, max_bond=32)
+    mps.tdvp(_heisenberg(n), 0.5, 4)
+    z = lambda *qs: "".join("Z" if q in qs else "I" for q in reversed(range(n)))
+    observables = [z(q) for q in range(n)]
+    observables += [[(z(q), 0.5), (z(q, q + 2), -0.25), ("I" * n, 0.25)] for q in range(n - 2)]
+    observables += [_heisenberg(n), ketrs.PauliSum([(z(0, 5), 1.0)])]
+    for state in [mps, mps.with_charges([ketrs.Charge.weights([1] * n)])]:
+        got = state.expectations(observables)
+        want = [state.expectation(o) for o in observables]
+        np.testing.assert_allclose(got, want, atol=1e-12)
+    assert mps.expectations([]) == []

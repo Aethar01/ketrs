@@ -543,6 +543,24 @@ impl PyMps {
         py.detach(|| mps.expectation(&sum)).map_err(to_py_err)
     }
 
+    /// `⟨ψ|O|ψ⟩ / ⟨ψ|ψ⟩` for each of `observables` (each anything
+    /// `expectation` takes), as a list, sharing the work: each Pauli
+    /// string is contracted only over its own span, from environments built
+    /// by one sweep from the orthogonality centre, strings with a common
+    /// start share their contraction, and strings run in parallel. For many
+    /// local observables on a long chain this is far faster than separate
+    /// `expectation` calls, which each contract from the string to the
+    /// centre. With charges, strings of `I` and `Z` are contracted block by
+    /// block.
+    fn expectations(&self, py: Python<'_>, observables: Vec<Observable>) -> PyResult<Vec<f64>> {
+        let sums = observables
+            .into_iter()
+            .map(Observable::into_sum)
+            .collect::<PyResult<Vec<_>>>()?;
+        let mps = &self.inner;
+        py.detach(|| mps.expectations(&sums)).map_err(to_py_err)
+    }
+
     /// The amplitude of a basis state, given as a Qiskit-style bitstring
     /// (qubit 0 rightmost) or an integer index.
     fn amplitude(&self, state: BasisState) -> PyResult<C64> {
