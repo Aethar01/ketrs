@@ -1,0 +1,104 @@
+#version 450
+// ketrs-variants: CHUNKED = 0 1
+// ketrs-variants: SINGLE = 0 1
+//
+// One scalar step of a Lanczos recurrence kept on the GPU (see
+// gpu/evolve.rs): sum the `units` overlap partial sums at partial[c], in a
+// fixed order, and turn the result into the coefficients the next
+// dispatches read from the parameter buffer, recording α and β for the
+// host at partial[b].
+//   a = 0: α = re(sum); params[offset..+2] = −α (an axpy); partial[b].x = α.
+//   a = 1: β = √re(sum); params[offset..+4] = 1/β twice (a phase scaling the
+//          next vector), params[offset+4..+6] = −β (the next step's axpy);
+//          partial[b].y = β.
+// The state bindings are unused; CHUNKED only keeps the variant layout.
+
+#if SINGLE
+#define real float
+#define cplx vec2
+#else
+#define real double
+#define cplx dvec2
+#endif
+
+layout(local_size_x = 256) in;
+
+#if SINGLE
+// Parameters are doubles written by the host; without 64-bit floats they
+// are stored here as pairs of 32-bit words, encoded with integer arithmetic.
+layout(std430, set = 0, binding = 1) buffer Params { uint params_raw[]; };
+
+void set_param(uint i, float v) {
+    uint bits = floatBitsToUint(v);
+    uint sign = bits & 0x80000000u;
+    uint e = (bits >> 23u) & 0xFFu;
+    uint mantissa = bits & 0x7FFFFFu;
+    uint hi, lo;
+    if (e == 0u) {
+        // Zero (and subnormals, flushed to zero).
+        hi = sign;
+        lo = 0u;
+    } else if (e == 0xFFu) {
+        hi = sign | 0x7FF00000u | (mantissa >> 3u);
+        lo = mantissa << 29u;
+    } else {
+        hi = sign | ((e - 127u + 1023u) << 20u) | (mantissa >> 3u);
+        lo = mantissa << 29u;
+    }
+    params_raw[2u * i] = lo;
+    params_raw[2u * i + 1u] = hi;
+}
+#else
+layout(std430, set = 0, binding = 1) buffer Params { double params[]; };
+
+void set_param(uint i, double v) {
+    params[i] = v;
+}
+#endif
+
+layout(std430, set = 0, binding = 2) buffer Out { cplx partial[]; };
+
+layout(push_constant) uniform Push {
+    uint a;
+    uint b;
+    uint c;
+    uint units;
+    uint offset;
+    uint chunk_bits;
+} pc;
+
+shared real sums[256];
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    real acc = real(0.0);
+    for (uint i = lane; i < pc.units; i += 256u) {
+        acc += partial[pc.c + i].x;
+    }
+    sums[lane] = acc;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (lane < s) {
+            sums[lane] += sums[lane + s];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        real sum = sums[0];
+        if (pc.a == 0u) {
+            set_param(pc.offset, -sum);
+            set_param(pc.offset + 1u, real(0.0));
+            partial[pc.b].x = sum;
+        } else {
+            real beta = sqrt(max(sum, real(0.0)));
+            real inv = real(1.0) / beta;
+            set_param(pc.offset, inv);
+            set_param(pc.offset + 1u, real(0.0));
+            set_param(pc.offset + 2u, inv);
+            set_param(pc.offset + 3u, real(0.0));
+            set_param(pc.offset + 4u, -beta);
+            set_param(pc.offset + 5u, real(0.0));
+            partial[pc.b].y = beta;
+        }
+    }
+}

@@ -76,6 +76,10 @@
   64 took 27% less time on the CPU and 17% less on the GPU;
   `GpuStatevector.evolve` of a Heisenberg chain took 20–32% less at 18–24
   qubits.
+- `GpuStatevector.evolve` sums each Lanczos step's α and β on the GPU,
+  which writes the following coefficients into its own parameters, and runs
+  8 steps per submission. Each step used to wait for the CPU twice. Small
+  states gain most: 30% less time at 14 qubits, 15% at 18, none from 22.
 
 ## 0.1.6 (2026-11-13)
 

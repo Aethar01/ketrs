@@ -28,6 +28,9 @@ pub(crate) enum Kernel {
     Axpy = 8,
     /// A run of gates on a few qubits in shared memory (`tile.comp`).
     Tile = 9,
+    /// A Lanczos step's α or β from overlap partial sums, written into the
+    /// parameters (`lanczos.comp`).
+    Lanczos = 10,
 }
 
 impl Kernel {
@@ -37,6 +40,7 @@ impl Kernel {
     pub(crate) fn groups(self, units: u32) -> u32 {
         let groups = match self {
             Kernel::Tile | Kernel::Probs => units,
+            Kernel::Lanczos => 1,
             Kernel::Expect | Kernel::Overlap => units.div_ceil(WORKGROUP).min(REDUCTION_GROUPS),
             _ => units.div_ceil(WORKGROUP),
         };
@@ -90,6 +94,13 @@ const SHADERS: [[[&[u8]; 2]; 2]; 9] = [
         [spirv!("axpy_0_0"), spirv!("axpy_1_0")],
         [spirv!("axpy_0_1"), spirv!("axpy_1_1")],
     ],
+];
+
+/// The Lanczos kernel, after the tile kernel, as `[double, single]
+/// [single-buffer, chunked]` variants.
+const LANCZOS_SHADERS: [[&[u8]; 2]; 2] = [
+    [spirv!("lanczos_0_0"), spirv!("lanczos_1_0")],
+    [spirv!("lanczos_0_1"), spirv!("lanczos_1_1")],
 ];
 
 /// The tile kernel for 2^bits-amplitude tiles, by bits, as
@@ -467,7 +478,7 @@ impl GpuContext {
             // null.
             for (index, spv) in SHADERS
                 .into_iter()
-                .chain([tile])
+                .chain([tile, LANCZOS_SHADERS])
                 .flat_map(|variants| variants.into_iter().flatten())
                 .enumerate()
             {

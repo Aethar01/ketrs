@@ -84,7 +84,7 @@ impl<'a> Krylov<'a> {
         let per = Kernel::Overlap.groups(psi.len() as u32) as usize;
         psi.ensure_buffers(
             &vec![0.0; hamil.len() + EXTRA_PARAMS],
-            per * psi.amplitude_bytes() as usize,
+            (RECORDS + per) * psi.amplitude_bytes() as usize,
         )?;
         let mut owner = Sets::new(&psi.ctx);
         let mut sets = [[vk::DescriptorSet::null(); 4]; 4];
@@ -194,65 +194,85 @@ impl<'a> Krylov<'a> {
                 break;
             }
 
-            // Pass 1: the recurrence, with α and β downloaded.
+            // Pass 1: the recurrence, `KRYLOV_CHECK` steps per submission.
+            // `lanczos.comp` sums each α and β on the GPU, writes the
+            // coefficients the following dispatches need into the
+            // parameters, and records α and β, read back after the batch.
             let (mut alphas, mut betas): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
             let mut covered = None;
             let (mut prev, mut v, mut w) = (0usize, 1usize, 2usize);
             self.copy_psi_to(v)?;
-            let mut scale_v = 1.0 / beta0;
-            for k in 0..KRYLOV_MAX {
-                // v ← v · scale; w = H v; α = ⟨v|w⟩.
+            let per = Kernel::Overlap.groups(amps as u32) as usize;
+            let units = amps as u32;
+            let mut k = 0;
+            'basis: while k < KRYLOV_MAX {
+                let end = (k + KRYLOV_CHECK).min(KRYLOV_MAX);
                 let mut extra = Vec::new();
-                let s = scale(&mut extra, C64::new(scale_v, 0.0), amps);
-                let o = overlap(&mut extra, 0, amps);
-                let dispatches = [
-                    (self.sets[v][v], Kernel::Phase, s),
-                    (
+                let o = overlap(&mut extra, RECORDS as u32, amps);
+                // A block of parameters per step, plus one for the step
+                // after the batch: the factor scaling v (as a phase, four
+                // doubles), −β of the previous step and −α. The first step's
+                // come from the host; the rest from `lanczos.comp`.
+                let first = extra.len() as u32;
+                let block = |j: usize| first + 8 * (j - k) as u32;
+                let (scale_v, beta_prev) = match k {
+                    0 => (1.0 / beta0, 0.0),
+                    _ => (1.0 / betas[k - 1], betas[k - 1]),
+                };
+                extra.extend([scale_v, 0.0, scale_v, 0.0, -beta_prev, 0.0, 0.0, 0.0]);
+                extra.resize(extra.len() + 8 * (end - k), 0.0);
+                let mut dispatches = Vec::new();
+                for j in k..end {
+                    let at = block(j);
+                    let with = |offset: u32| Push {
+                        units,
+                        offset,
+                        ..Push::default()
+                    };
+                    // v ← v · scale; w = H v; α = ⟨v|w⟩.
+                    dispatches.push((self.sets[v][v], Kernel::Phase, with(at)));
+                    dispatches.push((
                         self.sets[v][w],
                         Kernel::Hamil,
                         hamil_push(self.n_groups, amps),
-                    ),
-                    (self.sets[w][v], Kernel::Overlap, o),
-                ];
-                let alpha = self.submit(&extra, &dispatches)?.re;
-                // w ← w − α v − β v_prev; β = ‖w‖.
-                let mut extra = Vec::new();
-                let mut dispatches = vec![(
-                    self.sets[v][w],
-                    Kernel::Axpy,
-                    axpy(&mut extra, C64::new(-alpha, 0.0), amps),
-                )];
-                if let Some(&beta_prev) = betas.last() {
-                    dispatches.push((
-                        self.sets[prev][w],
-                        Kernel::Axpy,
-                        axpy(&mut extra, C64::new(-beta_prev, 0.0), amps),
                     ));
+                    dispatches.push((self.sets[w][v], Kernel::Overlap, o));
+                    dispatches.push((
+                        self.sets[w][v],
+                        Kernel::Lanczos,
+                        lanczos(0, j - k, per, at + 6),
+                    ));
+                    // w ← w − α v − β v_prev; β = ‖w‖.
+                    dispatches.push((self.sets[v][w], Kernel::Axpy, with(at + 6)));
+                    if j > 0 {
+                        dispatches.push((self.sets[prev][w], Kernel::Axpy, with(at + 4)));
+                    }
+                    dispatches.push((self.sets[w][w], Kernel::Overlap, o));
+                    dispatches.push((
+                        self.sets[w][w],
+                        Kernel::Lanczos,
+                        lanczos(1, j - k, per, block(j + 1)),
+                    ));
+                    (prev, v, w) = (v, w, prev);
                 }
-                dispatches.push((
-                    self.sets[w][w],
-                    Kernel::Overlap,
-                    overlap(&mut extra, 0, amps),
-                ));
-                let beta = self.submit(&extra, &dispatches)?.re.max(0.0).sqrt();
-                alphas.push(alpha);
-                betas.push(beta);
-                let m = k + 1;
-                // A closed Krylov space is invariant: the step is exact.
-                let closed = beta <= breakdown(&alphas);
-                if closed || m.is_multiple_of(KRYLOV_CHECK) {
-                    let residual = if closed { 0.0 } else { beta };
-                    covered =
-                        krylov_covers(&alphas, &betas[..m - 1], residual, remaining, tolerance);
-                    if covered.is_some() || closed {
-                        break;
+                self.submit(&extra, &dispatches)?;
+                for (j, record) in (k..end).zip(self.psi.read_output(end - k)?) {
+                    let (alpha, beta) = (record.re, record.im);
+                    alphas.push(alpha);
+                    betas.push(beta);
+                    let m = j + 1;
+                    // A closed Krylov space is invariant: the step is exact.
+                    let closed = beta <= breakdown(&alphas);
+                    if closed || m.is_multiple_of(KRYLOV_CHECK) || m == KRYLOV_MAX {
+                        let residual = if closed { 0.0 } else { beta };
+                        covered =
+                            krylov_covers(&alphas, &betas[..m - 1], residual, remaining, tolerance);
+                        if covered.is_some() || closed {
+                            break 'basis;
+                        }
                     }
                 }
-                if m == KRYLOV_MAX {
-                    break;
-                }
-                (prev, v, w) = (v, w, prev);
-                scale_v = 1.0 / beta;
+                k = end;
             }
             let m = alphas.len();
             let (dt, y) = match covered {
@@ -320,6 +340,24 @@ impl<'a> Krylov<'a> {
             remaining = if dt == remaining { 0.0 } else { remaining - dt };
         }
         Ok(())
+    }
+}
+
+/// Output slots before the overlaps' partial sums, where `lanczos.comp`
+/// records each step of a batch's `(α, β)`.
+const RECORDS: usize = KRYLOV_CHECK;
+
+/// `lanczos.comp` for one step's α (`mode` 0) or β (1) from the `per`
+/// partial sums after [`RECORDS`], recorded in slot `record`, writing
+/// coefficients at `offset`.
+fn lanczos(mode: u32, record: usize, per: usize, offset: u32) -> Push {
+    Push {
+        a: mode,
+        b: record as u32,
+        c: RECORDS as u32,
+        units: per as u32,
+        offset,
+        chunk_bits: 0,
     }
 }
 
