@@ -1453,12 +1453,12 @@ mod tests {
         mps.set_gpu(Some(ctx)).unwrap();
         let mut gpu = Envs::new(&mps, &mpo).unwrap();
         for i in (0..n - 1).rev() {
-            cpu.update_right(i, &mps.tensors[i + 1], &mpo).unwrap();
-            gpu.update_right(i, &mps.tensors[i + 1], &mpo).unwrap();
+            cpu.update_right(i, &mps, &mpo).unwrap();
+            gpu.update_right(i, &mps, &mpo).unwrap();
         }
-        for (i, t) in mps.tensors[..n - 1].iter().enumerate() {
-            cpu.update_left(i, t, &mpo).unwrap();
-            gpu.update_left(i, t, &mpo).unwrap();
+        for i in 0..n - 1 {
+            cpu.update_left(i, &mps, &mpo).unwrap();
+            gpu.update_left(i, &mps, &mpo).unwrap();
         }
         let mut seed = 1u64;
         let mut random = |len: usize| -> Vec<C64> {
@@ -1484,8 +1484,8 @@ mod tests {
             let x = random(l * 2 * r);
             let (mut want, mut got) =
                 (vec![C64::default(); x.len()], vec![C64::default(); x.len()]);
-            cpu.one_site(i, &mpo, l, r).apply(&x, &mut want);
-            gpu.one_site(i, &mpo, l, r).apply(&x, &mut got);
+            cpu.one_site(i, &mps, &mpo).apply(&x, &mut want);
+            gpu.one_site(i, &mps, &mpo).apply(&x, &mut got);
             gpu.check().unwrap();
             assert!(
                 max_diff(&want, &got) < 1e-11,
@@ -1495,8 +1495,8 @@ mod tests {
             // Krylov evolution with the recurrence on the GPU, against the
             // CPU's; long enough to take several Krylov steps.
             let (mut want, mut got) = (x.clone(), x.clone());
-            cpu.one_site(i, &mpo, l, r).evolve(&mut want, -0.9).unwrap();
-            gpu.one_site(i, &mpo, l, r).evolve(&mut got, -0.9).unwrap();
+            cpu.one_site(i, &mps, &mpo).evolve(&mut want, -0.9).unwrap();
+            gpu.one_site(i, &mps, &mpo).evolve(&mut got, -0.9).unwrap();
             let diff = max_diff(&want, &got);
             assert!(diff < 1e-10 * norm(&x), "evolve one site {i}: {diff}");
 
@@ -1505,8 +1505,8 @@ mod tests {
                 let x = random(l * 4 * r2);
                 let (mut want, mut got) =
                     (vec![C64::default(); x.len()], vec![C64::default(); x.len()]);
-                cpu.two_site(i, &mpo, l, r2).apply(&x, &mut want);
-                gpu.two_site(i, &mpo, l, r2).apply(&x, &mut got);
+                cpu.two_site(i, &mps, &mpo).apply(&x, &mut want);
+                gpu.two_site(i, &mps, &mpo).apply(&x, &mut got);
                 gpu.check().unwrap();
                 assert!(
                     max_diff(&want, &got) < 1e-11,
@@ -1515,8 +1515,8 @@ mod tests {
                 );
 
                 let (mut want, mut got) = (x.clone(), x.clone());
-                cpu.two_site(i, &mpo, l, r2).evolve(&mut want, 0.9).unwrap();
-                gpu.two_site(i, &mpo, l, r2).evolve(&mut got, 0.9).unwrap();
+                cpu.two_site(i, &mps, &mpo).evolve(&mut want, 0.9).unwrap();
+                gpu.two_site(i, &mps, &mpo).evolve(&mut got, 0.9).unwrap();
                 let diff = max_diff(&want, &got);
                 assert!(diff < 1e-10 * norm(&x), "evolve two sites {i}: {diff}");
 
@@ -1526,9 +1526,9 @@ mod tests {
                 let v0: Vec<C64> = x.iter().map(|v| v / norm(&x)).collect();
                 let options = EigenOptions::default();
                 let want =
-                    lanczos_lowest_from(&cpu.two_site(i, &mpo, l, r2), &v0, &[], &options).unwrap();
+                    lanczos_lowest_from(&cpu.two_site(i, &mps, &mpo), &v0, &[], &options).unwrap();
                 let (want_e, want) = (want.value, want.vector);
-                let Op::Gpu(op) = gpu.two_site(i, &mpo, l, r2) else {
+                let Op::Gpu(op) = gpu.two_site(i, &mps, &mpo) else {
                     unreachable!()
                 };
                 let bytes = (x.len() * 16) as u64;
@@ -1545,7 +1545,7 @@ mod tests {
                     );
                     // The Ritz value is the vector's energy.
                     let mut hx = vec![C64::default(); got.len()];
-                    cpu.two_site(i, &mpo, l, r2).apply(&got, &mut hx);
+                    cpu.two_site(i, &mps, &mpo).apply(&got, &mut hx);
                     let energy: f64 = got.iter().zip(&hx).map(|(a, b)| (a.conj() * b).re).sum();
                     assert!((energy - got_e).abs() < 1e-9, "{energy} {got_e}");
                 }

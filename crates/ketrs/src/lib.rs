@@ -41,7 +41,7 @@ pub use error::Error;
 pub use gate::Gate;
 #[cfg(feature = "gpu")]
 pub use gpu::{GpuContext, GpuPrecision, GpuStatevector};
-pub use mps::{DmrgOptions, DmrgResult, Mps, MpsOptions};
+pub use mps::{Charge, DmrgOptions, DmrgResult, Mps, MpsOptions};
 pub use num_complex::{Complex32, Complex64};
 pub use observable::{Pauli, PauliString, PauliSum};
 pub use parameter::{Angle, Parameter};

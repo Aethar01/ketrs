@@ -148,7 +148,7 @@ pub(super) trait Chain {
 
 fn chain<'a>(envs: &'a Envs) -> Result<Box<dyn Chain + 'a>, Error> {
     match envs {
-        Envs::Cpu { .. } => Ok(Box::new(CpuChain {
+        Envs::Cpu { .. } | Envs::Blocks { .. } => Ok(Box::new(CpuChain {
             env: Env::boundary(),
             channels: Vec::new(),
         })),

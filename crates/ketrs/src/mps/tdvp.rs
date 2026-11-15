@@ -57,7 +57,7 @@ impl Mps {
                 "TDVP needs at least one step".into(),
             ));
         }
-        let mpo = Mpo::new(hamiltonian, n)?;
+        let mpo = self.mpo(hamiltonian)?;
         let half = time / steps as f64 / 2.0;
 
         self.move_center(0);
@@ -65,21 +65,23 @@ impl Mps {
         let mut stale = true;
 
         for _ in 0..steps {
-            let growing = self.bonds_growing();
+            // The expansion of a symmetric MPS comes with its block-wise
+            // complement; until then its bonds grow only through splits.
+            let growing = self.symmetry.is_none() && self.bonds_growing();
             if growing {
                 self.expand_right_bases(&mpo, &envs)?;
                 stale = true;
             }
             if stale {
                 for i in (0..n - 1).rev() {
-                    envs.update_right(i, &self.tensors[i + 1], &mpo)?;
+                    envs.update_right(i, self, &mpo)?;
                 }
                 stale = false;
             }
             // Sweep right: the centre starts at site 0.
             for i in 0..n - 1 {
                 self.evolve_pair(i, &mpo, &envs, half, Absorb::Right)?;
-                envs.update_left(i, &self.tensors[i], &mpo)?;
+                envs.update_left(i, self, &mpo)?;
                 if i + 1 < n - 1 {
                     self.evolve_site(i + 1, &mpo, &envs, -half)?;
                 }
@@ -89,13 +91,13 @@ impl Mps {
             // Sweep left: the centre starts at site n − 1.
             if growing {
                 self.expand_left_bases(&mpo, &envs)?;
-                for (i, tensor) in self.tensors[..n - 1].iter().enumerate() {
-                    envs.update_left(i, tensor, &mpo)?;
+                for i in 0..n - 1 {
+                    envs.update_left(i, self, &mpo)?;
                 }
             }
             for i in (0..n - 1).rev() {
                 self.evolve_pair(i, &mpo, &envs, half, Absorb::Left)?;
-                envs.update_right(i, &self.tensors[i + 1], &mpo)?;
+                envs.update_right(i, self, &mpo)?;
                 if i > 0 {
                     self.evolve_site(i, &mpo, &envs, -half)?;
                 }
@@ -133,11 +135,12 @@ impl Mps {
         absorb: Absorb,
     ) -> Result<(), Error> {
         let (l, r) = (self.tensors[i].left, self.tensors[i + 1].right);
-        let mut x = two_site_vector(&self.tensors[i], &self.tensors[i + 1]);
-        let op = envs.two_site(i, mpo, l, r);
+        let op = envs.two_site(i, self, mpo);
+        let mut x = op.pack(two_site_vector(&self.tensors[i], &self.tensors[i + 1]));
         let evolved = op.evolve(&mut x, t);
         envs.check()?;
         evolved?;
+        let x = op.unpack(x);
         self.split(i, MatRef::from_row_major_slice(&x, l * 2, 2 * r), absorb);
         Ok(())
     }
@@ -145,8 +148,10 @@ impl Mps {
     /// Evolve site `i`, the centre, by `exp(-iH t)` under its effective
     /// Hamiltonian.
     fn evolve_site(&mut self, i: usize, mpo: &Mpo, envs: &Envs, t: f64) -> Result<(), Error> {
-        let op = envs.one_site(i, mpo, self.tensors[i].left, self.tensors[i].right);
-        let evolved = op.evolve(&mut self.tensors[i].data, t);
+        let op = envs.one_site(i, self, mpo);
+        let mut x = op.pack(std::mem::take(&mut self.tensors[i].data));
+        let evolved = op.evolve(&mut x, t);
+        self.tensors[i].data = op.unpack(x);
         envs.check()?;
         evolved
     }

@@ -158,8 +158,7 @@ impl LinearOperator<C64> for Effective {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mps::mpo::pauli_entry;
-    use crate::observable::Pauli;
+    use crate::mps::mpo::{Local, op_entry};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
@@ -176,14 +175,21 @@ mod tests {
     }
 
     fn random_site(left: usize, right: usize, rng: &mut StdRng) -> MpoSite {
-        let paulis = [Pauli::I, Pauli::X, Pauli::Y, Pauli::Z];
+        let ops = [
+            Local::I,
+            Local::X,
+            Local::Y,
+            Local::Z,
+            Local::Lower,
+            Local::Raise,
+        ];
         let entries = (0..left * right + 3)
             .map(|_| {
                 let coeff = C64::new(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0));
                 (
                     rng.random_range(0..left),
                     rng.random_range(0..right),
-                    paulis[rng.random_range(0..4)],
+                    ops[rng.random_range(0..6)],
                     coeff,
                 )
             })
@@ -207,7 +213,7 @@ mod tests {
         let n = sites.len();
         let phys = 1 << n;
         // Operator strings through the sites: (a, c, P per site, coeff).
-        let mut strings: Vec<(usize, usize, Vec<Pauli>, C64)> = sites[0]
+        let mut strings: Vec<(usize, usize, Vec<Local>, C64)> = sites[0]
             .entries
             .iter()
             .map(|&(a, b, p, c)| (a, b, vec![p], c))
@@ -234,7 +240,10 @@ mod tests {
                 let mut v = *coeff;
                 for (k, &p) in ps.iter().enumerate() {
                     let bit = (p_out >> (n - 1 - k)) & 1;
-                    let (b_in, val) = pauli_entry(p, bit);
+                    let Some((b_in, val)) = op_entry(p, bit) else {
+                        v = ZERO;
+                        break;
+                    };
                     p_in |= b_in << (n - 1 - k);
                     v *= val;
                 }

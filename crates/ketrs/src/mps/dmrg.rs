@@ -129,7 +129,12 @@ impl Mps {
                 "DMRG needs at least two qubits".into(),
             ));
         }
-        let mpo = Mpo::new(hamiltonian, n)?;
+        let mpo = self.mpo(hamiltonian)?;
+        if self.symmetry.is_some() && options.noise > 0.0 {
+            return Err(Error::InvalidArgument(
+                "DMRG noise on an MPS with charges isn't supported yet".into(),
+            ));
+        }
         self.set_options(MpsOptions {
             max_bond: options.max_bond,
             cutoff: options.cutoff,
@@ -146,7 +151,7 @@ impl Mps {
 
         let mut envs = Envs::new(self, &mpo)?;
         for i in (0..n - 1).rev() {
-            envs.update_right(i, &self.tensors[i + 1], &mpo)?;
+            envs.update_right(i, self, &mpo)?;
         }
 
         let mut sweep_energies = Vec::new();
@@ -164,7 +169,7 @@ impl Mps {
                 (energy, solved) =
                     self.optimise_pair(i, &mpo, &envs, &lanczos, noise, Absorb::Right)?;
                 unconverged_solves += usize::from(!solved);
-                envs.update_left(i, &self.tensors[i], &mpo)?;
+                envs.update_left(i, self, &mpo)?;
                 // Rebuilt from the right end before it is needed again.
                 envs.release_right(i + 1);
             }
@@ -173,7 +178,7 @@ impl Mps {
                 (energy, solved) =
                     self.optimise_pair(i, &mpo, &envs, &lanczos, noise, Absorb::Left)?;
                 unconverged_solves += usize::from(!solved);
-                envs.update_right(i, &self.tensors[i + 1], &mpo)?;
+                envs.update_right(i, self, &mpo)?;
                 envs.release_left(i);
             }
             let total = energy + mpo.shift;
@@ -213,17 +218,17 @@ impl Mps {
         absorb: Absorb,
     ) -> Result<(f64, bool), Error> {
         let (l, r) = (self.tensors[i].left, self.tensors[i + 1].right);
-        let mut v0 = two_site_vector(&self.tensors[i], &self.tensors[i + 1]);
+        let op = envs.two_site(i, self, mpo);
+        let mut v0 = op.pack(two_site_vector(&self.tensors[i], &self.tensors[i + 1]));
         let scale = 1.0 / norm(&v0);
         v0.iter_mut().for_each(|a| *a *= scale);
 
-        let op = envs.two_site(i, mpo, l, r);
         // The Ritz value is the energy of `x` to within the Lanczos
         // tolerance squared, without another product.
         let found = op.lowest(&v0, lanczos);
         envs.check()?;
         let found = found?;
-        let (energy, x, solved) = (found.value, found.vector, found.converged);
+        let (energy, x, solved) = (found.value, op.unpack(found.vector), found.converged);
         let theta = MatRef::from_row_major_slice(&x, l * 2, 2 * r);
         if noise > 0.0 {
             let perturbation = match absorb {

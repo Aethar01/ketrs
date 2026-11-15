@@ -4,6 +4,19 @@
 
 ### MPS
 
+- Symmetric MPS, with conserved Abelian charges (U(1) or Z_n, any number,
+  each a value per qubit state): `Charge::u1`, `Charge::modulo`,
+  `Charge::weights`, and `Mps::with_charges` to convert a state, with
+  `to_dense`, `charges`, `total_charge` and `bond_sectors`. Each bond's
+  basis is sorted into charge sectors and every factorisation runs block
+  by block, with one truncation over all blocks (same `cutoff` and
+  `max_bond`). DMRG and TDVP build a charge-graded MPO (`X` and `Y` become
+  ladder operators on qubits a charge sees; a Hamiltonian that doesn't
+  conserve the charges is refused, naming terms) and keep their
+  environments block-sparse. Gates need `to_dense` first. For a lattice
+  gauge theory with its charge and Gauss laws as charges, the graded MPO
+  alone is 3–4× narrower than the Pauli one (evolution bond 16 instead
+  of 58).
 - The subspace expansion's SVD computes only the right singular vectors it
   uses: 23% less time in it.
 - With `mps.gpu = True`, TDVP's subspace expansion runs on the GPU too: each

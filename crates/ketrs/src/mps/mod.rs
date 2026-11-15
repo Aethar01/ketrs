@@ -17,6 +17,8 @@
 //! first, so each neighbouring pair costs one SVD per layer, and gates on
 //! disjoint bonds run in parallel, in Hastings' form of TEBD.
 
+mod blocks;
+mod charges;
 mod dmrg;
 mod effective;
 mod envs;
@@ -26,11 +28,14 @@ mod gpu;
 mod layers;
 mod linalg;
 mod mpo;
+mod symmetric;
 mod tdvp;
 
 use linalg::{matmul, thin_svd};
 
+pub use charges::Charge;
 pub use dmrg::{DmrgOptions, DmrgResult};
+pub use symmetric::MAX_CHARGE_LEAK;
 
 use crate::circuit::{Circuit, Operation};
 use crate::error::Error;
@@ -117,6 +122,8 @@ pub struct Mps {
     /// Total discarded weight from truncations so far: roughly the lost
     /// fidelity, `1 − |⟨ψ_exact|ψ⟩|²`, while it is small.
     truncation_error: f64,
+    /// The charges and bond sectors of a symmetric MPS.
+    symmetry: Option<symmetric::Symmetry>,
     /// The GPU that runs TDVP and DMRG sweeps, if any.
     #[cfg(feature = "gpu")]
     gpu: Option<GpuHandle>,
@@ -160,6 +167,7 @@ impl Mps {
             center: 0,
             options,
             truncation_error: 0.0,
+            symmetry: None,
             #[cfg(feature = "gpu")]
             gpu: None,
         }
@@ -198,6 +206,7 @@ impl Mps {
             center: n_qubits - 1,
             options,
             truncation_error: 0.0,
+            symmetry: None,
             #[cfg(feature = "gpu")]
             gpu: None,
         };
@@ -299,6 +308,7 @@ impl Mps {
     /// Apply every operation in `circuit`, which must have the same width
     /// and no unbound parameters.
     pub fn run(&mut self, circuit: &Circuit) -> Result<(), Error> {
+        self.require_dense("running gates")?;
         circuit.check_unitary()?;
         if circuit.n_qubits() != self.n_qubits() {
             return Err(Error::QubitCountMismatch {
@@ -329,6 +339,7 @@ impl Mps {
 
     /// Apply one operation.
     pub fn apply(&mut self, op: &Operation) -> Result<(), Error> {
+        self.require_dense("applying gates")?;
         op.validate(self.n_qubits())?;
         self.apply_unchecked(op);
         Ok(())
@@ -377,6 +388,9 @@ impl Mps {
     /// into sites `i` and `i + 1` by truncated SVD. The singular values go
     /// to the side named by `absorb`, which becomes the centre.
     fn split(&mut self, i: usize, theta: MatRef<'_, C64>, absorb: Absorb) {
+        if self.symmetry.is_some() {
+            return self.split_symmetric(i, theta, absorb);
+        }
         let (left, right) = (theta.nrows() / 2, theta.ncols() / 2);
         let (u, s, v) = thin_svd(theta);
         let total: f64 = s.iter().map(|x| x * x).sum();
@@ -416,22 +430,21 @@ impl Mps {
     /// How many singular values to keep: as few as the cutoff allows, at
     /// most `max_bond`, at least one.
     fn bond_to_keep(&self, s: &[f64], total: f64) -> usize {
-        let mut keep = s.len();
-        let mut discarded = 0.0;
-        while keep > 1 {
-            let next = discarded + s[keep - 1] * s[keep - 1];
-            if next > self.options.cutoff * total {
-                break;
-            }
-            discarded = next;
-            keep -= 1;
-        }
-        keep.min(self.options.max_bond).max(1)
+        keep_count(s, total, &self.options)
     }
 
     /// Move the orthogonality centre to `target`, one site at a time, by
     /// SVD: the site keeps the orthonormal factor and the rest moves on.
     fn move_center(&mut self, target: usize) {
+        if self.symmetry.is_some() {
+            while self.center < target {
+                self.shift_right();
+            }
+            while self.center > target {
+                self.shift_left_exact();
+            }
+            return;
+        }
         while self.center < target {
             let i = self.center;
             let left = self.tensors[i].left;
@@ -791,6 +804,23 @@ fn transfer(env: &Mat<C64>, t: &Tensor, pauli: Pauli) -> Mat<C64> {
         o[p][0] * x[(l, col)] + o[p][1] * x[(l, r + col)]
     });
     matmul(t.as_left_matrix().adjoint(), y.as_ref())
+}
+
+/// How many of the singular values `s` (in decreasing order, with
+/// `Σ s² = total`) to keep: as few as `options.cutoff` allows, at most
+/// `options.max_bond`, at least one.
+fn keep_count(s: &[f64], total: f64, options: &MpsOptions) -> usize {
+    let mut keep = s.len();
+    let mut discarded = 0.0;
+    while keep > 1 {
+        let next = discarded + s[keep - 1] * s[keep - 1];
+        if next > options.cutoff * total {
+            break;
+        }
+        discarded = next;
+        keep -= 1;
+    }
+    keep.min(options.max_bond).max(1)
 }
 
 fn pauli_matrix(p: Pauli) -> [[C64; 2]; 2] {
