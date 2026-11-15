@@ -18,7 +18,7 @@
 
 use super::dmrg::{Env, left_operator, right_operator};
 use super::envs::Envs;
-use super::linalg::{complement_rows, matmul, qr_r, thin_svd};
+use super::linalg::{complement_rows, matmul, qr_r, right_svd};
 use super::mpo::Mpo;
 use super::{Mps, Tensor};
 use crate::error::Error;
@@ -303,7 +303,7 @@ pub(super) fn directions(
     others: MatRef<'_, C64>,
     room: usize,
 ) -> Mat<C64> {
-    let (_, s, v) = thin_svd(compact);
+    let (s, v) = right_svd(compact);
     let keep = s
         .iter()
         .take_while(|&&x| x > EXPAND_TOLERANCE * scale)
@@ -317,6 +317,7 @@ pub(super) fn directions(
 mod tests {
     use super::*;
     use crate::mps::MpsOptions;
+    use crate::mps::linalg::thin_svd;
     use crate::observable::{Pauli, PauliString, PauliSum};
 
     fn assert_orthonormal(m: MatRef<'_, C64>) {

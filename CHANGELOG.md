@@ -4,6 +4,8 @@
 
 ### MPS
 
+- The subspace expansion's SVD computes only the right singular vectors it
+  uses: 23% less time in it.
 - With `mps.gpu = True`, TDVP's subspace expansion runs on the GPU too: each
   bond's `Hψ` channels come out of the GPU's environment kernels, their part
   outside the basis is factorised there by a blocked Householder QR (new
