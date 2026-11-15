@@ -37,6 +37,9 @@ use num_complex::Complex64 as C64;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
+mod expand;
+mod qr;
+
 const COMPLEX: u64 = 16;
 
 /// Tile edge of `mps_gemm.comp`.
@@ -123,6 +126,8 @@ struct Gemm {
     n: usize,
     k: usize,
     batch: usize,
+    /// Add the product into C rather than overwrite it.
+    add: bool,
 }
 
 /// A sparse mixing table, `mps_mix.comp`'s `starts` and `entries`, at
@@ -362,6 +367,7 @@ impl GpuSweep {
                     n: 2 * r,
                     k: l,
                     batch: 1,
+                    add: false,
                 },
                 None,
             );
@@ -397,6 +403,7 @@ impl GpuSweep {
                     n: r,
                     k: 2 * l,
                     batch: dr,
+                    add: false,
                 },
                 None,
             );
@@ -467,6 +474,7 @@ impl GpuSweep {
                     n: r,
                     k: r,
                     batch: dr,
+                    add: false,
                 },
                 None,
             );
@@ -502,6 +510,7 @@ impl GpuSweep {
                     n: l,
                     k: 2 * r,
                     batch: dl,
+                    add: false,
                 },
                 None,
             );
@@ -631,11 +640,11 @@ fn compute_barrier(ctx: &GpuContext, cmd: vk::CommandBuffer) {
 /// Record a product. With `parts` (a scratch buffer of at least
 /// `splits · batch · m · n` elements, and a batch of one), the k range may
 /// be split to fill the GPU, the partial products going to `parts` and
-/// their sum to `c`.
+/// their sum to `c` (never when adding into `c`).
 fn gemm(ctx: &GpuContext, cmd: vk::CommandBuffer, g: Gemm, parts: Option<(u64, usize)>) {
     let tiles = (g.m as u32).div_ceil(TILE) * (g.n as u32).div_ceil(TILE) * g.batch as u32;
     let splits = match parts {
-        Some((_, max)) if g.batch == 1 => (TARGET_GROUPS.div_ceil(tiles))
+        Some((_, max)) if g.batch == 1 && !g.add => (TARGET_GROUPS.div_ceil(tiles))
             .min(g.k as u32 / MIN_SPLIT_K)
             .clamp(1, max as u32),
         _ => 1,
@@ -644,7 +653,7 @@ fn gemm(ctx: &GpuContext, cmd: vk::CommandBuffer, g: Gemm, parts: Option<(u64, u
         Some((addr, _)) if splits > 1 => (addr, g.m * g.n),
         _ => (g.c, 0),
     };
-    let flags = g.a.conj as usize | (g.b.conj as usize) << 1;
+    let flags = g.a.conj as usize | (g.b.conj as usize) << 1 | (g.add as usize) << 2;
     let push = PushBytes::default()
         .addr(g.a.addr)
         .addr(g.b.addr)
@@ -889,6 +898,7 @@ impl GpuOperator<'_> {
                 n: phys * r,
                 k: l,
                 batch: 1,
+                add: false,
             },
             None,
         );
@@ -924,6 +934,7 @@ impl GpuOperator<'_> {
                 n: r,
                 k: dr * r,
                 batch: 1,
+                add: false,
             },
             Some((s.parts, s.max_splits)),
         );

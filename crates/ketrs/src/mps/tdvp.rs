@@ -67,7 +67,7 @@ impl Mps {
         for _ in 0..steps {
             let growing = self.bonds_growing();
             if growing {
-                self.expand_right_bases(&mpo);
+                self.expand_right_bases(&mpo, &envs)?;
                 stale = true;
             }
             if stale {
@@ -86,7 +86,7 @@ impl Mps {
             }
             // Sweep left: the centre starts at site n − 1.
             if growing {
-                self.expand_left_bases(&mpo);
+                self.expand_left_bases(&mpo, &envs)?;
                 for (i, tensor) in self.tensors[..n - 1].iter().enumerate() {
                     envs.update_left(i, tensor, &mpo)?;
                 }

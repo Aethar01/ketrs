@@ -142,13 +142,16 @@ pub(crate) enum MpsKernel {
     Sum = 2,
     /// Dot products and vector updates of a Lanczos recurrence.
     Krylov = 3,
+    /// Column steps of a blocked Householder QR.
+    Qr = 4,
 }
 
-const MPS_SHADERS: [&[u8]; 4] = [
+const MPS_SHADERS: [&[u8]; 5] = [
     spirv!("mps_gemm"),
     spirv!("mps_mix"),
     spirv!("mps_sum"),
     spirv!("mps_krylov"),
+    spirv!("mps_qr"),
 ];
 
 /// Push-constant bytes of the MPS kernels' layout (Vulkan's guaranteed

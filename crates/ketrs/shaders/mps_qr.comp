@@ -1,0 +1,162 @@
+#version 460
+// Column steps of a blocked Householder QR (LAPACK's zgeqr2 within a panel)
+// of a column-major complex matrix A (leading dimension `lda`, `rows` rows),
+// in doubles. Column `k` of a panel ending before column `end`, by `mode`:
+//   0: p[g] = Σ |A[i, k]|² over workgroup g's share of rows k+1 … rows−1;
+//   1: one workgroup: the reflector H = I − τ v v† with v = [1; A[k+1:, k]·σ]
+//      that zeroes column k below the diagonal: β = −sign(re α) √(|α|² + |x|²),
+//      τ = (β − α)/β, σ = 1/(α − β); A[k, k] = β; s[0] = τ, s[1] = σ, t[k] = τ;
+//      τ = 0 and σ = 1 when column k is already zero below a real diagonal;
+//   2: A[i, k] *= σ for i > k (v below its implicit unit entry);
+//   3: p[g + groups·c] = Σ conj(v_i) A[i, k+1+c] over workgroup g's share of
+//      rows k … rows−1, for the panel columns after k (workgroup y = c);
+//   4: one workgroup: w[c] = Σ_g p[g + groups·c] for c < end − k − 1;
+//   5: A[i, k+1+c] −= conj(τ) v_i w[c] for rows i ≥ k: H† applied to the
+//      rest of the panel;
+//   6: V (column-major, rows − k rows, `end` − k columns) = the panel's
+//      reflectors, unit diagonal and zeros above, for its blocked update.
+//   7: p[g] = Σ |a[i]|² over workgroup g's share of a[0 … rows−1], a vector
+//      (for the norm of a whole matrix).
+// Sums run in a fixed order, so results don't depend on scheduling.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer Vec { dvec2 v[]; };
+
+layout(push_constant) uniform Push {
+    uvec2 a_addr, p_addr, s_addr, w_addr;
+    uint rows, lda, k, end, mode, groups;
+};
+
+shared dvec2 part[256];
+
+dvec2 cmul(dvec2 x, dvec2 y) {
+    return dvec2(x.x * y.x - x.y * y.y, x.x * y.y + x.y * y.x);
+}
+
+dvec2 conj_mul(dvec2 x, dvec2 y) {
+    return dvec2(x.x * y.x + x.y * y.y, x.x * y.y - x.y * y.x);
+}
+
+dvec2 cdiv(dvec2 x, dvec2 y) {
+    double d = y.x * y.x + y.y * y.y;
+    return dvec2(x.x * y.x + x.y * y.y, x.y * y.x - x.x * y.y) / d;
+}
+
+// The sum of part[0 … 255] into part[0].
+void reduce(uint t) {
+    barrier();
+    for (uint width = 128u; width > 0u; width >>= 1u) {
+        if (t < width) {
+            part[t] += part[t + width];
+        }
+        barrier();
+    }
+}
+
+void main() {
+    Vec a = Vec(a_addr);
+    Vec p = Vec(p_addr);
+    Vec s = Vec(s_addr);
+    Vec w = Vec(w_addr);
+    uint t = gl_LocalInvocationID.x;
+    uint col = k * lda;
+    if (mode == 7u) {
+        uint chunk = (rows + groups - 1u) / groups;
+        uint begin = gl_WorkGroupID.x * chunk;
+        uint stop = min(begin + chunk, rows);
+        dvec2 acc = dvec2(0.0);
+        for (uint i = begin + t; i < stop; i += 256u) {
+            dvec2 x = a.v[i];
+            acc.x += x.x * x.x + x.y * x.y;
+        }
+        part[t] = acc;
+        reduce(t);
+        if (t == 0u) {
+            p.v[gl_WorkGroupID.x] = part[0];
+        }
+    } else if (mode == 0u || mode == 3u) {
+        uint first = mode == 0u ? k + 1u : k;
+        uint len = rows > first ? rows - first : 0u;
+        uint chunk = (len + groups - 1u) / groups;
+        uint begin = first + gl_WorkGroupID.x * chunk;
+        uint stop = min(begin + chunk, rows);
+        dvec2 acc = dvec2(0.0);
+        if (mode == 0u) {
+            for (uint i = begin + t; i < stop; i += 256u) {
+                dvec2 x = a.v[col + i];
+                acc.x += x.x * x.x + x.y * x.y;
+            }
+        } else {
+            uint target = (k + 1u + gl_WorkGroupID.y) * lda;
+            for (uint i = begin + t; i < stop; i += 256u) {
+                dvec2 v = i == k ? dvec2(1.0, 0.0) : a.v[col + i];
+                acc += conj_mul(v, a.v[target + i]);
+            }
+        }
+        part[t] = acc;
+        reduce(t);
+        if (t == 0u) {
+            p.v[gl_WorkGroupID.x + groups * gl_WorkGroupID.y] = part[0];
+        }
+    } else if (mode == 1u) {
+        part[t] = t < groups ? p.v[t] : dvec2(0.0);
+        reduce(t);
+        if (t == 0u) {
+            double xnorm2 = part[0].x;
+            dvec2 alpha = a.v[col + k];
+            dvec2 tau = dvec2(0.0);
+            dvec2 sigma = dvec2(1.0, 0.0);
+            if (xnorm2 > 0.0 || alpha.y != 0.0) {
+                double beta = -sign(alpha.x == 0.0 ? 1.0 : alpha.x)
+                    * sqrt(alpha.x * alpha.x + alpha.y * alpha.y + xnorm2);
+                tau = dvec2((beta - alpha.x) / beta, -alpha.y / beta);
+                sigma = cdiv(dvec2(1.0, 0.0), alpha - dvec2(beta, 0.0));
+                a.v[col + k] = dvec2(beta, 0.0);
+            }
+            s.v[0] = tau;
+            s.v[1] = sigma;
+            s.v[2 + k] = tau;
+        }
+    } else if (mode == 2u) {
+        dvec2 sigma = s.v[1];
+        uint step = gl_NumWorkGroups.x * 256u;
+        for (uint i = k + 1u + gl_GlobalInvocationID.x; i < rows; i += step) {
+            a.v[col + i] = cmul(a.v[col + i], sigma);
+        }
+    } else if (mode == 4u) {
+        uint count = end - k - 1u;
+        for (uint c = 0u; c < count; c++) {
+            part[t] = t < groups ? p.v[t + groups * c] : dvec2(0.0);
+            reduce(t);
+            if (t == 0u) {
+                w.v[c] = part[0];
+            }
+            barrier();
+        }
+    } else if (mode == 5u) {
+        dvec2 tau = s.v[0];
+        dvec2 ctau = dvec2(tau.x, -tau.y);
+        uint len = rows - k;
+        uint count = end - k - 1u;
+        uint step = gl_NumWorkGroups.x * 256u;
+        for (uint e = gl_GlobalInvocationID.x; e < len * count; e += step) {
+            uint c = e / len, i = k + e % len;
+            dvec2 v = i == k ? dvec2(1.0, 0.0) : a.v[col + i];
+            uint at = (k + 1u + c) * lda + i;
+            a.v[at] -= cmul(ctau, cmul(v, w.v[c]));
+        }
+    } else {
+        // Mode 6: k is the panel's first column; V goes to p.
+        uint len = rows - k;
+        uint count = end - k;
+        uint step = gl_NumWorkGroups.x * 256u;
+        for (uint e = gl_GlobalInvocationID.x; e < len * count; e += step) {
+            uint c = e / len, r = e % len;
+            p.v[c * len + r] = r == c ? dvec2(1.0, 0.0)
+                : (r > c ? a.v[(k + c) * lda + k + r] : dvec2(0.0));
+        }
+    }
+}

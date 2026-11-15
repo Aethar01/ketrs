@@ -4,6 +4,15 @@
 
 ### MPS
 
+- With `mps.gpu = True`, TDVP's subspace expansion runs on the GPU too: each
+  bond's `Hψ` channels come out of the GPU's environment kernels, their part
+  outside the basis is factorised there by a blocked Householder QR (new
+  `mps_qr.comp`, as LAPACK's `zgeqrf`), and only its small triangular
+  factor comes back for an SVD on the CPU. The expansion was the largest
+  CPU cost left in GPU sweeps: with a long-range MPO (bond about 80–116), a
+  tall QR per bond on one thread. Small bonds stay on the CPU. Results
+  match the CPU's up to rounding; where `max_bond` cuts through exactly
+  degenerate directions, as from a product state, either choice is kept.
 - TDVP's subspace expansion factorises only the part of each bond's `Hψ`
   channels outside the current basis, in an orthonormal basis of the
   complement, and with large QRs on all cores: 1.2–1.6× faster on six
