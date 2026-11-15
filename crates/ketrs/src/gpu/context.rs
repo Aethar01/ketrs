@@ -249,7 +249,10 @@ pub struct GpuContext {
     instance: ash::Instance,
     pub(crate) device: ash::Device,
     queue: vk::Queue,
+    physical: vk::PhysicalDevice,
     memory: vk::PhysicalDeviceMemoryProperties,
+    /// Whether the driver reports memory budgets (`VK_EXT_memory_budget`).
+    memory_budget: bool,
     max_storage_range: u64,
     /// Whether kernels can index several state buffers, for states larger
     /// than one buffer (Vulkan 1.2 buffer device addresses).
@@ -336,15 +339,28 @@ impl GpuContext {
             };
             v12.buffer_device_address == vk::TRUE
         };
+        // SAFETY: plain query on a valid physical device.
+        let memory_budget = unsafe {
+            instance
+                .get()
+                .enumerate_device_extension_properties(physical)
+        }
+        .unwrap_or_default()
+        .iter()
+        .any(|e| e.extension_name_as_c_str() == Ok(c"VK_EXT_memory_budget"));
+        let extensions = [c"VK_EXT_memory_budget".as_ptr()];
+        let extensions = if memory_budget { &extensions[..] } else { &[] };
         let mut v12 =
             vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(chunks_supported);
-        // SAFETY: the chosen device supports these features and the family.
+        // SAFETY: the chosen device supports these features, extensions and
+        // the family.
         let device = unsafe {
             instance.get().create_device(
                 physical,
                 &vk::DeviceCreateInfo::default()
                     .queue_create_infos(&queue_info)
                     .enabled_features(&features)
+                    .enabled_extension_names(extensions)
                     .push_next(&mut v12),
                 None,
             )
@@ -358,7 +374,9 @@ impl GpuContext {
             queue: unsafe { device.get_device_queue(family, 0) },
             instance: instance.take(),
             device,
+            physical,
             memory,
+            memory_budget,
             max_storage_range: props.limits.max_storage_buffer_range as u64,
             chunks_supported,
             f64_supported,
@@ -600,6 +618,38 @@ impl GpuContext {
 
     /// The pipeline for `kernel`, in its chunked variant if `chunked` and
     /// its single-precision one if `single`.
+    /// An error if `bytes` more of memory type `kind` would exceed this
+    /// process's budget, as the driver reports it (counting other
+    /// processes' use). Allocations past it may still succeed, only for
+    /// later command submissions to fail and the device to be lost (as with
+    /// radv), which no caller can recover from.
+    fn check_budget(&self, kind: u32, bytes: u64) -> Result<(), Error> {
+        if !self.memory_budget {
+            return Ok(());
+        }
+        let heap = self.memory.memory_types[kind as usize].heap_index as usize;
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut props = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        // SAFETY: plain query on a valid physical device supporting the
+        // extension.
+        unsafe {
+            self.instance
+                .get_physical_device_memory_properties2(self.physical, &mut props)
+        };
+        let (limit, used) = (budget.heap_budget[heap], budget.heap_usage[heap]);
+        // A zero budget means the driver doesn't know.
+        if limit > 0 && used.saturating_add(bytes) > limit {
+            return Err(Error::Gpu(format!(
+                "not enough GPU memory: {} MiB more needed, {} MiB left of this process's \
+                 {} MiB budget (other processes' use counts against it)",
+                bytes >> 20,
+                limit.saturating_sub(used) >> 20,
+                limit >> 20
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn pipeline(&self, kernel: Kernel, chunked: bool, single: bool) -> vk::Pipeline {
         self.pipelines[kernel as usize * 4 + single as usize * 2 + chunked as usize]
     }
@@ -831,6 +881,12 @@ impl Buffer {
                 d.destroy_buffer(buffer, None);
                 return Err(Error::Gpu("no suitable GPU memory type".into()));
             };
+            if memory == Memory::Device
+                && let Err(e) = ctx.check_budget(kind, req.size)
+            {
+                d.destroy_buffer(buffer, None);
+                return Err(e);
+            }
             let mut flags = vk::MemoryAllocateFlagsInfo::default()
                 .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
             let mut info = vk::MemoryAllocateInfo::default()
@@ -925,5 +981,33 @@ impl Drop for Buffer {
             self.ctx.device.destroy_buffer(self.buffer, None);
             self.ctx.device.free_memory(self.memory, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocations_past_the_memory_budget_fail_cleanly() {
+        let Ok(ctx) = GpuContext::new() else { return };
+        if !ctx.memory_budget {
+            eprintln!("skipping: the driver reports no memory budget");
+            return;
+        }
+        let kind = ctx
+            .memory_type(u32::MAX, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .expect("device-local memory");
+        assert!(ctx.check_budget(kind, 1 << 20).is_ok());
+        // An exabyte is past any budget: an error, not a lost device later.
+        let err = ctx.check_budget(kind, 1 << 60).unwrap_err().to_string();
+        assert!(err.contains("not enough GPU memory"), "{err}");
+        let buffer = Buffer::new(
+            &ctx,
+            1 << 60,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            Memory::Device,
+        );
+        assert!(buffer.is_err());
     }
 }

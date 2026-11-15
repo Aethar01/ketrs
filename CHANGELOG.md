@@ -4,6 +4,13 @@
 
 ### MPS
 
+- GPU memory past the driver's budget is now an error ("not enough GPU
+  memory"), checked before each allocation with `VK_EXT_memory_budget`,
+  which counts other processes' use. With radv, two processes that together
+  overcommitted the card's memory both died with "The logical device has
+  been lost" at their next submission. `Mps::set_gpu` and `MPS.gpu`
+  document the memory a sweep needs: about `32 n D χ²` bytes, so about
+  25 GB for 402 qubits at MPO bond 30 and `χ = 256`.
 - `Mps::project(qubit, outcome)` and `Mps::project_all`, in Python
   `MPS.project(qubit, outcome)` or `MPS.project([(qubit, outcome), ...])`:
   apply `|b⟩⟨b|` and renormalise, returning the outcome's probability (the

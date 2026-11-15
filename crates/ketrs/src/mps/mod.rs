@@ -234,12 +234,20 @@ impl Mps {
     /// the CPU with `None` (the default).
     ///
     /// The sweeps keep their environments in GPU memory and apply the
-    /// effective Hamiltonians there, which is nearly all of their work; the
-    /// tensors, SVDs and Krylov iterations stay on the CPU, so results agree
-    /// with the CPU's up to rounding. It pays from bond dimensions of a few
-    /// tens upwards. Fails if the GPU lacks 64-bit floats or buffer device
-    /// addresses ([`GpuContext::supports_mps`](crate::gpu::GpuContext::supports_mps)).
+    /// effective Hamiltonians there, with the Krylov and Lanczos
+    /// recurrences, which is nearly all of their work; the tensors, SVDs and
+    /// subspace expansion stay on the CPU, so results agree with the CPU's
+    /// up to rounding. It pays from bond dimensions of a few tens upwards.
+    /// Fails if the GPU lacks 64-bit floats or buffer device addresses
+    /// ([`GpuContext::supports_mps`](crate::gpu::GpuContext::supports_mps)).
     /// Clones share the GPU.
+    ///
+    /// GPU memory: a sweep keeps two environments per site, each
+    /// `D χ² × 16` bytes for MPO bond dimension `D` and bond dimension `χ`,
+    /// so about `32 n D χ²` bytes in all. With 402 qubits, `D ≈ 30` and
+    /// `χ = 256`, that is about 25 GB; at `χ = 160`, about 10 GB. An
+    /// allocation past the driver's budget (which counts other processes)
+    /// fails with an error rather than losing the device.
     #[cfg(feature = "gpu")]
     pub fn set_gpu(
         &mut self,
