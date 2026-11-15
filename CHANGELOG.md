@@ -15,7 +15,15 @@
   conserve the charges is refused, naming terms) and keep their
   environments block-sparse, and TDVP's subspace expansion and DMRG's
   noise add directions sector by sector, ranked across sectors as the
-  dense code ranks them. Gates need `to_dense` first. For a lattice
+  dense code ranks them. Gates need `to_dense` first. In Python:
+  `ketrs.Charge.u1`, `Charge.modulo`, `Charge.weights`,
+  `MPS.with_charges`, `MPS.to_dense()`, `MPS.charges`,
+  `MPS.total_charge` and `MPS.bond_sectors(bond)`. A symmetric MPS sweeps
+  on the CPU even with `gpu` set. Preparing a wave packet in a 194-qubit
+  lattice gauge theory (its charge and 48 Gauss laws as charges) took
+  1.5 s, 5.0 s and 14.7 s at bond dimension 64, 128 and 256 on six CPU
+  threads, against 34 s, 200 s and 811 s for dense sweeps on an RX
+  9060 XT, with environments about 30× smaller. For a lattice
   gauge theory with its charge and Gauss laws as charges, the graded MPO
   alone is 3–4× narrower than the Pauli one (evolution bond 16 instead
   of 58).

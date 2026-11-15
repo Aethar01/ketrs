@@ -261,6 +261,10 @@ impl Mps {
     /// driver moves idle buffers to system memory, slowly); with other
     /// processes on it, an allocation past the driver's budget fails with
     /// an error rather than losing the device in every process.
+    ///
+    /// An MPS with charges (see [`with_charges`](Self::with_charges)) sweeps
+    /// on the CPU whatever this says: its block-sparse sweeps there are
+    /// faster than dense ones on a GPU.
     #[cfg(feature = "gpu")]
     pub fn set_gpu(
         &mut self,

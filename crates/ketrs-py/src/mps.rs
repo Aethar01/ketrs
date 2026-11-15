@@ -1,7 +1,7 @@
 //! Python bindings for matrix product states.
 
 use super::{Observable, PyCircuit, PyStatevector, State, clbit_counts, rng_from_seed, to_py_err};
-use ketrs::{Complex64 as C64, DmrgOptions, Mps, MpsOptions, Statevector};
+use ketrs::{Charge, Complex64 as C64, DmrgOptions, Mps, MpsOptions, Statevector};
 use numpy::PyArray1;
 use pyo3::exceptions::{PyRuntimeWarning, PyValueError};
 use pyo3::prelude::*;
@@ -18,6 +18,73 @@ struct PyMps {
     inner: Mps,
     rng: StdRng,
 }
+
+/// A conserved additive charge for `MPS.with_charges`: U(1), or Z_n
+/// (added modulo n), with a value for each qubit state. A basis state's
+/// charge is the sum of its qubits' values.
+///
+/// Particle number on n qubits is `Charge.weights([1] * n)`, its parity
+/// `Charge.modulo(2, [(0, 1)] * n)`, and `2 S^z` is
+/// `Charge.u1([(1, -1)] * n)`.
+#[pyclass(name = "Charge", module = "ketrs", frozen, from_py_object)]
+#[derive(Clone)]
+struct PyCharge {
+    inner: Charge,
+}
+
+#[pymethods]
+impl PyCharge {
+    /// A U(1) charge with `values[q] = (value of |0⟩, value of |1⟩)` for
+    /// each qubit q.
+    #[staticmethod]
+    fn u1(values: Vec<(i64, i64)>) -> Self {
+        PyCharge {
+            inner: Charge::u1(values.into_iter().map(|(a, b)| [a, b]).collect()),
+        }
+    }
+
+    /// A Z_n charge (n ≥ 1), values as for `u1`, added modulo n.
+    #[staticmethod]
+    fn modulo(n: u32, values: Vec<(i64, i64)>) -> PyResult<Self> {
+        if n == 0 {
+            return Err(PyValueError::new_err("Z_n needs n ≥ 1"));
+        }
+        Ok(PyCharge {
+            inner: Charge::modulo(n, values.into_iter().map(|(a, b)| [a, b]).collect()),
+        })
+    }
+
+    /// A U(1) charge counting `weights[q]` for each qubit q in |1⟩.
+    #[staticmethod]
+    fn weights(weights: Vec<i64>) -> Self {
+        PyCharge {
+            inner: Charge::weights(weights),
+        }
+    }
+
+    /// n for a Z_n charge, None for U(1).
+    #[getter]
+    fn modulus(&self) -> Option<u32> {
+        self.inner.modulus()
+    }
+
+    /// `(value of |0⟩, value of |1⟩)` for each qubit.
+    #[getter]
+    fn values(&self) -> Vec<(i64, i64)> {
+        self.inner.values().iter().map(|v| (v[0], v[1])).collect()
+    }
+
+    fn __repr__(&self) -> String {
+        let kind = match self.inner.modulus() {
+            Some(n) => format!("Z_{n}"),
+            None => "U(1)".into(),
+        };
+        format!("Charge({kind}, {} qubits)", self.inner.values().len())
+    }
+}
+
+/// A bond's sectors: `(charges of the qubits to its left, dimension)`.
+type BondSectors = Vec<(Vec<i64>, usize)>;
 
 fn options(max_bond: usize, cutoff: f64) -> PyResult<MpsOptions> {
     if max_bond == 0 {
@@ -214,6 +281,9 @@ impl PyMps {
     /// long-range MPO with D ≈ 100. Alone on a GPU, a sweep may overcommit it
     /// (slowly); sharing it with other processes, running out raises
     /// ValueError ("not enough GPU memory") rather than losing the device.
+    /// An MPS with charges (see `with_charges`) sweeps on the CPU whatever
+    /// this says: its block-sparse sweeps there are faster than dense ones
+    /// on a GPU.
     #[getter]
     fn gpu(&self) -> bool {
         #[cfg(feature = "gpu")]
@@ -329,11 +399,68 @@ impl PyMps {
 
     fn __repr__(&self) -> String {
         let max = self.inner.bond_dimensions().into_iter().max().unwrap_or(1);
+        let charges = match self.inner.total_charge() {
+            Some(total) => format!(", charges={total:?}"),
+            None => String::new(),
+        };
         format!(
-            "MPS(n_qubits={}, max bond in use={max}, truncation_error={:.1e})",
+            "MPS(n_qubits={}, max bond in use={max}, truncation_error={:.1e}{charges})",
             self.inner.n_qubits(),
             self.inner.truncation_error()
         )
+    }
+
+    /// This state as a symmetric MPS with definite `charges` (a list of
+    /// `Charge`), as a new MPS.
+    ///
+    /// Each bond's basis is split into charge sectors. DMRG and TDVP then run
+    /// on block-sparse tensors within the state's sector, with a
+    /// Hamiltonian that must conserve every charge (ValueError otherwise,
+    /// naming terms that don't); that saves time and memory roughly in
+    /// proportion to the number of sectors per bond. Product states convert
+    /// exactly; a general state is projected onto its largest sector and
+    /// truncated as `max_bond` and `cutoff` say, and ValueError is raised if
+    /// more than 1e-8 of its weight lies outside it. Gates can't be run on a
+    /// symmetric MPS: see `to_dense`. Expectations, sampling, `project` and
+    /// `copy` work as usual.
+    fn with_charges(&self, charges: Vec<PyCharge>) -> PyResult<Self> {
+        let charges: Vec<Charge> = charges.into_iter().map(|c| c.inner).collect();
+        Ok(PyMps {
+            inner: self.inner.with_charges(&charges).map_err(to_py_err)?,
+            rng: self.rng.clone(),
+        })
+    }
+
+    /// The same state without charges, as a new MPS that gates can run on.
+    fn to_dense(&self) -> Self {
+        PyMps {
+            inner: self.inner.to_dense(),
+            rng: self.rng.clone(),
+        }
+    }
+
+    /// The charges of a symmetric MPS (see `with_charges`), or None.
+    #[getter]
+    fn charges(&self) -> Option<Vec<PyCharge>> {
+        self.inner
+            .charges()
+            .map(|cs| cs.iter().map(|c| PyCharge { inner: c.clone() }).collect())
+    }
+
+    /// The value of each charge on a symmetric MPS, or None.
+    #[getter]
+    fn total_charge(&self) -> Option<Vec<i64>> {
+        self.inner.total_charge()
+    }
+
+    /// The sectors of the bond between qubits `bond` and `bond + 1` of a
+    /// symmetric MPS, as `(charges of the qubits to its left, dimension)`
+    /// pairs, or None without charges.
+    fn bond_sectors(&self, bond: usize) -> PyResult<Option<BondSectors>> {
+        if bond + 1 >= self.inner.n_qubits() {
+            return Err(PyValueError::new_err(format!("no bond {bond}")));
+        }
+        Ok(self.inner.bond_sectors(bond))
     }
 
     /// Apply `circuit`, which must have the same width. A circuit with
@@ -467,5 +594,6 @@ impl PyMps {
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyCharge>()?;
     m.add_class::<PyMps>()
 }

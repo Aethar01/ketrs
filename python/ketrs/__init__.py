@@ -11,6 +11,7 @@ array([0.5, 0. , 0. , 0.5])
 
 from ketrs._ketrs import (
     Channel,
+    Charge,
     Circuit,
     DensityMatrix,
     MPS,
@@ -32,6 +33,7 @@ from ketrs._ketrs import (
 
 __all__ = [
     "Channel",
+    "Charge",
     "Circuit",
     "DensityMatrix",
     "MPS",

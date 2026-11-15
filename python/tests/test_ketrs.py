@@ -1112,3 +1112,47 @@ def test_mps_sweeps_on_gpu_match_cpu():
     overlap = np.vdot(cpu, gpu_amps)
     assert abs(overlap) == pytest.approx(1.0, abs=1e-9)
     np.testing.assert_allclose(gpu_amps, overlap / abs(overlap) * cpu, atol=1e-8)
+
+
+def _heisenberg(n):
+    terms = []
+    for q in range(n - 1):
+        for p in "XYZ":
+            label = ["I"] * n
+            label[n - 1 - q] = label[n - 2 - q] = p
+            terms.append(("".join(label), 1.0 + 0.1 * q))
+    return ketrs.PauliSum(terms)
+
+
+def test_mps_with_charges_matches_dense():
+    n = 8
+    neel = ketrs.Circuit(n)
+    for q in range(1, n, 2):
+        neel.x(q)
+    dense = ketrs.MPS.from_circuit(neel, max_bond=32)
+    charges = [ketrs.Charge.weights([1] * n), ketrs.Charge.modulo(2, [(0, 1)] * n)]
+    sym = dense.with_charges(charges)
+    assert sym.total_charge == [4, 0]
+    assert [c.modulus for c in sym.charges] == [None, 2]
+    assert sym.charges[0].values == [(0, 1)] * n
+    assert sym.bond_sectors(3) == [([2, 0], 1)]
+    assert dense.charges is None and dense.total_charge is None
+    h = _heisenberg(n)
+    want, _, _ = dense.copy().dmrg(h, max_bond=32)
+    got, _, _ = sym.dmrg(h, max_bond=32)
+    assert got == pytest.approx(want, abs=1e-8)
+    # TDVP stays in the sector and matches dense TDVP from the same state.
+    dense = sym.to_dense()
+    assert dense.charges is None
+    sym.tdvp(h, 0.4, 4)
+    dense.tdvp(h, 0.4, 4)
+    np.testing.assert_allclose(
+        sym.to_statevector().amplitudes(), dense.to_statevector().amplitudes(), atol=1e-8
+    )
+    assert sym.copy().total_charge == [4, 0]
+    with pytest.raises(ValueError, match="to_dense"):
+        sym.run(ketrs.Circuit(n).x(0))
+    with pytest.raises(ValueError, match="conserve"):
+        sym.tdvp(ketrs.PauliSum([("I" * (n - 1) + "X", 1.0)]), 0.1)
+    with pytest.raises(ValueError, match="outside"):
+        ketrs.MPS.from_circuit(ketrs.Circuit(n).h(0)).with_charges(charges)
