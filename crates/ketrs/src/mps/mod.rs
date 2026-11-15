@@ -46,6 +46,10 @@ use std::collections::BTreeMap;
 const ZERO: C64 = C64::new(0.0, 0.0);
 const ONE: C64 = C64::new(1.0, 0.0);
 
+/// The smallest probability [`Mps::project`] renormalises: below it the
+/// outcome is numerically impossible.
+pub const MIN_PROJECTION: f64 = 1e-12;
+
 /// Which side of a split takes the singular values (and the centre).
 #[derive(Clone, Copy)]
 enum Absorb {
@@ -595,14 +599,49 @@ impl Mps {
     pub fn measure(&mut self, qubit: usize, rng: &mut impl Rng) -> Result<bool, Error> {
         let (one, total) = self.qubit_weights(qubit)?;
         let outcome = rng.random::<f64>() * total < one;
-        self.project(qubit, outcome, one, total);
+        self.project_centre(qubit, outcome, one, total);
         Ok(outcome)
+    }
+
+    /// Project `qubit` onto `outcome` (apply `|b⟩⟨b|`) and renormalise,
+    /// returning the probability that outcome had: a measurement whose
+    /// result is chosen rather than drawn, for post-selection. The state
+    /// stays in canonical form, with its centre at `qubit`.
+    ///
+    /// Errors, leaving the state unchanged (though its centre may have
+    /// moved), if the probability is below [`MIN_PROJECTION`], where there
+    /// is nothing left to renormalise.
+    pub fn project(&mut self, qubit: usize, outcome: bool) -> Result<f64, Error> {
+        let (one, total) = self.qubit_weights(qubit)?;
+        let weight = if outcome { one } else { total - one };
+        let probability = weight / total;
+        if probability.is_nan() || probability < MIN_PROJECTION {
+            return Err(Error::InvalidArgument(format!(
+                "qubit {qubit} is {} with probability {probability:.1e}, too small to project onto",
+                u8::from(outcome)
+            )));
+        }
+        self.project_centre(qubit, outcome, one, total);
+        Ok(probability)
+    }
+
+    /// [`project`](Self::project) onto each `(qubit, outcome)` in turn,
+    /// returning their joint probability. Errors, leaving the state
+    /// unchanged, if any step would.
+    pub fn project_all(&mut self, outcomes: &[(usize, bool)]) -> Result<f64, Error> {
+        let mut projected = self.clone();
+        let mut probability = 1.0;
+        for &(qubit, outcome) in outcomes {
+            probability *= projected.project(qubit, outcome)?;
+        }
+        *self = projected;
+        Ok(probability)
     }
 
     /// With the centre at `qubit` and its weights `(one, total)`, project
     /// its physical index onto `outcome` and renormalise; the rest stays
     /// orthonormal.
-    fn project(&mut self, qubit: usize, outcome: bool, one: f64, total: f64) {
+    fn project_centre(&mut self, qubit: usize, outcome: bool, one: f64, total: f64) {
         let weight = if outcome { one } else { total - one };
         let scale = (total / weight).sqrt();
         let t = &mut self.tensors[qubit];
@@ -705,7 +744,7 @@ impl Trajectory for Mps {
         (one, total): (f64, f64),
     ) -> Result<(), Error> {
         // `qubit_weights` left the centre at `qubit`, and cloning keeps it.
-        self.project(qubit, outcome, one, total);
+        self.project_centre(qubit, outcome, one, total);
         Ok(())
     }
 

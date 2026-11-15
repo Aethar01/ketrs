@@ -615,6 +615,7 @@ def test_mps_copy_is_independent():
     for twin in (mps.copy(), copy.copy(mps), copy.deepcopy(mps)):
         assert (twin.max_bond, twin.cutoff, twin.gpu) == (32, 0.0, False)
         np.testing.assert_array_equal(twin.to_statevector().amplitudes(), before)
+        twin.project(0, 1)
         twin.max_bond = 4
         twin.run(ketrs.Circuit(6).h(2).cx(2, 5))
     np.testing.assert_array_equal(mps.to_statevector().amplitudes(), before)
@@ -622,6 +623,36 @@ def test_mps_copy_is_independent():
     # The random generator is copied too, unless reseeded.
     np.testing.assert_array_equal(mps.copy().sample(100), mps.copy().sample(100))
     assert (mps.copy(seed=1).sample(100) != mps.copy(seed=2).sample(100)).any()
+
+
+def test_mps_project_matches_statevector_projection():
+    qc = random_circuit(5, depth=6, max_operands=2, seed=8)
+    amps = QiskitStatevector(qc).data
+    index = np.arange(32)
+
+    def projected(state, pairs):
+        keep = np.all([((index >> q) & 1) == b for q, b in pairs], axis=0)
+        p = np.sum(np.abs(state[keep]) ** 2)
+        return np.where(keep, state, 0) / np.sqrt(p), p
+
+    mps = ketrs.MPS.from_circuit(from_qiskit(qc), max_bond=32, cutoff=0.0)
+    want, p_want = projected(amps, [(2, 1)])
+    assert mps.project(2, 1) == pytest.approx(p_want, abs=1e-12)
+    np.testing.assert_allclose(mps.to_statevector().amplitudes(), want, atol=1e-10)
+
+    mps = ketrs.MPS.from_circuit(from_qiskit(qc), max_bond=32, cutoff=0.0)
+    want, p_want = projected(amps, [(0, 0), (3, 1)])
+    assert mps.project([(0, 0), (3, True)]) == pytest.approx(p_want, abs=1e-12)
+    np.testing.assert_allclose(mps.to_statevector().amplitudes(), want, atol=1e-10)
+
+    zero = ketrs.MPS(3)
+    with pytest.raises(ValueError, match="probability"):
+        zero.project(1, 1)
+    with pytest.raises(ValueError, match="needs an outcome"):
+        zero.project(1)
+    with pytest.raises(ValueError, match="0 or 1"):
+        zero.project(1, 2)
+    assert zero.project(1, 0) == pytest.approx(1.0)
 
 
 def test_mps_tdvp_matches_exact_evolution():

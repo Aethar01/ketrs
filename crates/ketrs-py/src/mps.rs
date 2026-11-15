@@ -55,6 +55,13 @@ impl BasisState {
     }
 }
 
+/// The qubits of `MPS.project`: one qubit, or `(qubit, outcome)` pairs.
+#[derive(FromPyObject)]
+enum Projection {
+    One(usize),
+    Many(Vec<(usize, u8)>),
+}
+
 #[pymethods]
 impl PyMps {
     /// `|0…0⟩` on `n_qubits` qubits.
@@ -280,6 +287,39 @@ impl PyMps {
 
     fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
         self.copy(None)
+    }
+
+    /// Project onto a measurement outcome and renormalise, returning its
+    /// probability: `project(qubit, outcome)` applies `|b⟩⟨b|` to one qubit,
+    /// and `project([(qubit, outcome), ...])` to several in turn, returning
+    /// their joint probability. Unlike `run` with a measurement, the outcome
+    /// is chosen rather than drawn, for post-selection. The state stays in
+    /// canonical form. Raises ValueError, leaving the state unchanged, if
+    /// the probability is about zero (below 1e-12).
+    #[pyo3(signature = (qubits, outcome=None))]
+    fn project(&mut self, qubits: Projection, outcome: Option<u8>) -> PyResult<f64> {
+        let bit = |b: u8| match b {
+            0 | 1 => Ok(b == 1),
+            _ => Err(PyValueError::new_err("an outcome must be 0 or 1")),
+        };
+        let outcomes = match (qubits, outcome) {
+            (Projection::One(qubit), Some(b)) => vec![(qubit, bit(b)?)],
+            (Projection::Many(pairs), None) => pairs
+                .into_iter()
+                .map(|(qubit, b)| Ok((qubit, bit(b)?)))
+                .collect::<PyResult<_>>()?,
+            (Projection::One(_), None) => {
+                return Err(PyValueError::new_err(
+                    "project(qubit, outcome) needs an outcome",
+                ));
+            }
+            (Projection::Many(_), Some(_)) => {
+                return Err(PyValueError::new_err(
+                    "give either project(qubit, outcome) or project([(qubit, outcome), ...])",
+                ));
+            }
+        };
+        self.inner.project_all(&outcomes).map_err(to_py_err)
     }
 
     fn __repr__(&self) -> String {

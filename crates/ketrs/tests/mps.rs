@@ -183,6 +183,99 @@ fn unbound_circuits_are_rejected() {
     assert!(Mps::from_circuit(&circ, MpsOptions::default()).is_err());
 }
 
+// --- Projection -----------------------------------------------------------------
+
+/// `|b⟩⟨b|` on `qubit` of `amps`, renormalised, and its probability.
+fn project_amplitudes(
+    amps: &[ketrs::Complex64],
+    qubit: usize,
+    b: bool,
+) -> (Vec<ketrs::Complex64>, f64) {
+    let keep = |i: usize| (i >> qubit & 1 == 1) == b;
+    let p: f64 = amps
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| keep(*i))
+        .map(|(_, a)| a.norm_sqr())
+        .sum();
+    let projected = amps
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            if keep(i) {
+                a / p.sqrt()
+            } else {
+                ketrs::Complex64::new(0.0, 0.0)
+            }
+        })
+        .collect();
+    (projected, p)
+}
+
+#[test]
+fn projection_matches_the_statevector() {
+    let n = 7;
+    let circ = random_circuit(n, 60, 11);
+    let start = Mps::from_circuit(&circ, exact()).unwrap();
+    for qubit in [0, 3, 6] {
+        for b in [false, true] {
+            let mut mps = start.clone();
+            let (want, p_want) = project_amplitudes(&start.to_amplitudes(), qubit, b);
+            let p = mps.project(qubit, b).unwrap();
+            assert!((p - p_want).abs() < 1e-12, "qubit {qubit}: {p} vs {p_want}");
+            assert!((mps.norm_sqr() - 1.0).abs() < 1e-12);
+            for (a, w) in mps.to_amplitudes().iter().zip(&want) {
+                assert!((a - w).norm() < 1e-10);
+            }
+            // Still canonical: later operations see the projected state.
+            let field = PauliSum::from_list([("IIIZIII", 1.0), ("XIIIIIX", 0.5)]).unwrap();
+            let state = Statevector::from_amplitudes(want).unwrap();
+            assert!(
+                (mps.expectation(&field).unwrap() - state.expectation(&field).unwrap()).abs()
+                    < 1e-10
+            );
+        }
+    }
+}
+
+#[test]
+fn projecting_several_qubits_multiplies_their_probabilities() {
+    let n = 6;
+    let circ = random_circuit(n, 50, 12);
+    let mut mps = Mps::from_circuit(&circ, exact()).unwrap();
+    let outcomes = [(1, true), (4, false), (2, true)];
+    let mut want = mps.to_amplitudes();
+    let mut p_want = 1.0;
+    for &(qubit, b) in &outcomes {
+        let (next, p) = project_amplitudes(&want, qubit, b);
+        (want, p_want) = (next, p_want * p);
+    }
+    let p = mps.project_all(&outcomes).unwrap();
+    assert!((p - p_want).abs() < 1e-12, "{p} vs {p_want}");
+    for (a, w) in mps.to_amplitudes().iter().zip(&want) {
+        assert!((a - w).norm() < 1e-10);
+    }
+}
+
+#[test]
+fn projecting_onto_an_impossible_outcome_fails_and_changes_nothing() {
+    let mut circ = Circuit::new(4);
+    circ.h(0).cx(0, 1).x(3);
+    let mut mps = Mps::from_circuit(&circ, exact()).unwrap();
+    let before = mps.to_amplitudes();
+    assert!(mps.project(3, false).is_err());
+    // A later impossible step undoes the earlier ones too.
+    assert!(mps.project_all(&[(0, true), (1, false)]).is_err());
+    // The same state, up to rounding from moving the centre.
+    for (a, b) in mps.to_amplitudes().iter().zip(&before) {
+        assert!((a - b).norm() < 1e-12);
+    }
+    assert!(mps.project(9, true).is_err());
+    // Possible outcomes still work, with qubits 0 and 1 entangled.
+    assert!((mps.project(0, true).unwrap() - 0.5).abs() < 1e-12);
+    assert!((mps.probability_one(1).unwrap() - 1.0).abs() < 1e-12);
+}
+
 // --- DMRG ---------------------------------------------------------------------
 
 use ketrs::DmrgOptions;

@@ -4,6 +4,13 @@
 
 ### MPS
 
+- `Mps::project(qubit, outcome)` and `Mps::project_all`, in Python
+  `MPS.project(qubit, outcome)` or `MPS.project([(qubit, outcome), ...])`:
+  apply `|b⟩⟨b|` and renormalise, returning the outcome's probability (the
+  joint one for several qubits). A measurement whose result is chosen, for
+  post-selection: preparing a state by keeping one branch of an ancilla no
+  longer needs repeated random tries. The state stays in canonical form;
+  an outcome with probability below 1e-12 raises and leaves it unchanged.
 - `MPS.copy()`, also `copy.copy` and `copy.deepcopy`: an independent copy
   of the tensors, settings, `gpu` flag and random generator (`copy(seed=…)`
   reseeds it), so several states can be prepared from one DMRG ground state
