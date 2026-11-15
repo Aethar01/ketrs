@@ -26,7 +26,7 @@ use super::dmrg::Env;
 use super::mpo::{Mpo, Rows, left_keyed, pair_keyed, right_keyed};
 use crate::error::Error;
 use crate::gpu::{Buffer, GpuContext, MPS_PUSH_BYTES, Memory, MpsKernel};
-use crate::statevector::eigen::{EigenOptions, lanczos_lowest_from, tridiagonal_lowest};
+use crate::statevector::eigen::{EigenOptions, Ritz, RitzTracker, lanczos_lowest_from};
 use crate::statevector::evolve::{
     KRYLOV_CHECK, KRYLOV_MAX, STEP_TOLERANCE, krylov_covers, krylov_partial_step,
 };
@@ -1077,17 +1077,13 @@ impl GpuOperator<'_> {
         rec.download(s, rec.psi, amps)
     }
 
-    /// The lowest eigenvector of `H`, by the same Lanczos iteration as
-    /// [`lanczos_lowest_from`] from the unit vector `v0`, with the
-    /// recurrence in GPU memory. The basis is kept there rather than
+    /// The lowest Ritz pair of `H` (see [`Ritz`]), by the same Lanczos
+    /// iteration as [`lanczos_lowest_from`] from the unit vector `v0`, with
+    /// the recurrence in GPU memory. The basis is kept there rather than
     /// replayed, so this takes half the products; if it would outgrow
     /// [`LANCZOS_BYTES`] before converging, the solve is redone with the
     /// CPU's recurrence (still applying `H` on the GPU).
-    pub(super) fn lowest(
-        &self,
-        v0: &[C64],
-        options: &EigenOptions,
-    ) -> Result<(f64, Vec<C64>), Error> {
+    pub(super) fn lowest(&self, v0: &[C64], options: &EigenOptions) -> Result<Ritz<C64>, Error> {
         self.lowest_within(v0, options, LANCZOS_BYTES)
     }
 
@@ -1097,7 +1093,7 @@ impl GpuOperator<'_> {
         v0: &[C64],
         options: &EigenOptions,
         budget: u64,
-    ) -> Result<(f64, Vec<C64>), Error> {
+    ) -> Result<Ritz<C64>, Error> {
         let len = self.len();
         assert_eq!(v0.len(), len);
         let fits = (budget / (len as u64 * COMPLEX)) as usize;
@@ -1111,40 +1107,39 @@ impl GpuOperator<'_> {
         rec.start(s, v0, false)?;
 
         // As `lanczos_lowest_from`: grow the tridiagonal matrix until its
-        // lowest Ritz pair converges.
-        let (mut alphas, mut betas) = (Vec::new(), Vec::new());
+        // lowest Ritz pair converges, else keep the best one.
+        let mut tracker = RitzTracker::new(options.tolerance);
         let mut ritz = None;
         let limit = options.max_iterations.min(capacity - 1);
         let mut k = 0;
         'steps: while k < limit {
             let end = (k + rec.batch).min(limit);
             for (alpha, beta) in rec.steps(s, k..end)? {
-                alphas.push(alpha);
-                let (theta, v) = tridiagonal_lowest(&alphas, &betas);
-                if beta * v[v.len() - 1].abs() <= options.tolerance || beta <= breakdown(&alphas) {
-                    ritz = Some((theta, v));
+                ritz = tracker.step(alpha, beta);
+                if ritz.is_some() {
                     break 'steps;
                 }
-                betas.push(beta);
             }
             k = end;
         }
-        let Some((theta, v)) = ritz else {
-            if limit < options.max_iterations {
-                drop(guard);
-                return lanczos_lowest_from(self, v0, &[], options);
-            }
-            return Err(Error::NotConverged(format!(
-                "Lanczos did not converge in {} iterations",
-                options.max_iterations
-            )));
-        };
+        let converged = ritz.is_some();
+        if !converged && limit < options.max_iterations {
+            drop(guard);
+            return lanczos_lowest_from(self, v0, &[], options);
+        }
+        let (value, v) = ritz
+            .or_else(|| tracker.best())
+            .ok_or_else(|| Error::InvalidArgument("Lanczos needs at least one iteration".into()))?;
         // x = Σₖ vₖ eₖ, normalised (into v_0).
         let c: Vec<C64> = v.iter().map(|&x| C64::new(x, 0.0)).collect();
         rec.combine(s, &c)?;
-        let mut x = vec![C64::new(0.0, 0.0); len];
-        rec.download(s, rec.v(0), &mut x)?;
-        Ok((theta, x))
+        let mut vector = vec![C64::new(0.0, 0.0); len];
+        rec.download(s, rec.v(0), &mut vector)?;
+        Ok(Ritz {
+            value,
+            vector,
+            converged,
+        })
     }
 }
 
@@ -1501,14 +1496,17 @@ mod tests {
                 // the CPU's recurrence, against the CPU's.
                 let v0: Vec<C64> = x.iter().map(|v| v / norm(&x)).collect();
                 let options = EigenOptions::default();
-                let (want_e, want) =
+                let want =
                     lanczos_lowest_from(&cpu.two_site(i, &mpo, l, r2), &v0, &[], &options).unwrap();
+                let (want_e, want) = (want.value, want.vector);
                 let Op::Gpu(op) = gpu.two_site(i, &mpo, l, r2) else {
                     unreachable!()
                 };
                 let bytes = (x.len() * 16) as u64;
                 for budget in [LANCZOS_BYTES, 4 * bytes] {
-                    let (got_e, got) = op.lowest_within(&v0, &options, budget).unwrap();
+                    let got = op.lowest_within(&v0, &options, budget).unwrap();
+                    assert!(got.converged);
+                    let (got_e, got) = (got.value, got.vector);
                     assert!((want_e - got_e).abs() < 1e-9, "{want_e} {got_e}");
                     // Unique ground states agree up to a phase.
                     let overlap: C64 = want.iter().zip(&got).map(|(a, b)| a.conj() * b).sum();

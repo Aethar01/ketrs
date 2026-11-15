@@ -9,7 +9,7 @@ use super::gpu::{GpuOperator, GpuSweep};
 use super::mpo::Mpo;
 use super::{Mps, Tensor};
 use crate::error::Error;
-use crate::statevector::eigen::{EigenOptions, lanczos_lowest_from};
+use crate::statevector::eigen::{EigenOptions, Ritz, lanczos_lowest_from};
 use crate::statevector::evolve::krylov_evolve;
 use crate::statevector::krylov::LinearOperator;
 use num_complex::Complex64 as C64;
@@ -165,14 +165,9 @@ impl Op<'_> {
         }
     }
 
-    /// The lowest eigenvalue estimate and eigenvector, by Lanczos iteration
-    /// from the unit vector `v0`, with the recurrence in GPU memory for a
-    /// GPU operator.
-    pub(super) fn lowest(
-        &self,
-        v0: &[C64],
-        options: &EigenOptions,
-    ) -> Result<(f64, Vec<C64>), Error> {
+    /// The lowest Ritz pair, by Lanczos iteration from the unit vector
+    /// `v0`, with the recurrence in GPU memory for a GPU operator.
+    pub(super) fn lowest(&self, v0: &[C64], options: &EigenOptions) -> Result<Ritz<C64>, Error> {
         match self {
             Op::Cpu(..) => lanczos_lowest_from(self, v0, &[], options),
             #[cfg(feature = "gpu")]

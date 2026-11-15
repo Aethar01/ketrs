@@ -4,6 +4,17 @@
 
 ### MPS
 
+- DMRG no longer aborts with "Lanczos did not converge in 1000 iterations"
+  when the Hamiltonian's spectrum lies far from zero, as for a lattice
+  gauge theory with a strong Gauss penalty (here around −3700, with the
+  GPU). The two-site Lanczos tolerance (1e-10) was then within rounding of
+  `H x`, and plain Lanczos only drifts after converging; whether a solve
+  got below it came down to rounding, which the GPU's products happened to
+  lose. A Ritz pair now also counts as converged within 1e-13 of the
+  spectrum's scale, which keeps energies exact to far below the tolerance.
+  A solve that still doesn't converge goes on with the best Ritz pair it
+  saw: `DmrgResult::unconverged_solves` counts them and Python warns
+  (`RuntimeWarning`) instead of raising. `lowest_eigenstates` still raises.
 - `Mps::tdvp` and `Mps::dmrg` can run on a GPU (the `gpu` feature):
   `Mps::set_gpu(Some(ctx))` in Rust, `mps.gpu = True` in Python. The
   sweeps' environments then live in GPU memory and the one- and two-site

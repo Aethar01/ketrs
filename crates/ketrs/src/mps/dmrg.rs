@@ -88,6 +88,9 @@ pub struct DmrgResult {
     /// Whether the energy settled within `tolerance` in a sweep without
     /// noise before `max_sweeps`.
     pub converged: bool,
+    /// Two-site Lanczos solves that didn't reach `lanczos_tolerance` within
+    /// 1000 iterations and went on with their best Ritz pair instead.
+    pub unconverged_solves: usize,
 }
 
 /// An environment: for each MPO bond index, a matrix with rows on the bra
@@ -149,6 +152,7 @@ impl Mps {
         let mut sweep_energies = Vec::new();
         let mut energy = f64::INFINITY;
         let mut converged = false;
+        let mut unconverged_solves = 0;
         let mut noise = options.noise.max(0.0);
         for _ in 0..options.max_sweeps {
             // Below this the perturbation is lost to the cutoff anyway.
@@ -156,11 +160,17 @@ impl Mps {
                 noise = 0.0;
             }
             for i in 0..n - 1 {
-                energy = self.optimise_pair(i, &mpo, &envs, &lanczos, noise, Absorb::Right)?;
+                let solved;
+                (energy, solved) =
+                    self.optimise_pair(i, &mpo, &envs, &lanczos, noise, Absorb::Right)?;
+                unconverged_solves += usize::from(!solved);
                 envs.update_left(i, &self.tensors[i], &mpo)?;
             }
             for i in (0..n - 1).rev() {
-                energy = self.optimise_pair(i, &mpo, &envs, &lanczos, noise, Absorb::Left)?;
+                let solved;
+                (energy, solved) =
+                    self.optimise_pair(i, &mpo, &envs, &lanczos, noise, Absorb::Left)?;
+                unconverged_solves += usize::from(!solved);
                 envs.update_right(i, &self.tensors[i + 1], &mpo)?;
             }
             let total = energy + mpo.shift;
@@ -182,12 +192,14 @@ impl Mps {
             energy: energy + mpo.shift,
             sweep_energies,
             converged,
+            unconverged_solves,
         })
     }
 
     /// Replace sites `i` and `i + 1` with the lowest eigenvector of the
     /// effective Hamiltonian there, split with a perturbation of weight
-    /// `noise`. Returns its energy (without the shift).
+    /// `noise`. Returns its energy (without the shift) and whether Lanczos
+    /// converged (else this is its best Ritz pair).
     fn optimise_pair(
         &mut self,
         i: usize,
@@ -196,7 +208,7 @@ impl Mps {
         lanczos: &EigenOptions,
         noise: f64,
         absorb: Absorb,
-    ) -> Result<f64, Error> {
+    ) -> Result<(f64, bool), Error> {
         let (l, r) = (self.tensors[i].left, self.tensors[i + 1].right);
         let mut v0 = two_site_vector(&self.tensors[i], &self.tensors[i + 1]);
         let scale = 1.0 / norm(&v0);
@@ -207,7 +219,8 @@ impl Mps {
         // tolerance squared, without another product.
         let found = op.lowest(&v0, lanczos);
         envs.check()?;
-        let (energy, x) = found?;
+        let found = found?;
+        let (energy, x, solved) = (found.value, found.vector, found.converged);
         let theta = MatRef::from_row_major_slice(&x, l * 2, 2 * r);
         if noise > 0.0 {
             let perturbation = match absorb {
@@ -220,7 +233,7 @@ impl Mps {
         } else {
             self.split(i, theta, absorb);
         }
-        Ok(energy)
+        Ok((energy, solved))
     }
 
     /// [`split`](Mps::split), but the side that does not take the centre

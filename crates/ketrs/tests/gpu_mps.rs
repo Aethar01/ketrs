@@ -124,6 +124,46 @@ fn dmrg_on_gpu_matches_cpu() {
 }
 
 #[test]
+fn dmrg_on_gpu_converges_with_a_spectrum_far_from_zero() {
+    // Hops under a Gauss-law-like penalty `1e6 Σ_{i<j} Zᵢ Zⱼ`: the spectrum
+    // sits near −6e6, where the default Lanczos tolerance of 1e-10 is below
+    // rounding. GPU DMRG used to abort ("Lanczos did not converge in 1000
+    // iterations") on a lattice gauge theory like this.
+    let Some(ctx) = gpu() else { return };
+    let n = 12;
+    let mut h = PauliSum::new();
+    for q in 0..n - 1 {
+        for p in [Pauli::X, Pauli::Y] {
+            h.add(1.0, PauliString::new([(q, p), (q + 1, p)]).unwrap());
+        }
+    }
+    for q in 0..n {
+        h.add(
+            0.3 * (q % 3) as f64,
+            PauliString::new([(q, Pauli::Z)]).unwrap(),
+        );
+        for j in q + 1..n {
+            h.add(
+                1e6,
+                PauliString::new([(q, Pauli::Z), (j, Pauli::Z)]).unwrap(),
+            );
+        }
+    }
+    let neel: Vec<bool> = (0..n).map(|q| q % 2 == 1).collect();
+    let options = DmrgOptions {
+        max_bond: 32,
+        ..Default::default()
+    };
+    let start = Mps::basis(n, &neel, MpsOptions::default());
+    let (mut cpu, mut gpu) = (start.clone(), start);
+    gpu.set_gpu(Some(ctx)).unwrap();
+    let want = cpu.dmrg(&h, &options).unwrap();
+    let got = gpu.dmrg(&h, &options).unwrap();
+    assert_eq!(got.unconverged_solves, 0);
+    assert!((want.energy - got.energy).abs() < 1e-6, "{want:?} {got:?}");
+}
+
+#[test]
 fn gpu_setting_is_kept_by_clones_and_can_be_cleared() {
     let Some(ctx) = gpu() else { return };
     let mut mps = Mps::zero(4, MpsOptions::default());

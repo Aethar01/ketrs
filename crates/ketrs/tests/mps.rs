@@ -230,6 +230,59 @@ fn dmrg_from_neel_state_finds_heisenberg_ground_state() {
     );
 }
 
+/// Hops and a field under a strong Gauss-law-like penalty
+/// `big Σ_{i<j} Zᵢ Zⱼ` (`big/2 (Σ Zᵢ)²` without its constant), so the
+/// spectrum sits near `−big n/2`.
+fn penalised(n: usize, big: f64) -> PauliSum {
+    let mut h = PauliSum::new();
+    for q in 0..n - 1 {
+        for p in [Pauli::X, Pauli::Y] {
+            h.add(1.0, PauliString::new([(q, p), (q + 1, p)]).unwrap());
+        }
+    }
+    for q in 0..n {
+        h.add(
+            0.3 * (q % 3) as f64,
+            PauliString::new([(q, Pauli::Z)]).unwrap(),
+        );
+        for j in q + 1..n {
+            h.add(
+                big,
+                PauliString::new([(q, Pauli::Z), (j, Pauli::Z)]).unwrap(),
+            );
+        }
+    }
+    h
+}
+
+#[test]
+fn dmrg_converges_with_a_spectrum_far_from_zero() {
+    // Near −6e6, rounding in H x keeps Lanczos's residual above the default
+    // tolerance of 1e-10, which used to abort DMRG ("Lanczos did not
+    // converge in 1000 iterations").
+    let n = 12;
+    let h = penalised(n, 1e6);
+    let neel: Vec<bool> = (0..n).map(|q| q % 2 == 1).collect();
+    let mut mps = Mps::basis(n, &neel, MpsOptions::default());
+    let options = DmrgOptions {
+        max_bond: 32,
+        ..Default::default()
+    };
+    let result = mps.dmrg(&h, &options).unwrap();
+    // Converged within rounding, not merely given up on.
+    assert_eq!(result.unconverged_solves, 0);
+    let eigen = EigenOptions {
+        tolerance: 1e-6,
+        ..Default::default()
+    };
+    let exact = Statevector::lowest_eigenstates(&h, n, 1, &eigen).unwrap()[0].energy;
+    assert!(
+        (result.energy - exact).abs() < 1e-6,
+        "{} vs {exact}",
+        result.energy
+    );
+}
+
 #[test]
 fn dmrg_handles_all_to_all_couplings() {
     let n = 10;

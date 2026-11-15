@@ -3,7 +3,7 @@
 use super::{Observable, PyCircuit, PyStatevector, State, clbit_counts, rng_from_seed, to_py_err};
 use ketrs::{Complex64 as C64, DmrgOptions, Mps, MpsOptions, Statevector};
 use numpy::PyArray1;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeWarning, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rand::rngs::StdRng;
@@ -166,6 +166,15 @@ impl PyMps {
         };
         let mps = &mut self.inner;
         let result = py.detach(|| mps.dmrg(&sum, &opts)).map_err(to_py_err)?;
+        if result.unconverged_solves > 0 {
+            let message = format!(
+                "{} two-site Lanczos solves did not reach their tolerance in 1000 \
+                 iterations; DMRG went on with their best Ritz pairs",
+                result.unconverged_solves
+            );
+            let message = std::ffi::CString::new(message).expect("no NUL bytes");
+            PyErr::warn(py, &py.get_type::<PyRuntimeWarning>(), &message, 1)?;
+        }
         Ok((result.energy, result.sweep_energies, result.converged))
     }
 
@@ -188,10 +197,11 @@ impl PyMps {
 
     /// Whether `tdvp` and `dmrg` run on the GPU (default False). Setting it
     /// True keeps their environments in GPU memory and applies the
-    /// effective Hamiltonians there, nearly all of a sweep's work; tensors,
-    /// SVDs and Krylov steps stay on the CPU, so results match the CPU's up
-    /// to rounding. Worth it from bond dimensions of a few tens. Needs a
-    /// build with the `gpu` feature and a GPU with 64-bit floats.
+    /// effective Hamiltonians there, with the Krylov and Lanczos
+    /// recurrences, nearly all of a sweep's work; tensors, SVDs and the
+    /// subspace expansion stay on the CPU, so results match the CPU's up to
+    /// rounding. Worth it from bond dimensions of a few tens. Needs a build
+    /// with the `gpu` feature and a GPU with 64-bit floats.
     #[getter]
     fn gpu(&self) -> bool {
         #[cfg(feature = "gpu")]

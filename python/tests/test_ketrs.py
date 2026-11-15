@@ -1052,4 +1052,7 @@ def test_mps_sweeps_on_gpu_match_cpu():
         states.append((energy, mps.to_statevector().amplitudes()))
     (e_cpu, cpu), (e_gpu, gpu_amps) = states
     assert e_gpu == pytest.approx(e_cpu, abs=1e-9)
-    np.testing.assert_allclose(gpu_amps, cpu, atol=1e-8)
+    # A ground state is only defined up to a phase, which rounding can flip.
+    overlap = np.vdot(cpu, gpu_amps)
+    assert abs(overlap) == pytest.approx(1.0, abs=1e-9)
+    np.testing.assert_allclose(gpu_amps, overlap / abs(overlap) * cpu, atol=1e-8)
