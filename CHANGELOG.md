@@ -24,12 +24,16 @@
   runs on all cores: the vacuum of a 194-qubit lattice gauge theory at
   bond dimension 64 took 24 s instead of 31 s on the GPU.
 - GPU memory past the driver's budget is now an error ("not enough GPU
-  memory"), checked before each allocation with `VK_EXT_memory_budget`,
-  which counts other processes' use. With radv, two processes that together
-  overcommitted the card's memory both died with "The logical device has
-  been lost" at their next submission. `Mps::set_gpu` and `MPS.gpu`
-  document the memory a sweep needs: about `32 n D χ²` bytes, so about
-  25 GB for 402 qubits at MPO bond 30 and `χ = 256`.
+  memory") while other processes share the GPU, checked before each
+  allocation with `VK_EXT_memory_budget`. With radv, two processes that
+  together overcommitted the card's memory both died with "The logical
+  device has been lost" at their next submission. A process alone on the
+  GPU may still overcommit it, as before: the driver moves its idle
+  buffers to system memory.
+- GPU sweeps free each environment once they have moved past it and size
+  their scratch to what products can use, roughly halving their GPU
+  memory: about one environment per site, up to `16 n D χ²` bytes.
+  `Mps::set_gpu` and `MPS.gpu` document it.
 - `Mps::project(qubit, outcome)` and `Mps::project_all`, in Python
   `MPS.project(qubit, outcome)` or `MPS.project([(qubit, outcome), ...])`:
   apply `|b⟩⟨b|` and renormalise, returning the outcome's probability (the

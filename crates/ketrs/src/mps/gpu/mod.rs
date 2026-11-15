@@ -303,6 +303,20 @@ impl GpuSweep {
         }
     }
 
+    /// Free `left[i]` unless it is the boundary.
+    pub(super) fn release_left(&mut self, i: usize) {
+        if i > 0 {
+            self.left[i] = None;
+        }
+    }
+
+    /// Free `right[i]` unless it is the boundary.
+    pub(super) fn release_right(&mut self, i: usize) {
+        if i + 1 < self.right.len() {
+            self.right[i] = None;
+        }
+    }
+
     fn left_env(&self, i: usize) -> &DeviceEnv {
         self.left[i].as_ref().expect("left environment built")
     }
@@ -866,8 +880,12 @@ impl GpuOperator<'_> {
         let (l, r, phys) = (self.l, self.r, self.phys);
         let (dl, dr) = (self.left.blocks, self.right.blocks);
         let bytes = self.len() as u64 * COMPLEX;
-        // At most this many partial products of the second contraction.
-        let max_splits = (dr * r / MIN_SPLIT_K as usize).max(1);
+        // At most this many partial products of the second contraction:
+        // splits only fill the GPU when it has few output tiles.
+        let tiles = (phys * l).div_ceil(TILE as usize) * r.div_ceil(TILE as usize);
+        let max_splits = (dr * r / MIN_SPLIT_K as usize)
+            .min((TARGET_GROUPS as usize).div_ceil(tiles))
+            .max(1);
         let y = (dl * l * phys * r) as u64 * COMPLEX;
         Ok(ApplyScratch {
             y: ensure(ctx, &mut s.y, y, Memory::Device)?.device_address(),

@@ -83,6 +83,8 @@ impl Mps {
                 if i + 1 < n - 1 {
                     self.evolve_site(i + 1, &mpo, &envs, -half)?;
                 }
+                // Rebuilt from the right end before it is needed again.
+                envs.release_right(i + 1);
             }
             // Sweep left: the centre starts at site n − 1.
             if growing {
@@ -97,6 +99,7 @@ impl Mps {
                 if i > 0 {
                     self.evolve_site(i, &mpo, &envs, -half)?;
                 }
+                envs.release_left(i);
             }
         }
         if mpo.shift != 0.0 {

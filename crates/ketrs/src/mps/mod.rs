@@ -242,12 +242,15 @@ impl Mps {
     /// ([`GpuContext::supports_mps`](crate::gpu::GpuContext::supports_mps)).
     /// Clones share the GPU.
     ///
-    /// GPU memory: a sweep keeps two environments per site, each
-    /// `D χ² × 16` bytes for MPO bond dimension `D` and bond dimension `χ`,
-    /// so about `32 n D χ²` bytes in all. With 402 qubits, `D ≈ 30` and
-    /// `χ = 256`, that is about 25 GB; at `χ = 160`, about 10 GB. An
-    /// allocation past the driver's budget (which counts other processes)
-    /// fails with an error rather than losing the device.
+    /// GPU memory: a sweep keeps about one environment per site (it frees
+    /// those it has moved past), each `D χ² × 16` bytes for MPO bond
+    /// dimension `D` and bond dimension `χ`, so up to `16 n D χ²` bytes at
+    /// full bonds. With 402 qubits, `D ≈ 30` and `χ = 256` that is about
+    /// 13 GB; a long-range MPO with `D ≈ 100` needs over three times as
+    /// much. A GPU used by this process alone may be overcommitted (the
+    /// driver moves idle buffers to system memory, slowly); with other
+    /// processes on it, an allocation past the driver's budget fails with
+    /// an error rather than losing the device in every process.
     #[cfg(feature = "gpu")]
     pub fn set_gpu(
         &mut self,

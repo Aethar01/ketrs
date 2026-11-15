@@ -113,6 +113,26 @@ impl Envs {
         }
     }
 
+    /// Free `left[i]`, which the sweep has moved past, on a GPU (where
+    /// environments of every bond would otherwise fill its memory). The
+    /// boundary is kept; the CPU keeps everything.
+    pub(super) fn release_left(&mut self, i: usize) {
+        #[cfg(feature = "gpu")]
+        if let Envs::Gpu(g) = self {
+            g.release_left(i);
+        }
+        let _ = i;
+    }
+
+    /// Free `right[i]` (see [`release_left`](Self::release_left)).
+    pub(super) fn release_right(&mut self, i: usize) {
+        #[cfg(feature = "gpu")]
+        if let Envs::Gpu(g) = self {
+            g.release_right(i);
+        }
+        let _ = i;
+    }
+
     /// `left[i]`, on the CPU.
     pub(super) fn left(&self, i: usize) -> Result<Cow<'_, Env>, Error> {
         match self {

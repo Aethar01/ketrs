@@ -165,6 +165,8 @@ impl Mps {
                     self.optimise_pair(i, &mpo, &envs, &lanczos, noise, Absorb::Right)?;
                 unconverged_solves += usize::from(!solved);
                 envs.update_left(i, &self.tensors[i], &mpo)?;
+                // Rebuilt from the right end before it is needed again.
+                envs.release_right(i + 1);
             }
             for i in (0..n - 1).rev() {
                 let solved;
@@ -172,6 +174,7 @@ impl Mps {
                     self.optimise_pair(i, &mpo, &envs, &lanczos, noise, Absorb::Left)?;
                 unconverged_solves += usize::from(!solved);
                 envs.update_right(i, &self.tensors[i + 1], &mpo)?;
+                envs.release_left(i);
             }
             let total = energy + mpo.shift;
             let change = sweep_energies

@@ -208,11 +208,12 @@ impl PyMps {
     /// recurrences, nearly all of a sweep's work; tensors, SVDs and the
     /// subspace expansion stay on the CPU, so results match the CPU's up to
     /// rounding. Worth it from bond dimensions of a few tens. Needs a build
-    /// with the `gpu` feature and a GPU with 64-bit floats. GPU memory is
-    /// about 32·n·D·χ² bytes (n qubits, MPO bond D, bond χ): about 25 GB for
-    /// 402 qubits at D ≈ 30 and χ = 256, 10 GB at χ = 160. Running out
-    /// raises ValueError ("not enough GPU memory"), counting other processes'
-    /// use, where the driver reports a budget.
+    /// with the `gpu` feature and a GPU with 64-bit floats. GPU memory is up
+    /// to 16·n·D·χ² bytes (n qubits, MPO bond D, bond χ): about 13 GB for
+    /// 402 qubits at D ≈ 30 and χ = 256, over three times that for a
+    /// long-range MPO with D ≈ 100. Alone on a GPU, a sweep may overcommit it
+    /// (slowly); sharing it with other processes, running out raises
+    /// ValueError ("not enough GPU memory") rather than losing the device.
     #[getter]
     fn gpu(&self) -> bool {
         #[cfg(feature = "gpu")]

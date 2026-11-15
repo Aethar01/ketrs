@@ -622,15 +622,19 @@ impl GpuContext {
     /// The pipeline for `kernel`, in its chunked variant if `chunked` and
     /// its single-precision one if `single`.
     /// An error if `bytes` more of memory type `kind` would exceed this
-    /// process's budget, as the driver reports it (counting other
-    /// processes' use). Allocations past it may still succeed, only for
-    /// later command submissions to fail and the device to be lost (as with
-    /// radv), which no caller can recover from.
+    /// process's budget, as the driver reports it, while other processes
+    /// hold a noticeable share (over 1/16) of the heap. Overcommitting the
+    /// GPU alone works: the driver moves this process's idle buffers to
+    /// system memory. With other processes on the same GPU, an allocation
+    /// past the budget can succeed only for later command submissions to
+    /// fail and the device to be lost in every process (as with radv), which
+    /// none can recover from.
     fn check_budget(&self, kind: u32, bytes: u64) -> Result<(), Error> {
         if !self.memory_budget {
             return Ok(());
         }
         let heap = self.memory.memory_types[kind as usize].heap_index as usize;
+        let size = self.memory.memory_heaps[heap].size;
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
         let mut props = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
         // SAFETY: plain query on a valid physical device supporting the
@@ -640,14 +644,15 @@ impl GpuContext {
                 .get_physical_device_memory_properties2(self.physical, &mut props)
         };
         let (limit, used) = (budget.heap_budget[heap], budget.heap_usage[heap]);
-        // A zero budget means the driver doesn't know.
-        if limit > 0 && used.saturating_add(bytes) > limit {
+        if past_shared_budget(size, limit, used, bytes) {
             return Err(Error::Gpu(format!(
                 "not enough GPU memory: {} MiB more needed, {} MiB left of this process's \
-                 {} MiB budget (other processes' use counts against it)",
+                 {} MiB budget (other processes use {} MiB of the GPU's {} MiB)",
                 bytes >> 20,
                 limit.saturating_sub(used) >> 20,
-                limit >> 20
+                limit >> 20,
+                size.saturating_sub(limit) >> 20,
+                size >> 20
             )));
         }
         Ok(())
@@ -844,6 +849,14 @@ pub(crate) struct Buffer {
 unsafe impl Send for Buffer {}
 unsafe impl Sync for Buffer {}
 
+/// Whether `bytes` more on a heap of `size` bytes would pass this process's
+/// `limit` (having `used` of it) while other processes hold over 1/16 of
+/// the heap. A zero limit means the driver doesn't know.
+fn past_shared_budget(size: u64, limit: u64, used: u64, bytes: u64) -> bool {
+    let shared = limit > 0 && limit < size - size / 16;
+    shared && used.saturating_add(bytes) > limit
+}
+
 impl Buffer {
     /// A buffer of `size` bytes in the given memory; host memory is mapped.
     pub(crate) fn new(
@@ -992,19 +1005,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allocations_past_the_memory_budget_fail_cleanly() {
+    fn the_budget_binds_only_when_other_processes_share_the_gpu() {
+        let gib = 1u64 << 30;
+        // Alone (the budget is about the whole heap): overcommitting is left
+        // to the driver, which moves idle buffers to system memory.
+        assert!(!past_shared_budget(16 * gib, 16 * gib, 15 * gib, 4 * gib));
+        // Another process holds 8 GiB: past the budget is an error.
+        assert!(past_shared_budget(16 * gib, 8 * gib, 7 * gib, 2 * gib));
+        assert!(!past_shared_budget(16 * gib, 8 * gib, 5 * gib, 2 * gib));
+        // No budget reported.
+        assert!(!past_shared_budget(16 * gib, 0, 15 * gib, 4 * gib));
+    }
+
+    #[test]
+    fn impossible_allocations_fail_cleanly() {
         let Ok(ctx) = GpuContext::new() else { return };
-        if !ctx.memory_budget {
-            eprintln!("skipping: the driver reports no memory budget");
-            return;
-        }
-        let kind = ctx
-            .memory_type(u32::MAX, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-            .expect("device-local memory");
-        assert!(ctx.check_budget(kind, 1 << 20).is_ok());
-        // An exabyte is past any budget: an error, not a lost device later.
-        let err = ctx.check_budget(kind, 1 << 60).unwrap_err().to_string();
-        assert!(err.contains("not enough GPU memory"), "{err}");
         let buffer = Buffer::new(
             &ctx,
             1 << 60,
