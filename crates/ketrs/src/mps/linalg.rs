@@ -8,13 +8,17 @@
 
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::linalg::householder::{
+    apply_block_householder_sequence_on_the_left_in_place_scratch,
+    apply_block_householder_sequence_on_the_left_in_place_with_conj,
+};
 use faer::linalg::matmul::matmul as faer_matmul;
 use faer::linalg::qr::no_pivoting::factor::{
     qr_in_place, qr_in_place_scratch, recommended_block_size,
 };
 use faer::linalg::svd::{ComputeSvdVectors, SvdError, SvdParams, svd as faer_svd, svd_scratch};
 use faer::traits::Conjugate;
-use faer::{Accum, Mat, MatRef, Par, Side, Spec};
+use faer::{Accum, Conj, Mat, MatRef, Par, Side, Spec};
 use num_complex::Complex64 as C64;
 
 /// Matrices with at least this many entries (rows × columns of the larger
@@ -48,23 +52,31 @@ where
     out
 }
 
+/// Matrices with at least this many entries are factorised by QR in
+/// parallel. On six free cores faer's parallel QR took 35 ms on a 4800 × 256
+/// matrix against 52 ms sequentially, and 189 against 385 ms at 9600 × 512;
+/// at 1600 × 128 it was slower (3.8 against 2.3 ms on three threads), and
+/// far slower when other processes shared the cores.
+const QR_PARALLEL_SIZE: usize = 1 << 20;
+
 /// The triangular factor `R` (`min(m, n) × n`) of `a = Q R`.
-///
-/// Always sequential: on a 1600 × 128 matrix faer's parallel QR took 3.8 ms
-/// on three threads against 2.3 ms on one, and several times that when
-/// other processes shared the cores.
 pub(crate) fn qr_r(a: MatRef<'_, C64>) -> Mat<C64> {
     let (m, n) = (a.nrows(), a.ncols());
     let k = m.min(n);
+    let par = if m * n >= QR_PARALLEL_SIZE {
+        faer::get_global_parallelism()
+    } else {
+        Par::Seq
+    };
     let mut factors = a.to_owned();
     let block = recommended_block_size::<C64>(m, n);
     let mut coeffs = Mat::<C64>::zeros(block, k);
-    let req = qr_in_place_scratch::<C64>(m, n, block, Par::Seq, Default::default());
+    let req = qr_in_place_scratch::<C64>(m, n, block, par, Default::default());
     let mut buffer = MemBuffer::new(req);
     qr_in_place(
         factors.as_mut(),
         coeffs.as_mut(),
-        Par::Seq,
+        par,
         MemStack::new(&mut buffer),
         Default::default(),
     );
@@ -75,6 +87,37 @@ pub(crate) fn qr_r(a: MatRef<'_, C64>) -> Mat<C64> {
             C64::new(0.0, 0.0)
         }
     })
+}
+
+/// Orthonormal rows spanning the orthogonal complement of the row space of
+/// `basis` (`b × n`, rows orthonormal): the last `n − b` columns of the
+/// unitary factor of `basis† = Q R`, conjugate-transposed.
+pub(crate) fn complement_rows(basis: MatRef<'_, C64>) -> Mat<C64> {
+    let (b, n) = (basis.nrows(), basis.ncols());
+    let rest = n.saturating_sub(b);
+    if rest == 0 {
+        return Mat::zeros(0, n);
+    }
+    let qr = basis.adjoint().qr();
+    // Q [0; I], applying Q's reflections to the last columns of I only.
+    let mut columns = Mat::<C64>::from_fn(n, rest, |i, j| {
+        if i == b + j {
+            C64::new(1.0, 0.0)
+        } else {
+            C64::new(0.0, 0.0)
+        }
+    });
+    let blocks = qr.Q_coeff().nrows();
+    let req = apply_block_householder_sequence_on_the_left_in_place_scratch::<C64>(n, blocks, rest);
+    apply_block_householder_sequence_on_the_left_in_place_with_conj(
+        qr.Q_basis(),
+        qr.Q_coeff(),
+        Conj::No,
+        columns.as_mut(),
+        Par::Seq,
+        MemStack::new(&mut MemBuffer::new(req)),
+    );
+    columns.adjoint().to_owned()
 }
 
 /// `(U, s, V)` of a thin SVD.
@@ -233,6 +276,25 @@ mod tests {
                 let id = if i == j { 1.0 } else { 0.0 };
                 assert!((uu[(i, j)].re - id).abs() < tol && (vv[(i, j)].re - id).abs() < tol);
             }
+        }
+    }
+
+    #[test]
+    fn complement_rows_complete_an_orthonormal_basis() {
+        for (b, n) in [(3, 10), (0, 4), (6, 6), (1, 2)] {
+            let basis = random(n, b.max(1), (b * 31 + n) as u64)
+                .qr()
+                .compute_thin_Q()
+                .adjoint()
+                .to_owned();
+            let basis = basis.as_ref().subrows(0, b);
+            let rest = complement_rows(basis);
+            assert_eq!((rest.nrows(), rest.ncols()), (n - b, n));
+            // Together, a unitary: orthonormal rows, orthogonal to the basis.
+            let gram = matmul(rest.as_ref(), rest.adjoint());
+            let identity = Mat::<C64>::identity(n - b, n - b);
+            assert!((gram - identity).norm_max() < 1e-12);
+            assert!(b == 0 || matmul(rest.as_ref(), basis.adjoint()).norm_max() < 1e-12);
         }
     }
 

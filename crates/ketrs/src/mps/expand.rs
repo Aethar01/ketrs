@@ -17,7 +17,7 @@
 //! loses them geometrically.
 
 use super::dmrg::{Env, left_operator, right_operator};
-use super::linalg::{matmul, qr_r, thin_svd};
+use super::linalg::{complement_rows, matmul, qr_r, thin_svd};
 use super::mpo::Mpo;
 use super::{Mps, Tensor};
 use faer::{Mat, MatRef};
@@ -176,12 +176,6 @@ fn complement(rows: MatRef<'_, C64>, basis: MatRef<'_, C64>, room: usize) -> Mat
     if room == 0 || rows.nrows() == 0 {
         return Mat::zeros(0, cols);
     }
-    let project_out = |m: MatRef<'_, C64>| -> Mat<C64> {
-        let overlap = matmul(m, basis.adjoint());
-        let mut out = m.to_owned();
-        out -= matmul(overlap.as_ref(), basis);
-        out
-    };
     let scale = (0..rows.nrows())
         .flat_map(|r| (0..cols).map(move |c| rows[(r, c)].norm_sqr()))
         .sum::<f64>()
@@ -189,30 +183,32 @@ fn complement(rows: MatRef<'_, C64>, basis: MatRef<'_, C64>, room: usize) -> Mat
     if scale == 0.0 {
         return Mat::zeros(0, cols);
     }
+    // In an orthonormal basis of the directions outside `basis`, the part of
+    // `rows` outside it is `rows · others†`: the same singular values as
+    // `rows` projected off `basis`, and right singular vectors that `others`
+    // maps back, in `cols − b` columns rather than `cols`. Directions built
+    // from `others` are orthonormal and outside `basis` to rounding.
+    let others = complement_rows(basis);
+    if others.nrows() == 0 {
+        return Mat::zeros(0, cols);
+    }
+    let outside = matmul(rows, others.adjoint());
     // There are usually many more rows (one set per MPO channel) than
-    // columns. `rows = Q R` with `Q`'s columns orthonormal, so `R` has the
-    // same row space and, after any projection on the right, the same
-    // singular values and right singular vectors, in far fewer rows.
-    let compact = if rows.nrows() > cols {
-        qr_r(rows)
+    // columns. `outside = Q R` with `Q`'s columns orthonormal, so `R` has the
+    // same singular values and right singular vectors in far fewer rows.
+    let compact = if outside.nrows() > outside.ncols() {
+        qr_r(outside.as_ref())
     } else {
-        rows.to_owned()
+        outside
     };
-    // Twice, as in classical Gram–Schmidt, for orthogonality to rounding.
-    let rest = project_out(project_out(compact.as_ref()).as_ref());
-    let (_, s, v) = thin_svd(rest.as_ref());
+    let (_, s, v) = thin_svd(compact.as_ref());
     let keep = s
         .iter()
         .take_while(|&&x| x > EXPAND_TOLERANCE * scale)
         .count()
         .min(room);
-    let new = Mat::<C64>::from_fn(keep, cols, |r, c| v[(c, r)].conj());
-    // Re-orthogonalise the weakest directions, which carry the most
-    // rounding from the projection.
-    let new = project_out(new.as_ref());
-    let (_, s, v) = thin_svd(new.as_ref());
-    let keep = s.iter().take_while(|&&x| x > 0.5).count();
-    Mat::<C64>::from_fn(keep, cols, |r, c| v[(c, r)].conj())
+    let lead = Mat::<C64>::from_fn(keep, v.nrows(), |r, c| v[(c, r)].conj());
+    matmul(lead.as_ref(), others.as_ref())
 }
 
 #[cfg(test)]
@@ -231,6 +227,89 @@ mod tests {
                     "({r}, {c}): {}",
                     g[(r, c)]
                 );
+            }
+        }
+    }
+
+    /// The complement as first written: project `rows` (compressed by QR)
+    /// off `basis` twice, take its leading right singular vectors, and
+    /// re-orthogonalise them.
+    fn reference_complement(
+        rows: MatRef<'_, C64>,
+        basis: MatRef<'_, C64>,
+        room: usize,
+    ) -> Mat<C64> {
+        let cols = rows.ncols();
+        let project_out = |m: MatRef<'_, C64>| -> Mat<C64> {
+            let overlap = matmul(m, basis.adjoint());
+            let mut out = m.to_owned();
+            out -= matmul(overlap.as_ref(), basis);
+            out
+        };
+        let scale = rows.norm_l2();
+        let compact = qr_r(rows);
+        let rest = project_out(project_out(compact.as_ref()).as_ref());
+        let (_, s, v) = thin_svd(rest.as_ref());
+        let keep = s
+            .iter()
+            .take_while(|&&x| x > EXPAND_TOLERANCE * scale)
+            .count()
+            .min(room);
+        let new = Mat::<C64>::from_fn(keep, cols, |r, c| v[(c, r)].conj());
+        let new = project_out(new.as_ref());
+        let (_, s, v) = thin_svd(new.as_ref());
+        let keep = s.iter().take_while(|&&x| x > 0.5).count();
+        Mat::<C64>::from_fn(keep, cols, |r, c| v[(c, r)].conj())
+    }
+
+    #[test]
+    fn complement_matches_projecting_off_the_basis() {
+        let mut seed = 3u64;
+        let mut random = |m: usize, n: usize| {
+            Mat::<C64>::from_fn(m, n, |_, _| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                C64::new(
+                    (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5,
+                    (seed >> 23) as f64 / (1u64 << 41) as f64 - 0.5,
+                )
+            })
+        };
+        // (channel rows, columns, basis rows, rank of the channels, room)
+        for (m, cols, b, rank, room) in [
+            (60, 16, 6, 9, 20),
+            (200, 24, 10, 24, 5),
+            (12, 20, 4, 12, 30),
+            (90, 30, 30, 10, 4),
+        ] {
+            // Rank-deficient channels with spread singular values.
+            let left = random(m, rank);
+            let right = random(rank, cols);
+            let weights = Mat::<C64>::from_fn(rank, rank, |i, j| {
+                if i == j {
+                    C64::new(10f64.powi(-(i as i32) / 2), 0.0)
+                } else {
+                    C64::new(0.0, 0.0)
+                }
+            });
+            let rows = matmul(
+                matmul(left.as_ref(), weights.as_ref()).as_ref(),
+                right.as_ref(),
+            );
+            let basis = random(cols, b).qr().compute_thin_Q().adjoint().to_owned();
+            let got = complement(rows.as_ref(), basis.as_ref(), room);
+            let want = reference_complement(rows.as_ref(), basis.as_ref(), room);
+            assert_eq!(got.nrows(), want.nrows(), "{m} {cols} {b}");
+            if got.nrows() > 0 {
+                assert_orthonormal(got.as_ref());
+                assert!(matmul(got.as_ref(), basis.adjoint()).norm_max() < 1e-12);
+                // The same subspace: equal projectors.
+                let (pg, pw) = (
+                    matmul(got.adjoint(), got.as_ref()),
+                    matmul(want.adjoint(), want.as_ref()),
+                );
+                assert!((pg - pw).norm_max() < 1e-9, "{m} {cols} {b}");
             }
         }
     }

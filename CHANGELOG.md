@@ -4,6 +4,16 @@
 
 ### MPS
 
+- TDVP's subspace expansion factorises only the part of each bond's `Hψ`
+  channels outside the current basis, in an orthonormal basis of the
+  complement, and with large QRs on all cores: 1.2–1.6× faster on six
+  cores at the shapes of a lattice gauge theory's packet preparation (MPO
+  bond about 80, bond dimension 128–256), where the expansion's QR had run
+  on one thread. The new directions come out orthonormal without a second
+  Gram–Schmidt pass; results are unchanged up to rounding.
+- DMRG's noise (the perturbation of each split and its density matrix)
+  runs on all cores: the vacuum of a 194-qubit lattice gauge theory at
+  bond dimension 64 took 24 s instead of 31 s on the GPU.
 - GPU memory past the driver's budget is now an error ("not enough GPU
   memory"), checked before each allocation with `VK_EXT_memory_budget`,
   which counts other processes' use. With radv, two processes that together
