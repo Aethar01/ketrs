@@ -281,9 +281,10 @@ impl PyMps {
     /// long-range MPO with D ≈ 100. Alone on a GPU, a sweep may overcommit it
     /// (slowly); sharing it with other processes, running out raises
     /// ValueError ("not enough GPU memory") rather than losing the device.
-    /// An MPS with charges (see `with_charges`) sweeps on the CPU whatever
-    /// this says: its block-sparse sweeps there are faster than dense ones
-    /// on a GPU.
+    /// An MPS with charges (see `with_charges`) runs its block-sparse sweeps
+    /// on the GPU too, which pays only for large bonds: on an RX 9060 XT
+    /// about as fast as six CPU threads at bond dimension 256, 1.6× faster at
+    /// 512, and 2× slower at 64 to 128.
     #[getter]
     fn gpu(&self) -> bool {
         #[cfg(feature = "gpu")]

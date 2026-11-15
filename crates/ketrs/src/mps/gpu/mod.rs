@@ -37,8 +37,11 @@ use num_complex::Complex64 as C64;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
+mod blocks;
 mod expand;
 mod qr;
+
+pub(super) use blocks::{GpuBlockOp, GpuBlockSweep};
 
 const COMPLEX: u64 = 16;
 
@@ -155,7 +158,7 @@ impl DeviceEnv {
 /// Device scratch, grown as needed: for one contraction, and for the
 /// Lanczos recurrence of [`GpuOperator::evolve`].
 #[derive(Default)]
-struct Scratch {
+pub(super) struct Scratch {
     x: Option<Buffer>,
     y: Option<Buffer>,
     z: Option<Buffer>,
@@ -730,6 +733,59 @@ fn mix(ctx: &GpuContext, cmd: vk::CommandBuffer, m: Mix) {
     ctx.mps_dispatch(cmd, MpsKernel::Mix, &push.0, [groups(total), 1, 1]);
 }
 
+/// An operator the GPU recurrences ([`evolve`], [`lowest_within`]) can
+/// apply: it records `out = H x` into a command buffer.
+pub(super) trait DeviceOp: LinearOperator<C64> + Sync {
+    fn ctx(&self) -> &Arc<GpuContext>;
+    /// The scratch the recurrence's vectors live in.
+    fn scratch(&self) -> &Mutex<Scratch>;
+    /// The length of the vectors it acts on.
+    fn len(&self) -> usize;
+    /// About how many floating-point operations one application takes.
+    fn flops(&self) -> usize;
+    /// Allocate what [`record_apply`](Self::record_apply) needs in `s`.
+    fn prepare(&self, s: &mut Scratch) -> Result<ApplyScratch, Error>;
+    /// Record `out = H x` for vectors at device addresses `x` and `out`.
+    fn record_apply(&self, cmd: vk::CommandBuffer, x: u64, out: u64, s: ApplyScratch);
+    /// Where an error raised inside an application is kept for the caller.
+    fn errors(&self) -> &Mutex<Option<Error>>;
+}
+
+/// `out = H x` for vectors on the CPU, through the device. An error is kept
+/// for the caller (see [`DeviceOp::errors`]) and leaves zeros, which end a
+/// Krylov iteration.
+fn apply_on_device<O: DeviceOp>(op: &O, x: &[C64], out: &mut [C64]) {
+    let mut run = || -> Result<(), Error> {
+        let len = op.len();
+        let bytes = len as u64 * COMPLEX;
+        let ctx = op.ctx();
+        let mut guard = op.scratch().lock().expect("GPU scratch lock");
+        let s = &mut *guard;
+        let scratch = op.prepare(s)?;
+        let xa = ensure(ctx, &mut s.x, bytes, Memory::Device)?.device_address();
+        let outa = ensure(ctx, &mut s.out, bytes, Memory::Device)?.device_address();
+        ensure(ctx, &mut s.down, bytes, Memory::Download)?;
+        let up = ensure(ctx, &mut s.up, bytes, Memory::Upload)?;
+        up.write(bytes_of(x));
+        let buffer = |b: &Option<Buffer>| b.as_ref().expect("allocated").buffer;
+        let (up, xb, outb, down) = (buffer(&s.up), buffer(&s.x), buffer(&s.out), buffer(&s.down));
+        ctx.submit(|cmd| {
+            copy(ctx, cmd, up, xb, bytes);
+            compute_barrier(ctx, cmd);
+            op.record_apply(cmd, xa, outa, scratch);
+            compute_barrier(ctx, cmd);
+            copy(ctx, cmd, outb, down, bytes);
+        })?;
+        let result = s.down.as_ref().expect("allocated").mapped(bytes as usize)?;
+        out.copy_from_slice(&read_complex(result, len));
+        Ok(())
+    };
+    if let Err(e) = run() {
+        out.fill(C64::new(0.0, 0.0));
+        op.errors().lock().expect("GPU error lock").get_or_insert(e);
+    }
+}
+
 /// The effective Hamiltonian of one or two sites (`phys` = 2 or 4 physical
 /// index combinations) on the GPU.
 pub(super) struct GpuOperator<'a> {
@@ -744,7 +800,7 @@ pub(super) struct GpuOperator<'a> {
 
 /// Device scratch for one application of an operator.
 #[derive(Clone, Copy)]
-struct ApplyScratch {
+pub(super) struct ApplyScratch {
     y: u64,
     z: u64,
     parts: u64,
@@ -870,10 +926,6 @@ impl Vectors {
 }
 
 impl GpuOperator<'_> {
-    fn len(&self) -> usize {
-        self.l * self.phys * self.r
-    }
-
     /// Scratch for [`record_apply`](Self::record_apply), allocated in `s`.
     fn apply_scratch(&self, s: &mut Scratch) -> Result<ApplyScratch, Error> {
         let ctx = &self.sweep.ctx;
@@ -958,218 +1010,227 @@ impl GpuOperator<'_> {
         );
     }
 
-    fn try_apply(&self, x: &[C64], out: &mut [C64]) -> Result<(), Error> {
-        let len = self.len();
-        let bytes = len as u64 * COMPLEX;
-        let ctx = &self.sweep.ctx;
-        let mut guard = self.sweep.scratch.lock().expect("GPU scratch lock");
-        let s = &mut *guard;
-        let scratch = self.apply_scratch(s)?;
-        let xa = ensure(ctx, &mut s.x, bytes, Memory::Device)?.device_address();
-        let outa = ensure(ctx, &mut s.out, bytes, Memory::Device)?.device_address();
-        ensure(ctx, &mut s.down, bytes, Memory::Download)?;
-        let up = ensure(ctx, &mut s.up, bytes, Memory::Upload)?;
-        up.write(bytes_of(x));
-        let buffer = |b: &Option<Buffer>| b.as_ref().expect("allocated").buffer;
-        let (up, xb, outb, down) = (buffer(&s.up), buffer(&s.x), buffer(&s.out), buffer(&s.down));
-        ctx.submit(|cmd| {
-            copy(ctx, cmd, up, xb, bytes);
-            compute_barrier(ctx, cmd);
-            self.record_apply(cmd, xa, outa, scratch);
-            compute_barrier(ctx, cmd);
-            copy(ctx, cmd, outb, down, bytes);
-        })?;
-        let result = s.down.as_ref().expect("allocated").mapped(bytes as usize)?;
-        out.copy_from_slice(&read_complex(result, len));
-        Ok(())
+    /// `amps ← exp(-iHt) amps`, with the recurrence in GPU memory (see
+    /// [`evolve`]).
+    pub(super) fn evolve(&self, amps: &mut [C64], time: f64) -> Result<(), Error> {
+        evolve(self, amps, time)
     }
 
-    /// GPU buffers for a Lanczos recurrence holding up to `capacity` basis
-    /// vectors, with up to `batch` steps per submission.
-    fn recurrence<'s>(
-        &'s self,
-        s: &mut Scratch,
-        capacity: usize,
-        batch: usize,
-    ) -> Result<Recurrence<'s>, Error> {
-        let len = self.len();
-        let bytes = len as u64 * COMPLEX;
-        let ctx = &self.sweep.ctx;
-        let apply = self.apply_scratch(s)?;
-        let psi = ensure(ctx, &mut s.x, bytes, Memory::Device)?.device_address();
-        let w = ensure(ctx, &mut s.out, bytes, Memory::Device)?.device_address();
-        let basis =
-            ensure(ctx, &mut s.basis, bytes * capacity as u64, Memory::Device)?.device_address();
-        let partials =
-            ensure(ctx, &mut s.partials, 256 * COMPLEX, Memory::Device)?.device_address();
-        let scalars = ensure(ctx, &mut s.scalars, SCALAR_BYTES, Memory::Device)?;
-        let (scalars, scalars_buffer) = (scalars.device_address(), scalars.buffer);
-        ensure(ctx, &mut s.scalars_down, SCALAR_BYTES, Memory::Download)?;
-        let coeffs = ensure(
-            ctx,
-            &mut s.coeffs,
-            capacity as u64 * COMPLEX,
-            Memory::Upload,
-        )?
-        .device_address();
-        ensure(ctx, &mut s.down, bytes, Memory::Download)?;
-        ensure(ctx, &mut s.up, bytes, Memory::Upload)?;
-        // A submission's steps cost about 20 GFLOP at most, well inside
-        // driver timeouts at any bond dimension.
+    /// The lowest Ritz pair of `H`, with the recurrence in GPU memory (see
+    /// [`lowest_within`]).
+    pub(super) fn lowest(&self, v0: &[C64], options: &EigenOptions) -> Result<Ritz<C64>, Error> {
+        lowest_within(self, v0, options, LANCZOS_BYTES)
+    }
+}
+
+impl DeviceOp for GpuOperator<'_> {
+    fn ctx(&self) -> &Arc<GpuContext> {
+        &self.sweep.ctx
+    }
+
+    fn scratch(&self) -> &Mutex<Scratch> {
+        &self.sweep.scratch
+    }
+
+    fn len(&self) -> usize {
+        self.l * self.phys * self.r
+    }
+
+    fn flops(&self) -> usize {
         let (l, r, phys) = (self.l, self.r, self.phys);
         let (dl, dr) = (self.left.blocks, self.right.blocks);
-        let flops = 8 * phys * l * r * (dl * l + dr * r);
-        let batch = (20_000_000_000 / flops.max(1)).clamp(1, batch);
-        Ok(Recurrence {
-            op: self,
-            apply,
-            vectors: Vectors {
-                n: len,
-                groups: len.div_ceil(256).clamp(1, 256),
-                partials,
-                scalars,
-            },
-            len,
-            psi,
-            w,
-            basis,
-            capacity,
-            coeffs,
-            scalars: scalars_buffer,
-            batch,
-        })
+        8 * phys * l * r * (dl * l + dr * r)
     }
 
-    /// `amps ← exp(-iHt) amps` by the same Lanczos time-stepping as
-    /// [`krylov_evolve`](crate::statevector::evolve::krylov_evolve), with
-    /// the recurrence in GPU memory: each batch of steps is one submission,
-    /// and only its scalars α and β come back. The step size and the small
-    /// exponential `exp(-iTΔt)` are worked out on the CPU, and the new state
-    /// is combined from the basis on the GPU.
-    pub(super) fn evolve(&self, amps: &mut [C64], time: f64) -> Result<(), Error> {
-        let len = self.len();
-        assert_eq!(amps.len(), len);
-        let mut guard = self.sweep.scratch.lock().expect("GPU scratch lock");
-        let s = &mut *guard;
-        let rec = self.recurrence(s, KRYLOV_MAX + 1, KRYLOV_CHECK)?;
-        let mut beta0 = rec.start(s, amps, true)?;
+    fn prepare(&self, s: &mut Scratch) -> Result<ApplyScratch, Error> {
+        self.apply_scratch(s)
+    }
 
-        let tolerance = STEP_TOLERANCE.max(10.0 * f64::EPSILON);
-        let mut remaining = time;
-        while remaining != 0.0 {
-            if beta0 == 0.0 {
-                break;
-            }
-            // As `krylov_evolve`: grow the basis until it covers the
-            // remaining time, checking every `KRYLOV_CHECK` vectors.
-            let (mut alphas, mut betas) = (Vec::new(), Vec::new());
-            let mut covered = None;
-            // The Krylov space closes after at most `len` steps.
-            let steps = KRYLOV_MAX.min(len);
-            let mut k = 0;
-            'basis: while k < steps {
-                let end = (k + rec.batch).min(steps);
-                for (alpha, beta) in rec.steps(s, k..end)? {
-                    alphas.push(alpha);
-                    betas.push(beta);
-                    let m = alphas.len();
-                    let closed = beta <= breakdown(&alphas);
-                    if closed || m.is_multiple_of(KRYLOV_CHECK) || m == steps {
-                        let residual = if closed { 0.0 } else { beta };
-                        covered =
-                            krylov_covers(&alphas, &betas[..m - 1], residual, remaining, tolerance);
-                        if covered.is_some() || closed {
-                            break 'basis;
-                        }
-                    }
-                }
-                k = end;
-            }
-            let m = alphas.len();
-            let (dt, y) = match covered {
-                Some(y) => (remaining, y),
-                None => krylov_partial_step(
-                    &alphas,
-                    &betas[..m - 1],
-                    betas[m - 1],
-                    remaining,
-                    time,
-                    tolerance,
-                )?,
-            };
+    fn record_apply(&self, cmd: vk::CommandBuffer, x: u64, out: u64, s: ApplyScratch) {
+        GpuOperator::record_apply(self, cmd, x, out, s)
+    }
 
-            // ψ ← ‖ψ‖ Σₖ yₖ vₖ, then the next step's ‖ψ‖ and v_0.
-            let c: Vec<C64> = y.iter().map(|&yk| yk * beta0).collect();
-            beta0 = rec.combine(s, &c)?;
-            remaining = if dt == remaining { 0.0 } else { remaining - dt };
+    fn errors(&self) -> &Mutex<Option<Error>> {
+        &self.sweep.error
+    }
+}
+
+/// GPU buffers for a Lanczos recurrence holding up to `capacity` basis
+/// vectors, with up to `batch` steps per submission.
+fn recurrence<'s, O: DeviceOp>(
+    op: &'s O,
+    s: &mut Scratch,
+    capacity: usize,
+    batch: usize,
+) -> Result<Recurrence<'s, O>, Error> {
+    let len = op.len();
+    let bytes = len as u64 * COMPLEX;
+    let ctx = op.ctx();
+    let apply = op.prepare(s)?;
+    let psi = ensure(ctx, &mut s.x, bytes, Memory::Device)?.device_address();
+    let w = ensure(ctx, &mut s.out, bytes, Memory::Device)?.device_address();
+    let basis =
+        ensure(ctx, &mut s.basis, bytes * capacity as u64, Memory::Device)?.device_address();
+    let partials = ensure(ctx, &mut s.partials, 256 * COMPLEX, Memory::Device)?.device_address();
+    let scalars = ensure(ctx, &mut s.scalars, SCALAR_BYTES, Memory::Device)?;
+    let (scalars, scalars_buffer) = (scalars.device_address(), scalars.buffer);
+    ensure(ctx, &mut s.scalars_down, SCALAR_BYTES, Memory::Download)?;
+    let coeffs = ensure(
+        ctx,
+        &mut s.coeffs,
+        capacity as u64 * COMPLEX,
+        Memory::Upload,
+    )?
+    .device_address();
+    ensure(ctx, &mut s.down, bytes, Memory::Download)?;
+    ensure(ctx, &mut s.up, bytes, Memory::Upload)?;
+    // A submission's steps cost about 20 GFLOP at most, well inside
+    // driver timeouts at any bond dimension.
+    let batch = (20_000_000_000 / op.flops().max(1)).clamp(1, batch);
+    Ok(Recurrence {
+        op,
+        apply,
+        vectors: Vectors {
+            n: len,
+            groups: len.div_ceil(256).clamp(1, 256),
+            partials,
+            scalars,
+        },
+        len,
+        psi,
+        w,
+        basis,
+        capacity,
+        coeffs,
+        scalars: scalars_buffer,
+        batch,
+    })
+}
+
+/// `amps ← exp(-iHt) amps` by the same Lanczos time-stepping as
+/// [`krylov_evolve`](crate::statevector::evolve::krylov_evolve), with
+/// the recurrence in GPU memory: each batch of steps is one submission,
+/// and only its scalars α and β come back. The step size and the small
+/// exponential `exp(-iTΔt)` are worked out on the CPU, and the new state
+/// is combined from the basis on the GPU.
+pub(super) fn evolve<O: DeviceOp>(op: &O, amps: &mut [C64], time: f64) -> Result<(), Error> {
+    let len = op.len();
+    assert_eq!(amps.len(), len);
+    let mut guard = op.scratch().lock().expect("GPU scratch lock");
+    let s = &mut *guard;
+    let rec = recurrence(op, s, KRYLOV_MAX + 1, KRYLOV_CHECK)?;
+    let mut beta0 = rec.start(s, amps, true)?;
+
+    let tolerance = STEP_TOLERANCE.max(10.0 * f64::EPSILON);
+    let mut remaining = time;
+    while remaining != 0.0 {
+        if beta0 == 0.0 {
+            break;
         }
-        rec.download(s, rec.psi, amps)
-    }
-
-    /// The lowest Ritz pair of `H` (see [`Ritz`]), by the same Lanczos
-    /// iteration as [`lanczos_lowest_from`] from the unit vector `v0`, with
-    /// the recurrence in GPU memory. The basis is kept there rather than
-    /// replayed, so this takes half the products; if it would outgrow
-    /// [`LANCZOS_BYTES`] before converging, the solve is redone with the
-    /// CPU's recurrence (still applying `H` on the GPU).
-    pub(super) fn lowest(&self, v0: &[C64], options: &EigenOptions) -> Result<Ritz<C64>, Error> {
-        self.lowest_within(v0, options, LANCZOS_BYTES)
-    }
-
-    /// [`lowest`](Self::lowest) with at most `budget` bytes of basis.
-    fn lowest_within(
-        &self,
-        v0: &[C64],
-        options: &EigenOptions,
-        budget: u64,
-    ) -> Result<Ritz<C64>, Error> {
-        let len = self.len();
-        assert_eq!(v0.len(), len);
-        let fits = (budget / (len as u64 * COMPLEX)) as usize;
-        let capacity = (options.max_iterations + 1).min(fits);
-        if capacity < 2 {
-            return lanczos_lowest_from(self, v0, &[], options);
-        }
-        let mut guard = self.sweep.scratch.lock().expect("GPU scratch lock");
-        let s = &mut *guard;
-        let rec = self.recurrence(s, capacity, LANCZOS_BATCH)?;
-        rec.start(s, v0, false)?;
-
-        // As `lanczos_lowest_from`: grow the tridiagonal matrix until its
-        // lowest Ritz pair converges, else keep the best one.
-        let mut tracker = RitzTracker::new(options.tolerance);
-        let mut ritz = None;
-        let limit = options.max_iterations.min(capacity - 1);
+        // As `krylov_evolve`: grow the basis until it covers the
+        // remaining time, checking every `KRYLOV_CHECK` vectors.
+        let (mut alphas, mut betas) = (Vec::new(), Vec::new());
+        let mut covered = None;
+        // The Krylov space closes after at most `len` steps.
+        let steps = KRYLOV_MAX.min(len);
         let mut k = 0;
-        'steps: while k < limit {
-            let end = (k + rec.batch).min(limit);
+        'basis: while k < steps {
+            let end = (k + rec.batch).min(steps);
             for (alpha, beta) in rec.steps(s, k..end)? {
-                ritz = tracker.step(alpha, beta);
-                if ritz.is_some() {
-                    break 'steps;
+                alphas.push(alpha);
+                betas.push(beta);
+                let m = alphas.len();
+                let closed = beta <= breakdown(&alphas);
+                if closed || m.is_multiple_of(KRYLOV_CHECK) || m == steps {
+                    let residual = if closed { 0.0 } else { beta };
+                    covered =
+                        krylov_covers(&alphas, &betas[..m - 1], residual, remaining, tolerance);
+                    if covered.is_some() || closed {
+                        break 'basis;
+                    }
                 }
             }
             k = end;
         }
-        let converged = ritz.is_some();
-        if !converged && limit < options.max_iterations {
-            drop(guard);
-            return lanczos_lowest_from(self, v0, &[], options);
-        }
-        let (value, v) = ritz
-            .or_else(|| tracker.best())
-            .ok_or_else(|| Error::InvalidArgument("Lanczos needs at least one iteration".into()))?;
-        // x = Σₖ vₖ eₖ, normalised (into v_0).
-        let c: Vec<C64> = v.iter().map(|&x| C64::new(x, 0.0)).collect();
-        rec.combine(s, &c)?;
-        let mut vector = vec![C64::new(0.0, 0.0); len];
-        rec.download(s, rec.v(0), &mut vector)?;
-        Ok(Ritz {
-            value,
-            vector,
-            converged,
-        })
+        let m = alphas.len();
+        let (dt, y) = match covered {
+            Some(y) => (remaining, y),
+            None => krylov_partial_step(
+                &alphas,
+                &betas[..m - 1],
+                betas[m - 1],
+                remaining,
+                time,
+                tolerance,
+            )?,
+        };
+
+        // ψ ← ‖ψ‖ Σₖ yₖ vₖ, then the next step's ‖ψ‖ and v_0.
+        let c: Vec<C64> = y.iter().map(|&yk| yk * beta0).collect();
+        beta0 = rec.combine(s, &c)?;
+        remaining = if dt == remaining { 0.0 } else { remaining - dt };
     }
+    rec.download(s, rec.psi, amps)
+}
+
+/// The lowest Ritz pair of `H` (see [`Ritz`]), by the same Lanczos
+/// iteration as [`lanczos_lowest_from`] from the unit vector `v0`, with the
+/// recurrence in GPU memory and at most `budget` bytes of basis. The basis
+/// is kept there rather than replayed, so this takes half the products; if
+/// it would outgrow `budget` before converging, the solve is redone with
+/// the CPU's recurrence (still applying `H` on the GPU).
+pub(super) fn lowest_within<O: DeviceOp>(
+    op: &O,
+    v0: &[C64],
+    options: &EigenOptions,
+    budget: u64,
+) -> Result<Ritz<C64>, Error> {
+    let len = op.len();
+    assert_eq!(v0.len(), len);
+    let fits = (budget / (len as u64 * COMPLEX)) as usize;
+    let capacity = (options.max_iterations + 1).min(fits);
+    if capacity < 2 {
+        return lanczos_lowest_from(op, v0, &[], options);
+    }
+    let mut guard = op.scratch().lock().expect("GPU scratch lock");
+    let s = &mut *guard;
+    let rec = recurrence(op, s, capacity, LANCZOS_BATCH)?;
+    rec.start(s, v0, false)?;
+
+    // As `lanczos_lowest_from`: grow the tridiagonal matrix until its
+    // lowest Ritz pair converges, else keep the best one.
+    let mut tracker = RitzTracker::new(options.tolerance);
+    let mut ritz = None;
+    let limit = options.max_iterations.min(capacity - 1);
+    let mut k = 0;
+    'steps: while k < limit {
+        let end = (k + rec.batch).min(limit);
+        for (alpha, beta) in rec.steps(s, k..end)? {
+            ritz = tracker.step(alpha, beta);
+            if ritz.is_some() {
+                break 'steps;
+            }
+        }
+        k = end;
+    }
+    let converged = ritz.is_some();
+    if !converged && limit < options.max_iterations {
+        drop(guard);
+        return lanczos_lowest_from(op, v0, &[], options);
+    }
+    let (value, v) = ritz
+        .or_else(|| tracker.best())
+        .ok_or_else(|| Error::InvalidArgument("Lanczos needs at least one iteration".into()))?;
+    // x = Σₖ vₖ eₖ, normalised (into v_0).
+    let c: Vec<C64> = v.iter().map(|&x| C64::new(x, 0.0)).collect();
+    rec.combine(s, &c)?;
+    let mut vector = vec![C64::new(0.0, 0.0); len];
+    rec.download(s, rec.v(0), &mut vector)?;
+    Ok(Ritz {
+        value,
+        vector,
+        converged,
+    })
 }
 
 /// Bytes of Lanczos basis [`GpuOperator::lowest`] keeps in GPU memory.
@@ -1185,8 +1246,8 @@ const SCALAR_BYTES: u64 = Slots::COUNT as u64 * 8;
 /// A Lanczos recurrence in GPU memory: the state `ψ`, the work vector `w`,
 /// the basis `v_0 …` (up to `capacity` of them) and the scalars in
 /// [`Slots`].
-struct Recurrence<'a> {
-    op: &'a GpuOperator<'a>,
+struct Recurrence<'a, O> {
+    op: &'a O,
     apply: ApplyScratch,
     vectors: Vectors,
     len: usize,
@@ -1199,9 +1260,9 @@ struct Recurrence<'a> {
     batch: usize,
 }
 
-impl Recurrence<'_> {
+impl<O: DeviceOp> Recurrence<'_, O> {
     fn ctx(&self) -> &GpuContext {
-        &self.op.sweep.ctx
+        self.op.ctx()
     }
 
     fn bytes(&self) -> u64 {
@@ -1280,13 +1341,13 @@ impl Recurrence<'_> {
             for j in steps.clone() {
                 self.op.record_apply(cmd, self.v(j), w, self.apply);
                 compute_barrier(ctx, cmd);
-                vectors.dot(ctx, cmd, self.v(j), w, Slots::alpha(j), false);
                 let previous = if j == 0 {
                     Slots::ZERO
                 } else {
                     Slots::beta(j - 1)
                 };
                 let v_prev = self.v(j.saturating_sub(1));
+                vectors.dot(ctx, cmd, self.v(j), w, Slots::alpha(j), false);
                 vectors.update(ctx, cmd, w, self.v(j), v_prev, Slots::alpha(j), previous);
                 compute_barrier(ctx, cmd);
                 vectors.dot(ctx, cmd, w, w, Slots::beta(j), true);
@@ -1341,14 +1402,7 @@ impl Recurrence<'_> {
 
 impl LinearOperator<C64> for GpuOperator<'_> {
     fn apply(&self, x: &[C64], out: &mut [C64]) {
-        if let Err(e) = self.try_apply(x, out) {
-            // Krylov iterations can't fail midway: record the error for the
-            // caller (see `GpuSweep::take_error`) and return zeros, which
-            // end the iteration.
-            out.fill(C64::new(0.0, 0.0));
-            let mut error = self.sweep.error.lock().expect("GPU error lock");
-            error.get_or_insert(e);
-        }
+        apply_on_device(self, x, out);
     }
 }
 
@@ -1484,8 +1538,8 @@ mod tests {
             let x = random(l * 2 * r);
             let (mut want, mut got) =
                 (vec![C64::default(); x.len()], vec![C64::default(); x.len()]);
-            cpu.one_site(i, &mps, &mpo).apply(&x, &mut want);
-            gpu.one_site(i, &mps, &mpo).apply(&x, &mut got);
+            cpu.one_site(i, &mps, &mpo).unwrap().apply(&x, &mut want);
+            gpu.one_site(i, &mps, &mpo).unwrap().apply(&x, &mut got);
             gpu.check().unwrap();
             assert!(
                 max_diff(&want, &got) < 1e-11,
@@ -1495,8 +1549,14 @@ mod tests {
             // Krylov evolution with the recurrence on the GPU, against the
             // CPU's; long enough to take several Krylov steps.
             let (mut want, mut got) = (x.clone(), x.clone());
-            cpu.one_site(i, &mps, &mpo).evolve(&mut want, -0.9).unwrap();
-            gpu.one_site(i, &mps, &mpo).evolve(&mut got, -0.9).unwrap();
+            cpu.one_site(i, &mps, &mpo)
+                .unwrap()
+                .evolve(&mut want, -0.9)
+                .unwrap();
+            gpu.one_site(i, &mps, &mpo)
+                .unwrap()
+                .evolve(&mut got, -0.9)
+                .unwrap();
             let diff = max_diff(&want, &got);
             assert!(diff < 1e-10 * norm(&x), "evolve one site {i}: {diff}");
 
@@ -1505,8 +1565,8 @@ mod tests {
                 let x = random(l * 4 * r2);
                 let (mut want, mut got) =
                     (vec![C64::default(); x.len()], vec![C64::default(); x.len()]);
-                cpu.two_site(i, &mps, &mpo).apply(&x, &mut want);
-                gpu.two_site(i, &mps, &mpo).apply(&x, &mut got);
+                cpu.two_site(i, &mps, &mpo).unwrap().apply(&x, &mut want);
+                gpu.two_site(i, &mps, &mpo).unwrap().apply(&x, &mut got);
                 gpu.check().unwrap();
                 assert!(
                     max_diff(&want, &got) < 1e-11,
@@ -1515,8 +1575,14 @@ mod tests {
                 );
 
                 let (mut want, mut got) = (x.clone(), x.clone());
-                cpu.two_site(i, &mps, &mpo).evolve(&mut want, 0.9).unwrap();
-                gpu.two_site(i, &mps, &mpo).evolve(&mut got, 0.9).unwrap();
+                cpu.two_site(i, &mps, &mpo)
+                    .unwrap()
+                    .evolve(&mut want, 0.9)
+                    .unwrap();
+                gpu.two_site(i, &mps, &mpo)
+                    .unwrap()
+                    .evolve(&mut got, 0.9)
+                    .unwrap();
                 let diff = max_diff(&want, &got);
                 assert!(diff < 1e-10 * norm(&x), "evolve two sites {i}: {diff}");
 
@@ -1526,14 +1592,15 @@ mod tests {
                 let v0: Vec<C64> = x.iter().map(|v| v / norm(&x)).collect();
                 let options = EigenOptions::default();
                 let want =
-                    lanczos_lowest_from(&cpu.two_site(i, &mps, &mpo), &v0, &[], &options).unwrap();
+                    lanczos_lowest_from(&cpu.two_site(i, &mps, &mpo).unwrap(), &v0, &[], &options)
+                        .unwrap();
                 let (want_e, want) = (want.value, want.vector);
-                let Op::Gpu(op) = gpu.two_site(i, &mps, &mpo) else {
+                let Op::Gpu(op) = gpu.two_site(i, &mps, &mpo).unwrap() else {
                     unreachable!()
                 };
                 let bytes = (x.len() * 16) as u64;
                 for budget in [LANCZOS_BYTES, 4 * bytes] {
-                    let got = op.lowest_within(&v0, &options, budget).unwrap();
+                    let got = lowest_within(&op, &v0, &options, budget).unwrap();
                     assert!(got.converged);
                     let (got_e, got) = (got.value, got.vector);
                     assert!((want_e - got_e).abs() < 1e-9, "{want_e} {got_e}");
@@ -1545,7 +1612,7 @@ mod tests {
                     );
                     // The Ritz value is the vector's energy.
                     let mut hx = vec![C64::default(); got.len()];
-                    cpu.two_site(i, &mps, &mpo).apply(&got, &mut hx);
+                    cpu.two_site(i, &mps, &mpo).unwrap().apply(&got, &mut hx);
                     let energy: f64 = got.iter().zip(&hx).map(|(a, b)| (a.conj() * b).re).sum();
                     assert!((energy - got_e).abs() < 1e-9, "{energy} {got_e}");
                 }

@@ -18,12 +18,20 @@
   dense code ranks them. Gates need `to_dense` first. In Python:
   `ketrs.Charge.u1`, `Charge.modulo`, `Charge.weights`,
   `MPS.with_charges`, `MPS.to_dense()`, `MPS.charges`,
-  `MPS.total_charge` and `MPS.bond_sectors(bond)`. A symmetric MPS sweeps
-  on the CPU even with `gpu` set. Preparing a wave packet in a 194-qubit
-  lattice gauge theory (its charge and 48 Gauss laws as charges) took
-  1.5 s, 5.0 s and 14.7 s at bond dimension 64, 128 and 256 on six CPU
-  threads, against 34 s, 200 s and 811 s for dense sweeps on an RX
-  9060 XT, with environments about 30× smaller. For a lattice
+  `MPS.total_charge` and `MPS.bond_sectors(bond)`. Preparing a wave
+  packet in a 194-qubit lattice gauge theory (its charge and 48 Gauss laws
+  as charges) took 1.2 s, 2.6 s and 5.9 s at bond dimension 64, 128 and 256
+  on six CPU threads, against 34 s, 200 s and 811 s for dense sweeps on an
+  RX 9060 XT, with environments about 30× smaller.
+- With `gpu` set, a symmetric MPS keeps its block-sparse environments on
+  the GPU and runs its effective Hamiltonians there, each contraction as a
+  grouped product of all its blocks in one dispatch (`mps_bgemm.comp`, in
+  8×8 or 16×16 tiles) around a sparse step (`mps_bmix.comp`), with the
+  Krylov and Lanczos recurrences of dense sweeps. Blocks are small, so it
+  pays from large bonds: on the RX 9060 XT, an evolution step of the
+  lattice gauge theory took 4.2 s against 4.4 s on six CPU threads at bond
+  dimension 256, and 10.2 s against 16.4 s at 512 (402 qubits at 256:
+  14.5 s against 19.2 s); at 64 to 128 the CPU is about 2× faster. For a lattice
   gauge theory with its charge and Gauss laws as charges, the graded MPO
   alone is 3–4× narrower than the Pauli one (evolution bond 16 instead
   of 58).

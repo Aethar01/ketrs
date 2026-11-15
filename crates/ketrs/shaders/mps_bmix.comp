@@ -1,0 +1,67 @@
+#version 460
+// The sparse step of a block-sparse MPS contraction: rectangular segments
+// of `z`, each a sum of scaled blocks of `y`,
+//
+//     z[s.z + row · s.z_row + col] = Σ_e f_e · y[e.y + row · e.y_row + col]
+//
+// for `row < s.rows`, `col < s.cols`, over the entries `e` of segment `s`
+// (`entries[s.first .. s.last]`). Segments are disjoint, so each output
+// element is written by one thread, once; a segment without entries is
+// set to zero. `s.start` is the index of the segment's first element in
+// the flattened list of all elements, found by binary search from a
+// thread's index in a grid-stride loop.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 256) in;
+
+struct Segment {
+    uint z, z_row, rows, cols;
+    uint first, last, start, pad;
+};
+
+struct Entry {
+    dvec2 f;
+    uint y, y_row;
+    uint pad0, pad1;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer In { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer Out { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Segments { Segment v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Entries { Entry v[]; };
+
+layout(push_constant) uniform Push {
+    uvec2 y_addr, z_addr, segments_addr, entries_addr;
+    uint segments, total;
+};
+
+void main() {
+    In y = In(y_addr);
+    Out z = Out(z_addr);
+    Segments segs = Segments(segments_addr);
+    Entries entries = Entries(entries_addr);
+    uint stride = gl_NumWorkGroups.x * 256u;
+    for (uint e = gl_GlobalInvocationID.x; e < total; e += stride) {
+        // The last segment starting at or before e.
+        uint lo = 0u, hi = segments;
+        while (hi - lo > 1u) {
+            uint mid = (lo + hi) / 2u;
+            if (segs.v[mid].start <= e) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Segment s = segs.v[lo];
+        uint local = e - s.start;
+        uint row = local / s.cols, col = local % s.cols;
+        dvec2 acc = dvec2(0.0);
+        for (uint t = s.first; t < s.last; t++) {
+            Entry en = entries.v[t];
+            dvec2 x = y.v[en.y + row * en.y_row + col];
+            acc += dvec2(en.f.x * x.x - en.f.y * x.y, en.f.x * x.y + en.f.y * x.x);
+        }
+        z.v[s.z + row * s.z_row + col] = acc;
+    }
+}

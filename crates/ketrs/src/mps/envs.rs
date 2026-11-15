@@ -4,10 +4,10 @@
 
 use super::Mps;
 use super::blocks::{self, BlockEnv, BlockOp, Side};
-use super::dmrg::{Env, update_left, update_right};
+use super::dmrg::{Env, two_site_vector, update_left, update_right};
 use super::effective::Effective;
 #[cfg(feature = "gpu")]
-use super::gpu::{GpuOperator, GpuSweep};
+use super::gpu::{GpuBlockOp, GpuBlockSweep, GpuOperator, GpuSweep};
 use super::mpo::Mpo;
 use crate::error::Error;
 use crate::statevector::eigen::{EigenOptions, Ritz, lanczos_lowest_from};
@@ -31,6 +31,9 @@ pub(super) enum Envs {
     },
     #[cfg(feature = "gpu")]
     Gpu(Box<GpuSweep>),
+    /// Block-sparse environments of a symmetric MPS on a GPU.
+    #[cfg(feature = "gpu")]
+    GpuBlocks(Box<GpuBlockSweep>),
 }
 
 impl Envs {
@@ -39,6 +42,10 @@ impl Envs {
         let n = mps.n_qubits();
         if let Some(sym) = &mps.symmetry {
             debug_assert!(mpo.channels.is_some(), "a charge-graded MPO");
+            #[cfg(feature = "gpu")]
+            if let Some(gpu) = &mps.gpu {
+                return Ok(Envs::GpuBlocks(Box::new(GpuBlockSweep::new(&gpu.0, mps)?)));
+            }
             let mut left: Vec<Option<BlockEnv>> = (0..n).map(|_| None).collect();
             let mut right: Vec<Option<BlockEnv>> = (0..n).map(|_| None).collect();
             left[0] = Some(BlockEnv::boundary(Side::Left, &sym.bonds[0], &sym.charges));
@@ -85,6 +92,8 @@ impl Envs {
             }
             #[cfg(feature = "gpu")]
             Envs::Gpu(g) => g.update_left(i, a, mpo),
+            #[cfg(feature = "gpu")]
+            Envs::GpuBlocks(g) => g.update_left(i, mps, mpo),
         }
     }
 
@@ -116,13 +125,15 @@ impl Envs {
             }
             #[cfg(feature = "gpu")]
             Envs::Gpu(g) => g.update_right(i, a, mpo),
+            #[cfg(feature = "gpu")]
+            Envs::GpuBlocks(g) => g.update_right(i, mps, mpo),
         }
     }
 
     /// The effective Hamiltonian of sites `i` and `i + 1`.
-    pub(super) fn two_site<'a>(&'a self, i: usize, mps: &Mps, mpo: &Mpo) -> Op<'a> {
+    pub(super) fn two_site<'a>(&'a self, i: usize, mps: &Mps, mpo: &Mpo) -> Result<Op<'a>, Error> {
         let (l, r) = (mps.tensors[i].left, mps.tensors[i + 1].right);
-        match self {
+        Ok(match self {
             Envs::Blocks { left, right } => Op::Blocks(BlockOp::two_site(
                 left[i].as_ref().expect("left environment built"),
                 right[i + 1].as_ref().expect("right environment built"),
@@ -144,13 +155,20 @@ impl Envs {
             ),
             #[cfg(feature = "gpu")]
             Envs::Gpu(g) => Op::Gpu(g.two_site(i, l, r)),
-        }
+            #[cfg(feature = "gpu")]
+            Envs::GpuBlocks(g) => Op::GpuBlocks(g.two_site(i, mps, mpo)?),
+        })
     }
 
     /// The effective Hamiltonian of site `i`.
-    pub(super) fn one_site<'a>(&'a self, i: usize, mps: &Mps, mpo: &'a Mpo) -> Op<'a> {
+    pub(super) fn one_site<'a>(
+        &'a self,
+        i: usize,
+        mps: &Mps,
+        mpo: &'a Mpo,
+    ) -> Result<Op<'a>, Error> {
         let (l, r) = (mps.tensors[i].left, mps.tensors[i].right);
-        match self {
+        Ok(match self {
             Envs::Blocks { left, right } => Op::Blocks(BlockOp::one_site(
                 left[i].as_ref().expect("left environment built"),
                 right[i].as_ref().expect("right environment built"),
@@ -170,7 +188,9 @@ impl Envs {
             ),
             #[cfg(feature = "gpu")]
             Envs::Gpu(g) => Op::Gpu(g.one_site(i, l, r)),
-        }
+            #[cfg(feature = "gpu")]
+            Envs::GpuBlocks(g) => Op::GpuBlocks(g.one_site(i, mps, mpo)?),
+        })
     }
 
     /// Free `left[i]`, which the sweep has moved past, on a GPU (where
@@ -178,8 +198,10 @@ impl Envs {
     /// boundary is kept; the CPU keeps everything.
     pub(super) fn release_left(&mut self, i: usize) {
         #[cfg(feature = "gpu")]
-        if let Envs::Gpu(g) = self {
-            g.release_left(i);
+        match self {
+            Envs::Gpu(g) => g.release_left(i),
+            Envs::GpuBlocks(g) => g.release_left(i),
+            _ => {}
         }
         let _ = i;
     }
@@ -187,8 +209,10 @@ impl Envs {
     /// Free `right[i]` (see [`release_left`](Self::release_left)).
     pub(super) fn release_right(&mut self, i: usize) {
         #[cfg(feature = "gpu")]
-        if let Envs::Gpu(g) = self {
-            g.release_right(i);
+        match self {
+            Envs::Gpu(g) => g.release_right(i),
+            Envs::GpuBlocks(g) => g.release_right(i),
+            _ => {}
         }
         let _ = i;
     }
@@ -204,6 +228,8 @@ impl Envs {
             )),
             #[cfg(feature = "gpu")]
             Envs::Gpu(g) => Ok(Cow::Owned(g.download_left(i)?)),
+            #[cfg(feature = "gpu")]
+            Envs::GpuBlocks(g) => Ok(Cow::Owned(g.download_left(i)?.to_env())),
         }
     }
 
@@ -218,6 +244,8 @@ impl Envs {
             )),
             #[cfg(feature = "gpu")]
             Envs::Gpu(g) => Ok(Cow::Owned(g.download_right(i)?)),
+            #[cfg(feature = "gpu")]
+            Envs::GpuBlocks(g) => Ok(Cow::Owned(g.download_right(i)?.to_env())),
         }
     }
 
@@ -228,6 +256,8 @@ impl Envs {
             Envs::Cpu { .. } | Envs::Blocks { .. } => Ok(()),
             #[cfg(feature = "gpu")]
             Envs::Gpu(g) => g.take_error(),
+            #[cfg(feature = "gpu")]
+            Envs::GpuBlocks(g) => g.take_error(),
         }
     }
 }
@@ -240,6 +270,9 @@ pub(super) enum Op<'a> {
     Blocks(BlockOp<'a>),
     #[cfg(feature = "gpu")]
     Gpu(GpuOperator<'a>),
+    /// Acts on compact vectors, as [`Op::Blocks`].
+    #[cfg(feature = "gpu")]
+    GpuBlocks(GpuBlockOp<'a>),
 }
 
 impl Op<'_> {
@@ -249,14 +282,38 @@ impl Op<'_> {
     pub(super) fn pack(&self, dense: Vec<C64>) -> Vec<C64> {
         match self {
             Op::Blocks(op) => op.layout().gather(&dense),
+            #[cfg(feature = "gpu")]
+            Op::GpuBlocks(op) => op.layout().gather(&dense),
             _ => dense,
         }
+    }
+
+    /// The vector of sites `i` and `i + 1` of `mps` this operator acts on:
+    /// [`pack`](Self::pack) of their two-site tensor, built block by block
+    /// for a block operator.
+    pub(super) fn two_site_vector(&self, mps: &Mps, i: usize) -> Vec<C64> {
+        let layout = match self {
+            Op::Blocks(op) => op.layout(),
+            #[cfg(feature = "gpu")]
+            Op::GpuBlocks(op) => op.layout(),
+            _ => return two_site_vector(&mps.tensors[i], &mps.tensors[i + 1]),
+        };
+        let sym = mps.symmetry.as_ref().expect("a symmetric MPS");
+        layout.two_site(
+            &mps.tensors[i],
+            &mps.tensors[i + 1],
+            &sym.bonds[i + 1],
+            &sym.charges,
+            i,
+        )
     }
 
     /// The dense tensor of a vector from [`pack`](Self::pack).
     pub(super) fn unpack(&self, x: Vec<C64>) -> Vec<C64> {
         match self {
             Op::Blocks(op) => op.layout().scatter(&x),
+            #[cfg(feature = "gpu")]
+            Op::GpuBlocks(op) => op.layout().scatter(&x),
             _ => x,
         }
     }
@@ -268,6 +325,8 @@ impl Op<'_> {
             Op::Cpu(..) | Op::Blocks(_) => krylov_evolve(self, x, t, true),
             #[cfg(feature = "gpu")]
             Op::Gpu(op) => op.evolve(x, t),
+            #[cfg(feature = "gpu")]
+            Op::GpuBlocks(op) => op.evolve(x, t),
         }
     }
 
@@ -278,6 +337,8 @@ impl Op<'_> {
             Op::Cpu(..) | Op::Blocks(_) => lanczos_lowest_from(self, v0, &[], options),
             #[cfg(feature = "gpu")]
             Op::Gpu(op) => op.lowest(v0, options),
+            #[cfg(feature = "gpu")]
+            Op::GpuBlocks(op) => op.lowest(v0, options),
         }
     }
 }
@@ -289,6 +350,8 @@ impl LinearOperator<C64> for Op<'_> {
             Op::Blocks(op) => op.apply(x, out),
             #[cfg(feature = "gpu")]
             Op::Gpu(op) => op.apply(x, out),
+            #[cfg(feature = "gpu")]
+            Op::GpuBlocks(op) => op.apply(x, out),
         }
     }
 }

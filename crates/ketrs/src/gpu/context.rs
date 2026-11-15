@@ -144,14 +144,23 @@ pub(crate) enum MpsKernel {
     Krylov = 3,
     /// Column steps of a blocked Householder QR.
     Qr = 4,
+    /// Grouped products of blocks, in 8×8 output tiles.
+    BlockGemm8 = 5,
+    /// Grouped products of blocks, in 16×16 output tiles.
+    BlockGemm16 = 6,
+    /// Sums of scaled blocks into disjoint segments.
+    BlockMix = 7,
 }
 
-const MPS_SHADERS: [&[u8]; 5] = [
+const MPS_SHADERS: [&[u8]; 8] = [
     spirv!("mps_gemm"),
     spirv!("mps_mix"),
     spirv!("mps_sum"),
     spirv!("mps_krylov"),
     spirv!("mps_qr"),
+    spirv!("mps_bgemm_8"),
+    spirv!("mps_bgemm_16"),
+    spirv!("mps_bmix"),
 ];
 
 /// Push-constant bytes of the MPS kernels' layout (Vulkan's guaranteed

@@ -44,7 +44,7 @@ Rust.
 | `Statevector` / `RealStatevector` | Any circuit, exactly. Parallel, cache-blocked, with gate fusion. The real (f64) variant halves memory for real circuits; single-precision `Statevector32` / `RealStatevector32` (`dtype="complex64"` / `"float32"`) halve it again and run 1.65× / 4× faster than complex128 at 22–26 qubits, to about $`10^{-6}`$. |
 | `SectorStatevector` | States confined to fixed Hamming weights (particle number, spin, charge): stores only that subspace, rejecting anything that leaves it. |
 | `DensityMatrix` | Mixed states and noise: Kraus channels (depolarizing, amplitude and phase damping, Pauli, any Kraus set) and noise models after every gate, matching Qiskit Aer's density-matrix method and 1.3–4.2× faster. For more qubits, statevectors run the same noise models (plus readout error) as quantum trajectories. |
-| `MPS` | Weakly entangled states of many qubits: TEBD, TDVP for Hamiltonians of any range (with subspace expansion while bonds grow), DMRG ground states (with noise, so terms on more than two qubits can't trap it), sampling and post-selection (`project`), cheap copies, with controlled truncation. TDVP and DMRG sweeps can run on a Vulkan GPU with 64-bit floats (`mps.gpu = True`), 2.7–3.4× faster than three CPU cores at bond dimension 64. With conserved charges (U(1) or $`Z_n`$, any number: `with_charges`) they run block-sparse within the state's sector, 22–55× faster on six CPU cores than dense sweeps on that GPU for a 194-qubit lattice gauge theory. |
+| `MPS` | Weakly entangled states of many qubits: TEBD, TDVP for Hamiltonians of any range (with subspace expansion while bonds grow), DMRG ground states (with noise, so terms on more than two qubits can't trap it), sampling and post-selection (`project`), cheap copies, with controlled truncation. TDVP and DMRG sweeps can run on a Vulkan GPU with 64-bit floats (`mps.gpu = True`), 2.7–3.4× faster than three CPU cores at bond dimension 64. With conserved charges (U(1) or $`Z_n`$, any number: `with_charges`) they run block-sparse within the state's sector, on the CPU or the GPU: 28–137× faster on six CPU cores than dense sweeps on that GPU for a 194-qubit lattice gauge theory. |
 | `GpuStatevector` | Large circuits on any Vulkan 1.2 GPU (NVIDIA, AMD, …), up to 31 qubits memory permitting, in double precision where the GPU has 64-bit floats or single (`complex64`, 2.8–5.8× faster on consumer cards) anywhere; expectation values, sampling, $`H\vert\psi\rangle`$, adjoint gradients and exact $`e^{-iHt}`$ (2.8–6.5× faster than the CPU at 18–24 qubits) run on the GPU. Needs only the system Vulkan driver at run time: no CUDA or ROCm. |
 
 ## Features
@@ -212,20 +212,27 @@ free.
 
 **Symmetric MPS**: preparing a wave packet in a 194-qubit Schwinger
 model with link registers (48 sites, three qubits per link, two packet
-ancillas): two TDVP steps of a 4032-term generator on the DMRG vacuum.
-Symmetric, with the total charge and the 48 Gauss laws as charges
-(`with_charges`), on six CPU threads, against dense on the RX 9060 XT. The
-charge-graded MPO is 3–4× narrower than the Pauli one, and the
-block-sparse environments take 28–33× less memory than dense ones at the
-same bonds (0.14 GB against 4.1 GB at $`\chi = 256`$). The packet's weight
-agrees to $`10^{-3}`$, within the truncation. TDVP time only. One block is
-4×.
+ancillas): two TDVP steps of a 4032-term generator on the DMRG vacuum,
+then projecting the packet's ancilla. Symmetric, with the total charge and
+the 48 Gauss laws as charges (`with_charges`), against dense on the RX
+9060 XT (TDVP alone). The charge-graded MPO is 3–4× narrower than the
+Pauli one, and the block-sparse environments take 28–33× less memory than
+dense ones at the same bonds (0.14 GB against 4.1 GB at $`\chi = 256`$).
+The packet's weight agrees to $`10^{-3}`$, within the truncation. One
+block is 8×.
 
-| $`\chi`$ cap | Dense, GPU | Symmetric, 6 threads | Speedup |
-|---:|---:|---:|:---|
-| 64 | 33.7 s | 1.5 s | `█████▌` 22× |
-| 128 | 199.5 s | 5.0 s | `██████████` 40× |
-| 256 | 811 s | 14.7 s | `█████████████▊` 55× |
+| $`\chi`$ cap | Dense, GPU | Symmetric, 6 threads | Symmetric, GPU | Speedup |
+|---:|---:|---:|---:|:---|
+| 64 | 33.7 s | 1.2 s | 2.7 s | `███▌` 28× |
+| 128 | 199.5 s | 2.6 s | 4.5 s | `█████████▋` 77× |
+| 256 | 811 s | 5.9 s | 6.5 s | `█████████████████▏` 137× |
+
+Symmetric blocks are small (here at most 40 states), so on the GPU each
+Krylov step is a few tens of microseconds of work between dispatches: it
+pays only for large bonds, matching the CPU at $`\chi = 256`$ and 1.6×
+faster at 512 (an evolution step of 10.2 s against 16.4 s). With 402 qubits
+(100 sites, 101 charges) at $`\chi = 256`$, an evolution step took 19.2 s
+on six threads and 14.5 s on the GPU.
 
 **Exact evolution and ground states** of a Heisenberg chain, against scipy's
 `expm_multiply` and `eigsh` on a sparse matrix built in advance (construction

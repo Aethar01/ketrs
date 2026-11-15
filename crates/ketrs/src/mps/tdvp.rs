@@ -22,7 +22,6 @@
 //! that starts from a product state still makes an `O(dt²)` error;
 //! overall the integrator stays second order.
 
-use super::dmrg::two_site_vector;
 use super::envs::Envs;
 use super::mpo::Mpo;
 use super::{Absorb, Mps};
@@ -130,8 +129,8 @@ impl Mps {
         absorb: Absorb,
     ) -> Result<(), Error> {
         let (l, r) = (self.tensors[i].left, self.tensors[i + 1].right);
-        let op = envs.two_site(i, self, mpo);
-        let mut x = op.pack(two_site_vector(&self.tensors[i], &self.tensors[i + 1]));
+        let op = envs.two_site(i, self, mpo)?;
+        let mut x = op.two_site_vector(self, i);
         let evolved = op.evolve(&mut x, t);
         envs.check()?;
         evolved?;
@@ -143,7 +142,7 @@ impl Mps {
     /// Evolve site `i`, the centre, by `exp(-iH t)` under its effective
     /// Hamiltonian.
     fn evolve_site(&mut self, i: usize, mpo: &Mpo, envs: &Envs, t: f64) -> Result<(), Error> {
-        let op = envs.one_site(i, self, mpo);
+        let op = envs.one_site(i, self, mpo)?;
         let mut x = op.pack(std::mem::take(&mut self.tensors[i].data));
         let evolved = op.evolve(&mut x, t);
         self.tensors[i].data = op.unpack(x);

@@ -162,6 +162,8 @@ fn chain<'a>(envs: &'a Envs) -> Result<Box<dyn Chain + 'a>, Error> {
         })),
         Envs::Blocks { .. } => unreachable!("symmetric expansions have their own chain"),
         #[cfg(feature = "gpu")]
+        Envs::GpuBlocks(_) => unreachable!("symmetric expansions have their own chain"),
+        #[cfg(feature = "gpu")]
         Envs::Gpu(g) => Ok(Box::new(g.chain()?)),
     }
 }

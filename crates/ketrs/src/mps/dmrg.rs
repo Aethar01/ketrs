@@ -213,8 +213,8 @@ impl Mps {
         absorb: Absorb,
     ) -> Result<(f64, bool), Error> {
         let (l, r) = (self.tensors[i].left, self.tensors[i + 1].right);
-        let op = envs.two_site(i, self, mpo);
-        let mut v0 = op.pack(two_site_vector(&self.tensors[i], &self.tensors[i + 1]));
+        let op = envs.two_site(i, self, mpo)?;
+        let mut v0 = op.two_site_vector(self, i);
         let scale = 1.0 / norm(&v0);
         v0.iter_mut().for_each(|a| *a *= scale);
 

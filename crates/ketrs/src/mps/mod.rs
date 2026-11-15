@@ -262,9 +262,14 @@ impl Mps {
     /// processes on it, an allocation past the driver's budget fails with
     /// an error rather than losing the device in every process.
     ///
-    /// An MPS with charges (see [`with_charges`](Self::with_charges)) sweeps
-    /// on the CPU whatever this says: its block-sparse sweeps there are
-    /// faster than dense ones on a GPU.
+    /// An MPS with charges (see [`with_charges`](Self::with_charges)) keeps
+    /// its block-sparse environments on the GPU too, with every block
+    /// product of a contraction in one dispatch. Its blocks are small, so
+    /// the GPU only pays from large bonds: on an RX 9060 XT, with a lattice
+    /// gauge theory's 49 or 101 charges, it matched six CPU threads at bond
+    /// dimension 256 (194 qubits; 1.3× faster with 402) and was 1.6× faster
+    /// at 512, but 2× slower at 64 to 128, where each Krylov step is a few
+    /// tens of microseconds of GPU work.
     #[cfg(feature = "gpu")]
     pub fn set_gpu(
         &mut self,

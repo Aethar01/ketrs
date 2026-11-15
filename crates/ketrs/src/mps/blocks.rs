@@ -61,20 +61,20 @@ pub(super) struct Stack {
     pub(super) channels: Vec<Option<(usize, usize)>>,
 }
 
-/// A block-sparse environment of one bond.
+/// Where the blocks of a block-sparse environment of one bond sit.
 #[derive(Clone, Debug)]
-pub(super) struct BlockEnv {
+pub(super) struct EnvLayout {
     pub(super) side: Side,
     pub(super) bond: Sectors,
     pub(super) stacks: Vec<Stack>,
-    /// Every stack, row-major, one after another.
-    pub(super) data: Vec<C64>,
+    /// Entries in all stacks.
+    pub(super) len: usize,
 }
 
-impl BlockEnv {
-    /// The zero environment of `bond` whose channels change the charge by
-    /// `deltas`.
-    pub(super) fn zeros(side: Side, bond: &Sectors, deltas: &[Label], charges: &Charges) -> Self {
+impl EnvLayout {
+    /// The layout on `bond` of an environment whose channels change the
+    /// charge by `deltas`.
+    pub(super) fn new(side: Side, bond: &Sectors, deltas: &[Label], charges: &Charges) -> Self {
         let mut stacks = Vec::with_capacity(bond.len());
         let mut offset = 0;
         for j in 0..bond.len() {
@@ -102,12 +102,61 @@ impl BlockEnv {
             });
             offset += rows * cols;
         }
-        BlockEnv {
+        EnvLayout {
             side,
             bond: bond.clone(),
             stacks,
-            data: vec![ZERO; offset],
+            len: offset,
         }
+    }
+
+    /// The layout beyond an end of the chain: one channel on a
+    /// one-dimensional bond.
+    pub(super) fn boundary(side: Side, bond: &Sectors, charges: &Charges) -> Self {
+        EnvLayout::new(side, bond, &[charges.zero()], charges)
+    }
+
+    pub(super) fn channels(&self) -> usize {
+        self.stacks.first().map_or(0, |s| s.channels.len())
+    }
+
+    /// For each channel and row sector, the stack that has its block and
+    /// the block's first row: the inverse of the stacks' channel lists.
+    pub(super) fn by_row_sector(&self) -> Vec<Vec<Option<(usize, usize)>>> {
+        let mut table = vec![vec![None; self.bond.len()]; self.channels()];
+        for (j, s) in self.stacks.iter().enumerate() {
+            for (ch, entry) in s.channels.iter().enumerate() {
+                if let Some((row, k)) = *entry {
+                    table[ch][k] = Some((j, row));
+                }
+            }
+        }
+        table
+    }
+}
+
+/// A block-sparse environment of one bond on the CPU.
+#[derive(Clone, Debug)]
+pub(super) struct BlockEnv {
+    pub(super) layout: EnvLayout,
+    /// Every stack, row-major, one after another.
+    pub(super) data: Vec<C64>,
+}
+
+impl std::ops::Deref for BlockEnv {
+    type Target = EnvLayout;
+    fn deref(&self) -> &EnvLayout {
+        &self.layout
+    }
+}
+
+impl BlockEnv {
+    /// The zero environment of `bond` whose channels change the charge by
+    /// `deltas`.
+    pub(super) fn zeros(side: Side, bond: &Sectors, deltas: &[Label], charges: &Charges) -> Self {
+        let layout = EnvLayout::new(side, bond, deltas, charges);
+        let data = vec![ZERO; layout.len];
+        BlockEnv { layout, data }
     }
 
     /// The environment beyond an end of the chain: one channel, the
@@ -127,7 +176,7 @@ impl BlockEnv {
     /// The same environment, dense: one `bra × ket` matrix per channel.
     pub(super) fn to_env(&self) -> super::dmrg::Env {
         let dim = self.bond.dim();
-        let n_channels = self.stacks.first().map_or(0, |s| s.channels.len());
+        let n_channels = self.channels();
         let mut blocks = vec![Mat::<C64>::zeros(dim, dim); n_channels];
         for (j, s) in self.stacks.iter().enumerate() {
             let stack = self.stack(j);
@@ -150,45 +199,31 @@ impl BlockEnv {
     /// Every stack's slice of `data`, to fill in parallel.
     fn stacks_mut(&mut self) -> Vec<(&Stack, &mut [C64])> {
         let mut rest = self.data.as_mut_slice();
-        let mut out = Vec::with_capacity(self.stacks.len());
-        for s in &self.stacks {
+        let mut out = Vec::with_capacity(self.layout.stacks.len());
+        for s in &self.layout.stacks {
             let (head, tail) = rest.split_at_mut(s.rows * s.cols);
             out.push((s, head));
             rest = tail;
         }
         out
     }
-
-    /// For each channel and row sector, the stack that has its block and
-    /// the block's first row: the inverse of the stacks' channel lists.
-    fn by_row_sector(&self, n_channels: usize) -> Vec<Vec<Option<(usize, usize)>>> {
-        let mut table = vec![vec![None; self.bond.len()]; n_channels];
-        for (j, s) in self.stacks.iter().enumerate() {
-            for (ch, entry) in s.channels.iter().enumerate() {
-                if let Some((row, k)) = *entry {
-                    table[ch][k] = Some((j, row));
-                }
-            }
-        }
-        table
-    }
 }
 
 /// The allowed blocks of site `q`'s tensor `a`, between bonds `left` and
 /// `right`: for left sector `s` and physical state `p`, the right sector
 /// `t = s + c_q(p)` (if the right bond has it) and the `d_s × d_t` block.
-struct SiteBlocks<'a> {
+pub(super) struct SiteBlocks<'a> {
     a: &'a Tensor,
     left: &'a Sectors,
     right: &'a Sectors,
     /// `right_of[s · 2 + p]`.
-    right_of: Vec<Option<usize>>,
+    pub(super) right_of: Vec<Option<usize>>,
     /// `left_of[t · 2 + p]`: the left sector `s` with `s + c(p) = t`.
-    left_of: Vec<Option<usize>>,
+    pub(super) left_of: Vec<Option<usize>>,
 }
 
 impl<'a> SiteBlocks<'a> {
-    fn new(
+    pub(super) fn new(
         a: &'a Tensor,
         left: &'a Sectors,
         right: &'a Sectors,
@@ -211,8 +246,16 @@ impl<'a> SiteBlocks<'a> {
         }
     }
 
+    /// The block from left sector `s` with physical state `p`, as its right
+    /// sector and its first element in the tensor (rows `2 · right` apart).
+    pub(super) fn offset(&self, s: usize, p: usize) -> Option<(usize, usize)> {
+        let t = self.right_of[s * 2 + p]?;
+        let start = (self.left.range(s).start * 2 + p) * self.a.right + self.right.range(t).start;
+        Some((t, start))
+    }
+
     /// The block from left sector `s` with physical state `p`.
-    fn block(&self, s: usize, p: usize) -> Option<(usize, MatRef<'a, C64>)> {
+    pub(super) fn block(&self, s: usize, p: usize) -> Option<(usize, MatRef<'a, C64>)> {
         let t = self.right_of[s * 2 + p]?;
         let (rs, rt) = (self.left.range(s), self.right.range(t));
         let stride = 2 * self.a.right;
@@ -377,14 +420,14 @@ fn write_rows(data: &mut [C64], cols: usize, row0: usize, m: MatRef<'_, C64>) {
 pub(super) struct Layout {
     /// One per left sector with any block: `(s, d_s, offset, width)`,
     /// the `d_s × width` row-major matrix of its blocks at `offset`.
-    rows: Vec<(usize, usize, usize, usize)>,
+    pub(super) rows: Vec<(usize, usize, usize, usize)>,
     /// `cols[s · phys + P] = (row block, column, right sector)` for each
     /// allowed block.
     cols: Vec<Option<(usize, usize, usize)>>,
     phys: usize,
     left: Sectors,
     right: Sectors,
-    len: usize,
+    pub(super) len: usize,
 }
 
 impl Layout {
@@ -421,6 +464,59 @@ impl Layout {
             right: right.clone(),
             len: offset,
         }
+    }
+
+    /// The two-site tensor of sites `q` and `q + 1`, `a` and `b` (with the
+    /// middle bond `mid`), straight into this layout: each block is one
+    /// product of a block of `a` with one of `b`.
+    pub(super) fn two_site(
+        &self,
+        a: &Tensor,
+        b: &Tensor,
+        mid: &Sectors,
+        charges: &Charges,
+        q: usize,
+    ) -> Vec<C64> {
+        debug_assert_eq!(self.phys, 4);
+        let first = SiteBlocks::new(a, &self.left, mid, charges, q);
+        let second = SiteBlocks::new(b, mid, &self.right, charges, q + 1);
+        let mut out = vec![ZERO; self.len];
+        let mut parts = Vec::with_capacity(self.rows.len());
+        let mut rest = out.as_mut_slice();
+        for &(_, d, _, width) in &self.rows {
+            let (head, tail) = rest.split_at_mut(d * width);
+            parts.push(head);
+            rest = tail;
+        }
+        parts
+            .into_par_iter()
+            .zip(self.rows.par_iter())
+            .for_each(|(part, &(s, d, _, width))| {
+                for big_p in 0..4 {
+                    let Some((_, col, t)) = self.cols[s * 4 + big_p] else {
+                        continue;
+                    };
+                    let (p, qq) = (big_p / 2, big_p % 2);
+                    let Some((m, x)) = first.block(s, p) else {
+                        continue;
+                    };
+                    let Some((t2, y)) = second.block(m, qq) else {
+                        continue;
+                    };
+                    debug_assert_eq!(t, t2);
+                    let n = self.right.size(t);
+                    let len = (d - 1) * width + n;
+                    let dst = MatMut::from_column_major_slice_with_stride_mut(
+                        &mut part[col..][..len],
+                        n,
+                        d,
+                        width,
+                    )
+                    .transpose_mut();
+                    faer_matmul(dst, Accum::Replace, x, y, ONE, Par::Seq);
+                }
+            });
+        out
     }
 
     /// The allowed entries of a dense tensor, row-major `(l, P, r)`.
@@ -463,40 +559,39 @@ impl Layout {
 
 /// One scaled block copy of the MPO step: `z[:, z_col ..][.. cols] +=
 /// f · y[y + r · stride ..][.. cols]` for each row `r`.
-struct Copy {
-    y: usize,
-    stride: usize,
-    z_col: usize,
-    cols: usize,
-    f: C64,
+pub(super) struct Copy {
+    pub(super) y: usize,
+    pub(super) stride: usize,
+    pub(super) z_col: usize,
+    pub(super) cols: usize,
+    pub(super) f: C64,
 }
 
-/// One output block: its place in the output, the right stack it is
-/// multiplied by, and the copies that build its `Z`.
-struct Out {
-    column: usize,
-    t: usize,
-    copies: Vec<Copy>,
+/// One output block: its place in its row block of the output, the right
+/// stack it is multiplied by, and the copies that build its `Z`.
+pub(super) struct Out {
+    pub(super) column: usize,
+    pub(super) t: usize,
+    pub(super) copies: Vec<Copy>,
 }
 
-/// The block-sparse effective Hamiltonian of one or two sites.
-pub(super) struct BlockOp<'a> {
-    left: &'a BlockEnv,
-    right: &'a BlockEnv,
-    layout: Layout,
+/// The block products of an effective Hamiltonian between two environment
+/// layouts, the same on the CPU and the GPU.
+pub(super) struct Plan {
+    pub(super) layout: Layout,
     /// Where each row block's `Y` starts, and its height (the left
     /// stack's rows).
-    y: Vec<(usize, usize)>,
-    y_len: usize,
+    pub(super) y: Vec<(usize, usize)>,
+    pub(super) y_len: usize,
     /// For each row block, its output blocks.
-    out: Vec<Vec<Out>>,
+    pub(super) out: Vec<Vec<Out>>,
 }
 
-impl<'a> BlockOp<'a> {
+impl Plan {
     /// Sites `q` and `q + 1` with MPO sites `w1` and `w2`.
     pub(super) fn two_site(
-        left: &'a BlockEnv,
-        right: &'a BlockEnv,
+        left: &EnvLayout,
+        right: &EnvLayout,
         w1: &MpoSite,
         w2: &MpoSite,
         charges: &Charges,
@@ -505,24 +600,24 @@ impl<'a> BlockOp<'a> {
         let charge: Vec<Label> = (0..4)
             .map(|k| charges.add(charges.site(q, k / 2), charges.site(q + 1, k % 2)))
             .collect();
-        BlockOp::new(left, right, pair_keyed(w1, w2), &charge, charges)
+        Plan::new(left, right, pair_keyed(w1, w2), &charge, charges)
     }
 
     /// Site `q` with MPO site `w`.
     pub(super) fn one_site(
-        left: &'a BlockEnv,
-        right: &'a BlockEnv,
+        left: &EnvLayout,
+        right: &EnvLayout,
         w: &MpoSite,
         charges: &Charges,
         q: usize,
     ) -> Self {
         let charge: Vec<Label> = (0..2).map(|p| charges.site(q, p).into()).collect();
-        BlockOp::new(left, right, right_keyed(w), &charge, charges)
+        Plan::new(left, right, right_keyed(w), &charge, charges)
     }
 
     fn new(
-        left: &'a BlockEnv,
-        right: &'a BlockEnv,
+        left: &EnvLayout,
+        right: &EnvLayout,
         rows: Rows,
         charge: &[Label],
         charges: &Charges,
@@ -536,8 +631,7 @@ impl<'a> BlockOp<'a> {
             y.push((y_len, height));
             y_len += height * width;
         }
-        let n_left = left.stacks.first().map_or(0, |s| s.channels.len());
-        let ket_of = left.by_row_sector(n_left);
+        let ket_of = left.by_row_sector();
         let out = layout
             .rows
             .iter()
@@ -579,31 +673,64 @@ impl<'a> BlockOp<'a> {
                     .collect()
             })
             .collect();
-        BlockOp {
-            left,
-            right,
+        Plan {
             layout,
             y,
             y_len,
             out,
         }
     }
+}
+
+/// The block-sparse effective Hamiltonian of one or two sites, on the CPU.
+pub(super) struct BlockOp<'a> {
+    left: &'a BlockEnv,
+    right: &'a BlockEnv,
+    plan: Plan,
+}
+
+impl<'a> BlockOp<'a> {
+    /// Sites `q` and `q + 1` with MPO sites `w1` and `w2`.
+    pub(super) fn two_site(
+        left: &'a BlockEnv,
+        right: &'a BlockEnv,
+        w1: &MpoSite,
+        w2: &MpoSite,
+        charges: &Charges,
+        q: usize,
+    ) -> Self {
+        let plan = Plan::two_site(left, right, w1, w2, charges, q);
+        BlockOp { left, right, plan }
+    }
+
+    /// Site `q` with MPO site `w`.
+    pub(super) fn one_site(
+        left: &'a BlockEnv,
+        right: &'a BlockEnv,
+        w: &MpoSite,
+        charges: &Charges,
+        q: usize,
+    ) -> Self {
+        let plan = Plan::one_site(left, right, w, charges, q);
+        BlockOp { left, right, plan }
+    }
 
     /// The compact layout this operator acts on.
     pub(super) fn layout(&self) -> &Layout {
-        &self.layout
+        &self.plan.layout
     }
 }
 
 impl LinearOperator<C64> for BlockOp<'_> {
     fn apply(&self, x: &[C64], out: &mut [C64]) {
-        let rows = &self.layout.rows;
+        let plan = &self.plan;
+        let rows = &plan.layout.rows;
         // Step 1: Y_s = L_s Θ_s, one product per left sector.
-        let mut y = vec![ZERO; self.y_len];
+        let mut y = vec![ZERO; plan.y_len];
         let mut y_parts = Vec::with_capacity(rows.len());
         let mut rest = y.as_mut_slice();
         for (k, &(_, _, _, width)) in rows.iter().enumerate() {
-            let (head, tail) = rest.split_at_mut(self.y[k].1 * width);
+            let (head, tail) = rest.split_at_mut(plan.y[k].1 * width);
             y_parts.push(head);
             rest = tail;
         }
@@ -633,7 +760,7 @@ impl LinearOperator<C64> for BlockOp<'_> {
         }
         out_parts
             .into_par_iter()
-            .zip(rows.par_iter().zip(&self.out))
+            .zip(rows.par_iter().zip(&plan.out))
             .for_each(|(part, (&(_, d, _, width), blocks))| {
                 part.fill(ZERO);
                 for block in blocks {
@@ -794,6 +921,10 @@ mod tests {
         );
         let theta = dmrg::two_site_vector(&sym.tensors[3], &sym.tensors[4]);
         let x = op.layout().gather(&theta);
+        let direct = op
+            .layout()
+            .two_site(&sym.tensors[3], &sym.tensors[4], &bonds[4], ch, 3);
+        assert!(x.iter().zip(&direct).all(|(a, b)| (a - b).norm() < 1e-14));
         assert!(
             (op.layout()
                 .scatter(&x)
