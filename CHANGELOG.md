@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.1 (2026-11-22)
+
+### Circuits
+
+- Lossless circuit optimisation: `Circuit::optimize` in Rust and
+  `Circuit.optimize(level=2, basis="native", tolerance=1e-12, remove_diagonal_before_measure=True, preserve_real=None)`
+  in Python, at levels 0–3 and in either `ketrs`'s native gate set (`"native"`)
+  or `{CX, 1q}` (`"cx"`). Level 1 removes identities and consolidates runs of
+  one-qubit gates; level 2 adds commutation cancellation, local Clifford and
+  swap rewrites, exact two-qubit KAK synthesis (with a real 2-CX core so real
+  `SO(4)` blocks keep `RealStatevector` compatibility), and Clifford-tracked
+  Pauli-network / simultaneous diagonalisation + GraySynth lowering of
+  `PauliRotation`s under `basis="cx"`; level 3 adds multi-qubit Clifford/Pauli
+  propagation, Pauli-rotation conjugation, and GF(2) CNOT subcircuit
+  optimisation. On eight 2- and 4-qubit $\mathrm{SU}(3)$ plaquette
+  `pauli_evolution` blocks (548 raw CNOTs), `optimize(level=3, basis="cx")`
+  reduces total CNOTs to 199 (against 236 for Qiskit 2.6.2 `opt=3`, 15.7%
+  fewer, in 0.17–1.1 ms per block) with exact unitary error at most 1.1e-15.
+- Circuit inspection metrics: `Circuit::gate_counts` / `Circuit.gate_counts()`,
+  `Circuit::two_qubit_depth` / `Circuit.two_qubit_depth()`, and
+  `Circuit.depth(two_qubit_only=False)`.
+
 ## 0.2.0 (2026-11-17)
 
 ### MPS
