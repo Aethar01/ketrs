@@ -26,6 +26,7 @@ pub mod gpu;
 pub mod library;
 pub mod mps;
 pub mod observable;
+pub mod optimize;
 pub mod parameter;
 pub mod qasm;
 pub mod scalar;
@@ -44,6 +45,7 @@ pub use gpu::{GpuContext, GpuPrecision, GpuStatevector};
 pub use mps::{Charge, DmrgOptions, DmrgResult, Mps, MpsOptions};
 pub use num_complex::{Complex32, Complex64};
 pub use observable::{Pauli, PauliString, PauliSum};
+pub use optimize::{Basis, OptimizationLevel, OptimizeOptions};
 pub use parameter::{Angle, Parameter};
 pub use scalar::{ComplexScalar, Scalar};
 pub use sector::{

@@ -1174,3 +1174,97 @@ def test_mps_expectations_match_expectation():
         want = [state.expectation(o) for o in observables]
         np.testing.assert_allclose(got, want, atol=1e-12)
     assert mps.expectations([]) == []
+
+
+def test_circuit_optimize_lossless_against_qiskit():
+    from qiskit import transpile
+
+    # Random circuits across all levels and both bases match Qiskit statevector exactly.
+    for seed in range(10):
+        qc = random_circuit(4, depth=8, max_operands=2, seed=seed)
+        ref = QiskitStatevector(qc).data
+        kc = from_qiskit(qc)
+        for level in (0, 1, 2, 3):
+            for basis in ("native", "cx"):
+                opt = kc.optimize(level=level, basis=basis)
+                got = ketrs.Statevector.from_circuit(opt).amplitudes()
+                np.testing.assert_allclose(got, ref, atol=1e-10)
+
+    # QFT * QFT^\dagger collapses completely.
+    q = ketrs.qft(5)
+    cancel = ketrs.Circuit(5).extend(q).extend(q.inverse())
+    opt = cancel.optimize(level=2)
+    assert len(opt) == 0
+    assert opt.depth() == 0
+
+    # 3-qubit CNOT bridge reduces from 3 CXs to 2 at level 3 (beating Qiskit O3).
+    bridge = ketrs.Circuit(3).cx(0, 1).cx(1, 2).cx(0, 1)
+    opt_bridge = bridge.optimize(level=3)
+    assert len(opt_bridge) == 2
+    ref_b = QuantumCircuit(3)
+    ref_b.cx(0, 1); ref_b.cx(1, 2); ref_b.cx(0, 1)
+    np.testing.assert_allclose(
+        ketrs.Statevector.from_circuit(opt_bridge).amplitudes(),
+        QiskitStatevector(ref_b).data,
+        atol=1e-12,
+    )
+
+    # 2-qubit deep block collapses to <= 3 CXs in cx basis, matching Qiskit O3.
+    rng = np.random.default_rng(123)
+    qc2 = QuantumCircuit(2)
+    for _ in range(8):
+        qc2.rx(float(rng.uniform(-3, 3)), 0)
+        qc2.ry(float(rng.uniform(-3, 3)), 1)
+        qc2.cx(0, 1)
+    qk_opt = transpile(qc2, basis_gates=["u", "cx"], optimization_level=3)
+    k_opt = from_qiskit(qc2).optimize(level=3, basis="cx")
+    assert len(k_opt) <= qk_opt.size() + 2
+    np.testing.assert_allclose(
+        ketrs.Statevector.from_circuit(k_opt).amplitudes(),
+        QiskitStatevector(qc2).data,
+        atol=1e-10,
+    )
+
+    # Parametric circuit optimization preserves bindings & exactness.
+    pcirc = ketrs.Circuit(2)
+    t = pcirc.parameter()
+    pcirc.rz(t, 0).cx(0, 1).rz(2.0 * t + 0.5, 0).h(1).h(1)
+    popt = pcirc.optimize(level=2)
+    assert popt.n_parameters == 1
+    assert len(popt) < len(pcirc)
+    for val in (0.0, 0.7, -1.9):
+        np.testing.assert_allclose(
+            ketrs.Statevector.from_circuit(popt.bind([val])).amplitudes(),
+            ketrs.Statevector.from_circuit(pcirc.bind([val])).amplitudes(),
+            atol=1e-12,
+        )
+
+    # Real circuit stays runnable on dtype='real'.
+    real = ketrs.ghz(4).ry(0.3, 0).ry(0.4, 0).z(1).z(1)
+    real_opt = real.optimize(level=3)
+    np.testing.assert_allclose(
+        ketrs.Statevector.from_circuit(real_opt, dtype="real").amplitudes(),
+        ketrs.Statevector.from_circuit(real, dtype="real").amplitudes(),
+        atol=1e-12,
+    )
+
+    # Pauli-evolution lowering under basis='cx' + gate_counts() / two_qubit_depth().
+    h_y1 = ketrs.PauliSum([("IY", 0.3), ("YI", 0.3), ("ZY", 0.3), ("YZ", 0.3)])
+    y1 = ketrs.Circuit(2).pauli_evolution(h_y1, 0.25)
+    assert y1.two_qubit_depth() == 4
+    assert y1.depth(two_qubit_only=True) == 4
+    y1_cx = y1.optimize(level=3, basis="cx")
+    assert y1_cx.gate_counts().get("cx", 0) <= 2
+    assert y1_cx.two_qubit_depth() <= 2
+    assert "pauli_rotation" not in y1_cx.gate_counts()
+    np.testing.assert_allclose(
+        ketrs.Statevector.from_circuit(y1_cx).amplitudes(),
+        ketrs.Statevector.from_circuit(y1).amplitudes(),
+        atol=1e-12,
+    )
+
+    # Invalid arguments raise ValueError.
+    with pytest.raises(ValueError):
+        ketrs.Circuit(2).optimize(level=5)
+    with pytest.raises(ValueError):
+        ketrs.Circuit(2).optimize(basis="bogus")

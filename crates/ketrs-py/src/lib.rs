@@ -87,7 +87,7 @@ mod sector;
 
 use ketrs::SectorState;
 use ketrs::statevector::EigenOptions;
-use ketrs::{Angle, BinaryOp, Condition, Expr, Instruction, Parameter};
+use ketrs::{Angle, Basis, BinaryOp, Condition, Expr, Instruction, OptimizationLevel, OptimizeOptions, Parameter};
 use ketrs::{
     Circuit, Complex32, Complex64 as C64, DenseState, Error, Gate, Operation, Pauli, PauliString,
     PauliSum, RealStatevector, RealStatevector32, Scalar, SparseOperator, Statevector,
@@ -554,6 +554,81 @@ impl PyCircuit {
         PyCircuit {
             inner: self.inner.inverse(),
         }
+    }
+
+    /// Circuit depth: the longest path through operations sharing qubits.
+    /// With `two_qubit_only=True`, counts only multi-qubit operations (same as
+    /// `two_qubit_depth()`).
+    #[pyo3(signature = (two_qubit_only=false))]
+    fn depth(&self, two_qubit_only: bool) -> usize {
+        if two_qubit_only {
+            self.inner.two_qubit_depth()
+        } else {
+            self.inner.depth()
+        }
+    }
+
+    /// Circuit depth considering only multi-qubit operations (single-qubit
+    /// gates contribute 0; undecomposed weight-`w` Pauli rotations contribute
+    /// their ladder depth `2*(w - 1)`).
+    fn two_qubit_depth(&self) -> usize {
+        self.inner.two_qubit_depth()
+    }
+
+    /// Gate and instruction counts keyed by lowercase name (e.g. `"cx"`, `"rz"`, `"u"`).
+    fn gate_counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        for (name, count) in self.inner.gate_counts() {
+            dict.set_item(name, count)?;
+        }
+        Ok(dict)
+    }
+
+    /// Return a losslessly optimized equivalent circuit.
+    ///
+    /// - `level`: 0 (no-op), 1 (identity removal, adjacent cancellation and
+    ///   1-qubit consolidation), 2 (default: commutation cancellation, local
+    ///   Clifford/swap rewrites, exact two-qubit KAK synthesis, and smart
+    ///   Pauli-gadget lowering under `basis="cx"`), or 3 (heavy: multi-qubit
+    ///   Clifford/Pauli propagation, Pauli-rotation conjugation, and GF(2)
+    ///   CNOT subcircuit optimization).
+    /// - `basis`: `"native"` (default, uses ketrs's full standard gate set)
+    ///   or `"cx"` (lowers two-qubit gates and Pauli rotations to `{CX, 1q}`).
+    /// - `tolerance`: numerical tolerance for equivalence checks (default `1e-12`).
+    /// - `remove_diagonal_before_measure`: remove diagonal gates immediately
+    ///   before measurement/reset at level ≥ 2 (default `True`).
+    /// - `preserve_real`: keep real circuits runnable on `dtype="real"`.
+    ///   `None` (default) preserves realness under `basis="native"` and allows
+    ///   general complex `{U, CX}` synthesis under `basis="cx"`.
+    #[pyo3(signature = (level=2, basis="native", tolerance=1e-12, remove_diagonal_before_measure=true, preserve_real=None))]
+    fn optimize(
+        &self,
+        py: Python<'_>,
+        level: u8,
+        basis: &str,
+        tolerance: f64,
+        remove_diagonal_before_measure: bool,
+        preserve_real: Option<bool>,
+    ) -> PyResult<Self> {
+        let level = OptimizationLevel::try_from(level).map_err(to_py_err)?;
+        let basis = match basis {
+            "native" => Basis::Native,
+            "cx" => Basis::Cx,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "basis must be 'native' or 'cx', got {basis:?}"
+                )));
+            }
+        };
+        let options = OptimizeOptions {
+            level,
+            basis,
+            tolerance,
+            remove_diagonal_before_measure,
+            preserve_real,
+        };
+        let inner = py.detach(|| self.inner.optimize_with(&options));
+        Ok(PyCircuit { inner })
     }
 
     /// The circuit as an OpenQASM 3 program (qubits `q`, bits `c`,
