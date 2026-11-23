@@ -41,23 +41,23 @@ Rust.
 
 | Engine | Use it for |
 |---|---|
-| `Statevector` / `RealStatevector` | Any circuit, exactly. Parallel, cache-blocked, with gate fusion. The real (f64) variant halves memory for real circuits; single-precision `Statevector32` / `RealStatevector32` (`dtype="complex64"` / `"float32"`) halve it again and run 1.65× / 4× faster than complex128 at 22–26 qubits, to about $`10^{-6}`$. |
+| `Statevector` / `RealStatevector` | Any circuit, exactly. Parallel, cache-blocked, with gate fusion. The real (f64) variant halves memory for real circuits; single-precision `Statevector32` / `RealStatevector32` (`dtype="complex64"` / `"float32"`) halve it again and run 1.65× / 4× faster than complex128 at 22–26 qubits, to about $10^{-6}$. |
 | `SectorStatevector` | States confined to fixed Hamming weights (particle number, spin, charge): stores only that subspace, rejecting anything that leaves it. |
 | `DensityMatrix` | Mixed states and noise: Kraus channels (depolarizing, amplitude and phase damping, Pauli, any Kraus set) and noise models after every gate, matching Qiskit Aer's density-matrix method and 1.3–4.2× faster. For more qubits, statevectors run the same noise models (plus readout error) as quantum trajectories. |
-| `MPS` | Weakly entangled states of many qubits: TEBD, TDVP for Hamiltonians of any range (with subspace expansion while bonds grow), DMRG ground states (with noise, so terms on more than two qubits can't trap it), sampling and post-selection (`project`), batched expectation values (`expectations`, each string contracted over its own span only), cheap copies, with controlled truncation. TDVP and DMRG sweeps can run on a Vulkan GPU with 64-bit floats (`mps.gpu = True`), 2.7–3.4× faster than three CPU cores at bond dimension 64. With conserved charges (U(1) or $`Z_n`$, any number: `with_charges`) they run block-sparse within the state's sector, on the CPU or the GPU: 28–137× faster on six CPU cores than dense sweeps on that GPU for a 194-qubit lattice gauge theory. |
-| `GpuStatevector` | Large circuits on any Vulkan 1.2 GPU (NVIDIA, AMD, …), up to 31 qubits memory permitting, in double precision where the GPU has 64-bit floats or single (`complex64`, 2.8–5.8× faster on consumer cards) anywhere; expectation values, sampling, $`H\vert\psi\rangle`$, adjoint gradients and exact $`e^{-iHt}`$ (2.8–6.5× faster than the CPU at 18–24 qubits) run on the GPU. Needs only the system Vulkan driver at run time: no CUDA or ROCm. |
+| `MPS` | Weakly entangled states of many qubits: TEBD, TDVP for Hamiltonians of any range (with subspace expansion while bonds grow), DMRG ground states (with noise, so terms on more than two qubits can't trap it), sampling and post-selection (`project`), batched expectation values (`expectations`, each string contracted over its own span only), cheap copies, with controlled truncation. TDVP and DMRG sweeps can run on a Vulkan GPU with 64-bit floats (`mps.gpu = True`), 2.7–3.4× faster than three CPU cores at bond dimension 64. With conserved charges (U(1) or $Z_n$, any number: `with_charges`) they run block-sparse within the state's sector, on the CPU or the GPU: 28–137× faster on six CPU cores than dense sweeps on that GPU for a 194-qubit lattice gauge theory. |
+| `GpuStatevector` | Large circuits on any Vulkan 1.2 GPU (NVIDIA, AMD, …), up to 31 qubits memory permitting, in double precision where the GPU has 64-bit floats or single (`complex64`, 2.8–5.8× faster on consumer cards) anywhere; expectation values, sampling, $H\vert\psi\rangle$, adjoint gradients and exact $e^{-iHt}$ (2.8–6.5× faster than the CPU at 18–24 qubits) run on the GPU. Needs only the system Vulkan driver at run time: no CUDA or ROCm. |
 
 ## Features
 
 - Gates from Qiskit's standard set, arbitrary 1- and 2-qubit unitaries,
-  Pauli rotations $`e^{-i\theta P/2}`$ of any weight applied in one pass, and
+  Pauli rotations $e^{-i\theta P/2}$ of any weight applied in one pass, and
   gates and swaps with any number of controls (`ccx`, `mcx`, `cswap`, …) on
   every engine. `Circuit.control` controls a whole circuit.
 - Trotter–Suzuki circuits of any order; Qiskit `PauliEvolutionGate`s map
   directly.
 - Hamiltonians as Pauli sums, applied without forming a matrix: expectation
-  values, $`H\vert\psi\rangle`$, exact $`e^{-iHt}`$ (Krylov), and lowest eigenstates (Lanczos).
-- Parameters ($`2\theta + 0.5`$ and so on) and adjoint gradients for any loss;
+  values, $H\vert\psi\rangle$, exact $e^{-iHt}$ (Krylov), and lowest eigenstates (Lanczos).
+- Parameters ($2\theta + 0.5$ and so on) and adjoint gradients for any loss;
   an energy and its full gradient cost 2.3–3.5 energy evaluations (4-layer
   ansatz, 14–22 qubits), however many parameters there are.
 - Sampling and mid-circuit measurement on states.
@@ -94,14 +94,14 @@ fusion on or off, whichever is faster at each size). Reproduce with the
 scripts in [`bench/`](bench). In the bar charts each block is 1× unless
 noted.
 
-**Statevector circuits**, end to end from $`\lvert 0\dots 0\rangle`$ to the
+**Statevector circuits**, end to end from $\lvert 0\dots 0\rangle$ to the
 final amplitudes. The GPU column is compared with ketrs on the CPU, not with
 Aer: Aer's GPU mode needs CUDA, which this card can't run (see below for an
 NVIDIA card). GPU times are in double precision, which consumer cards run at
 a fraction of their single-precision speed, and include downloading the
 state.
 
-*Layered ansatz: 10 layers of $`R_y`$ rotations and a CNOT chain*
+*Layered ansatz: 10 layers of $R_y$ rotations and a CNOT chain*
 
 | Qubits | Aer | ketrs | vs Aer | ketrs GPU | GPU vs CPU |
 |---:|---:|---:|:---|---:|:---|
@@ -134,7 +134,7 @@ state; 29 qubits (8 GiB) runs on a 16 GB card.
 **Against Aer on an NVIDIA GPU**: an RTX 4090 (rented), against Aer 0.18's
 CUDA backend at matching precision, and in double precision also with
 cuStateVec, taking the faster. Times are GPU work only, reading back one
-$`\langle Z\rangle`$: that host downloaded states at about 1 GB/s for
+$\langle Z\rangle$: that host downloaded states at about 1 GB/s for
 both simulators, which would otherwise dominate. The 4090 runs doubles at
 1/64 of its float speed, so single precision is the case it is built for.
 
@@ -173,11 +173,11 @@ in a circuit, Aer measures the final qubits shot by shot (or branch by
 branch) instead of sampling them. The two agree on the counts' distribution.
 
 **MPS**: TEBD of a transverse-field Ising chain (second-order Trotter,
-$`\Delta t = 0.1`$) against Aer's MPS method with the same bond-dimension cap
-$`\chi`$. The two agree on $`\langle Z\rangle`$ to the truncation level.
+$\Delta t = 0.1$) against Aer's MPS method with the same bond-dimension cap
+$\chi$. The two agree on $\langle Z\rangle$ to the truncation level.
 One block is 2×.
 
-| Qubits | Steps | $`\chi`$ cap | ketrs | Aer MPS | Speedup |
+| Qubits | Steps | $\chi$ cap | ketrs | Aer MPS | Speedup |
 |---:|---:|---:|---:|---:|:---|
 | 50 | 10 | 32 | 0.01 s | 0.04 s | `███▏` 6.3× |
 | 100 | 10 | 32 | 0.01 s | 0.07 s | `█████▊` 11.5× |
@@ -189,13 +189,13 @@ Commuting Trotter terms are packed into layers and disjoint bonds are updated
 in parallel.
 
 **MPS on the GPU**, with and without `mps.gpu = True` on the RX 9060 XT, at
-bond dimension cap $`\chi = 64`$: one two-site TDVP step
-($`\Delta t = 0.6`$) of a 192-qubit Schwinger model with link registers
+bond dimension cap $\chi = 64$: one two-site TDVP step
+($\Delta t = 0.6$) of a 192-qubit Schwinger model with link registers
 (1537 Pauli terms, MPO bond dimension about 25), from a state warmed up by
 earlier steps until the bonds are near the cap; and six DMRG sweeps from a
-Néel state for a 64-qubit $`J_1`$–$`J_2`$ Heisenberg chain
-($`J_2 = 0.2`$). GPU and CPU reach the same bond dimensions and energies to
-$`10^{-10}`$. The CPU had three threads (the other three cores were busy).
+Néel state for a 64-qubit $J_1$–$J_2$ Heisenberg chain
+($J_2 = 0.2$). GPU and CPU reach the same bond dimensions and energies to
+$10^{-10}$. The CPU had three threads (the other three cores were busy).
 One block is 1×.
 
 | Workload | Mean bond | GPU | CPU, 3 threads | Speedup |
@@ -217,11 +217,11 @@ then projecting the packet's ancilla. Symmetric, with the total charge and
 the 48 Gauss laws as charges (`with_charges`), against dense on the RX
 9060 XT (TDVP alone). The charge-graded MPO is 3–4× narrower than the
 Pauli one, and the block-sparse environments take 28–33× less memory than
-dense ones at the same bonds (0.14 GB against 4.1 GB at $`\chi = 256`$).
-The packet's weight agrees to $`10^{-3}`$, within the truncation. One
+dense ones at the same bonds (0.14 GB against 4.1 GB at $\chi = 256$).
+The packet's weight agrees to $10^{-3}$, within the truncation. One
 block is 8×.
 
-| $`\chi`$ cap | Dense, GPU | Symmetric, 6 threads | Symmetric, GPU | Speedup |
+| $\chi$ cap | Dense, GPU | Symmetric, 6 threads | Symmetric, GPU | Speedup |
 |---:|---:|---:|---:|:---|
 | 64 | 33.7 s | 1.2 s | 2.7 s | `███▌` 28× |
 | 128 | 199.5 s | 2.6 s | 4.5 s | `█████████▋` 77× |
@@ -229,20 +229,20 @@ block is 8×.
 
 Symmetric blocks are small (here at most 40 states), so on the GPU each
 Krylov step is a few tens of microseconds of work between dispatches: it
-pays only for large bonds, matching the CPU at $`\chi = 256`$ and 1.6×
+pays only for large bonds, matching the CPU at $\chi = 256$ and 1.6×
 faster at 512 (an evolution step of 10.2 s against 16.4 s). With 402 qubits
-(100 sites, 101 charges) at $`\chi = 256`$, an evolution step took 19.2 s
+(100 sites, 101 charges) at $\chi = 256$, an evolution step took 19.2 s
 on six threads and 14.5 s on the GPU.
 
 **Exact evolution and ground states** of a Heisenberg chain, against scipy's
 `expm_multiply` and `eigsh` on a sparse matrix built in advance (construction
-not timed). Results agree to about $`10^{-14}`$.
+not timed). Results agree to about $10^{-14}$.
 
 | Workload | Qubits | ketrs | scipy | Speedup |
 |---|---:|---:|---:|:---|
-| $`e^{-iHt}\lvert\psi\rangle`$ | 14 | 10.4 ms | 28.7 ms | `██▊` 2.8× |
-| $`e^{-iHt}\lvert\psi\rangle`$ | 18 | 196.5 ms | 728.7 ms | `███▊` 3.7× |
-| $`e^{-iHt}\lvert\psi\rangle`$ | 20 | 732.7 ms | 3.80 s | `█████▏` 5.2× |
+| $e^{-iHt}\lvert\psi\rangle$ | 14 | 10.4 ms | 28.7 ms | `██▊` 2.8× |
+| $e^{-iHt}\lvert\psi\rangle$ | 18 | 196.5 ms | 728.7 ms | `███▊` 3.7× |
+| $e^{-iHt}\lvert\psi\rangle$ | 20 | 732.7 ms | 3.80 s | `█████▏` 5.2× |
 | Ground state | 14 | 16.4 ms | 67.8 ms | `████▏` 4.1× |
 | Ground state | 18 | 165.7 ms | 2.81 s | `█████████████████` 17.0× |
 | Ground state | 20 | 2.74 s | 11.06 s | `████` 4.0× |
