@@ -87,7 +87,10 @@ mod sector;
 
 use ketrs::SectorState;
 use ketrs::statevector::EigenOptions;
-use ketrs::{Angle, Basis, BinaryOp, Condition, Expr, Instruction, OptimizationLevel, OptimizeOptions, Parameter};
+use ketrs::{
+    Angle, Basis, BinaryOp, Condition, Expr, Instruction, OptimizationLevel, OptimizeOptions,
+    Parameter,
+};
 use ketrs::{
     Circuit, Complex32, Complex64 as C64, DenseState, Error, Gate, Operation, Pauli, PauliString,
     PauliSum, RealStatevector, RealStatevector32, Scalar, SparseOperator, Statevector,

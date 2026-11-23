@@ -371,13 +371,8 @@ fn optimize_segment(seg: &mut Segment, options: &OptimizeOptions, keep_real: boo
 
         if options.level >= OptimizationLevel::Level2 {
             changed |= commutative_cancellation(seg, tol);
-            changed |= clifford_and_template_rewrites(
-                seg,
-                options.level,
-                options.basis,
-                keep_real,
-                tol,
-            );
+            changed |=
+                clifford_and_template_rewrites(seg, options.level, options.basis, keep_real, tol);
             changed |= canonicalize_and_remove_identities(seg, tol);
             changed |= optimize_1q_runs(seg, tol);
             changed |= two_qubit_peephole_kak(seg, options.basis, keep_real, tol);

@@ -32,7 +32,10 @@ fn assert_unitary_equal(a: &Circuit, b: &Circuit) {
 }
 
 fn count_2q(circ: &Circuit) -> usize {
-    circ.ops().iter().filter(|op| op.qubits().len() >= 2).count()
+    circ.ops()
+        .iter()
+        .filter(|op| op.qubits().len() >= 2)
+        .count()
 }
 
 #[test]
@@ -87,7 +90,10 @@ fn two_qubit_block_collapses_via_kak() {
     let mut circ = Circuit::new(2);
     for k in 0..6 {
         let f = (k + 1) as f64;
-        circ.rx(0.31 * f, 0).ry(-0.47 * f, 1).rz(0.19 * f, 0).cx(0, 1);
+        circ.rx(0.31 * f, 0)
+            .ry(-0.47 * f, 1)
+            .rz(0.19 * f, 0)
+            .cx(0, 1);
     }
     for basis in [Basis::Native, Basis::Cx] {
         let opt = circ.optimize_with(&OptimizeOptions {
@@ -154,7 +160,12 @@ fn clifford_pauli_conjugation_and_phase_gadgets() {
         .rz(0.5, 1)
         .cx(0, 1);
     let opt_native = circ.optimize();
-    assert_eq!(opt_native.len(), 1, "expected single Rzz, got {:?}", opt_native.ops());
+    assert_eq!(
+        opt_native.len(),
+        1,
+        "expected single Rzz, got {:?}",
+        opt_native.ops()
+    );
     assert_unitary_equal(&circ, &opt_native);
 
     // In Basis::Cx, merges to 2 CXs + 1 Rz (3 gates total instead of 6).
@@ -201,7 +212,12 @@ fn parametric_circuits_optimize_and_preserve_bindings() {
 
     let opt = circ.optimize_level(OptimizationLevel::Level3);
     assert_eq!(opt.n_parameters(), 2);
-    assert!(opt.len() < circ.len(), "orig={} opt={}", circ.len(), opt.len());
+    assert!(
+        opt.len() < circ.len(),
+        "orig={} opt={}",
+        circ.len(),
+        opt.len()
+    );
 
     // Verify exact unitary equality across multiple parameter bindings.
     for vals in [[0.0, 0.0], [0.7, -1.2], [2.3, 0.41], [-0.9, 3.1]] {
@@ -266,13 +282,7 @@ fn multi_controlled_and_trotter_circuits_optimize() {
 #[test]
 fn pauli_evolution_cx_basis_and_inspection_metrics() {
     // Y1 = {IY, YI, ZY, YZ} (all real, 4 raw CXs -> <= 2 CXs under basis=Cx!).
-    let h_y1 = PauliSum::from_list([
-        ("IY", 0.3),
-        ("YI", 0.3),
-        ("ZY", 0.3),
-        ("YZ", 0.3),
-    ])
-    .unwrap();
+    let h_y1 = PauliSum::from_list([("IY", 0.3), ("YI", 0.3), ("ZY", 0.3), ("YZ", 0.3)]).unwrap();
     let mut y1 = Circuit::new(2);
     y1.pauli_evolution(&h_y1, 0.25, 1, 1).unwrap();
     assert_eq!(y1.two_qubit_depth(), 4);

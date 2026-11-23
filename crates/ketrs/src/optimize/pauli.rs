@@ -28,9 +28,10 @@ use std::collections::HashMap;
 /// best of Simultaneous Clifford Diagonalization + GraySynth vs Gray-ordered
 /// tree-aligned ladders, and aligns single-term ladders with their neighbors.
 pub(crate) fn lower_pauli_rotations(seg: &mut Segment, smart: bool, tol: f64) -> bool {
-    let has_multi_pauli = seg.nodes.iter().any(|n| {
-        matches!(&n.op, Operation::PauliRotation { pauli, .. } if pauli.weight() >= 2)
-    });
+    let has_multi_pauli = seg
+        .nodes
+        .iter()
+        .any(|n| matches!(&n.op, Operation::PauliRotation { pauli, .. } if pauli.weight() >= 2));
     if !has_multi_pauli {
         return false;
     }
@@ -40,9 +41,7 @@ pub(crate) fn lower_pauli_rotations(seg: &mut Segment, smart: bool, tol: f64) ->
     let mut i = 0;
 
     while i < nodes.len() {
-        let is_multi_pauli = |n: &Node| {
-            matches!(&n.op, Operation::PauliRotation { pauli, .. } if pauli.weight() >= 2)
-        };
+        let is_multi_pauli = |n: &Node| matches!(&n.op, Operation::PauliRotation { pauli, .. } if pauli.weight() >= 2);
         let as_pauli_term = |n: &Node| -> Option<PauliTerm> {
             match &n.op {
                 Operation::PauliRotation { pauli, theta } => Some(PauliTerm {
@@ -437,7 +436,9 @@ fn synth_cluster_aligned_ladders(cluster: &[PauliTerm]) -> Vec<Node> {
     let mut used = vec![false; m];
     let mut order = Vec::with_capacity(m);
     // Start with highest-weight term.
-    let first = (0..m).max_by_key(|&i| cluster[i].pauli.weight()).unwrap_or(0);
+    let first = (0..m)
+        .max_by_key(|&i| cluster[i].pauli.weight())
+        .unwrap_or(0);
     used[first] = true;
     order.push(first);
 
@@ -680,7 +681,12 @@ fn synth_cluster_clifford_graysynth(cluster: &[PauliTerm], tol: f64) -> Option<V
         // Earlier pivot rows have X = 0 at `c_idx`, so they stay untouched!
         for q in 0..k {
             if q != c_idx && has_x(tableau[r_idx][q]) {
-                apply_all(&mut tableau, &mut signs, &mut cliff, CliffGate::Cx(c_idx, q));
+                apply_all(
+                    &mut tableau,
+                    &mut signs,
+                    &mut cliff,
+                    CliffGate::Cx(c_idx, q),
+                );
             }
         }
         piv_rows.push(r_idx);
@@ -879,7 +885,10 @@ fn synth_pauli_network(items: &[PauliTerm], tol: f64) -> Option<(Vec<Node>, f64)
             if t.done {
                 continue;
             }
-            if undone.iter().all(|&i: &usize| rows_commute(&terms[i].row, &t.row)) {
+            if undone
+                .iter()
+                .all(|&i: &usize| rows_commute(&terms[i].row, &t.row))
+            {
                 front.push(j);
             }
             undone.push(j);
@@ -1379,24 +1388,25 @@ fn graysynth(terms: &mut [ZTerm], qubits: &[usize], tol: f64) -> Vec<Node> {
         }
     };
 
-    let apply_cx = |c: usize, t: usize, terms: &mut [ZTerm], parity: &mut [u64], out: &mut Vec<Node>| {
-        out.push(Node {
-            op: Operation::Controlled {
-                gate: Gate::X,
-                control: qubits[c],
-                target: qubits[t],
-            },
-            binding: None,
-        });
-        parity[t] ^= parity[c];
-        let c_bit = 1u64 << c;
-        let t_bit = 1u64 << t;
-        for term in terms.iter_mut() {
-            if !term.done && (term.mask & t_bit) != 0 {
-                term.mask ^= c_bit;
+    let apply_cx =
+        |c: usize, t: usize, terms: &mut [ZTerm], parity: &mut [u64], out: &mut Vec<Node>| {
+            out.push(Node {
+                op: Operation::Controlled {
+                    gate: Gate::X,
+                    control: qubits[c],
+                    target: qubits[t],
+                },
+                binding: None,
+            });
+            parity[t] ^= parity[c];
+            let c_bit = 1u64 << c;
+            let t_bit = 1u64 << t;
+            for term in terms.iter_mut() {
+                if !term.done && (term.mask & t_bit) != 0 {
+                    term.mask ^= c_bit;
+                }
             }
-        }
-    };
+        };
 
     emit_ready(terms, &mut out);
 
@@ -1644,7 +1654,10 @@ mod tests {
             sa.run(a).unwrap();
             sb.run(b).unwrap();
             for (x, y) in sa.amplitudes().iter().zip(sb.amplitudes()) {
-                assert!((x - y).norm() < 1e-10, "mismatch on |{idx:0n$b}⟩: {x} vs {y}");
+                assert!(
+                    (x - y).norm() < 1e-10,
+                    "mismatch on |{idx:0n$b}⟩: {x} vs {y}"
+                );
             }
         }
     }

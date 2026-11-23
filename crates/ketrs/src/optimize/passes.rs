@@ -6,8 +6,8 @@ use crate::observable::{Pauli, PauliString};
 use crate::optimize::commute::{op_is_diagonal, ops_commute};
 use crate::optimize::kak::{kron2, mat4_is_real, op_matrix4_on, synthesize_2q};
 use crate::optimize::one_qubit::{
-    I2, gate_is_real, mat2_identity_phase, mat2_mul, op_matrix2,
-    phase_is_real, simplify_trivial_1q, synthesize_1q, wrap_2pi, wrap_pi,
+    I2, gate_is_real, mat2_identity_phase, mat2_mul, op_matrix2, phase_is_real,
+    simplify_trivial_1q, synthesize_1q, wrap_2pi, wrap_pi,
 };
 use crate::optimize::{Basis, OptimizationLevel};
 use num_complex::Complex64 as C64;
@@ -90,7 +90,9 @@ impl Segment {
         if !phase_is_real(self.global_phase, tol) {
             return false;
         }
-        self.nodes.iter().all(|n| op_is_real(&n.op, n.binding.is_some(), tol))
+        self.nodes
+            .iter()
+            .all(|n| op_is_real(&n.op, n.binding.is_some(), tol))
     }
 
     /// `(out_of_basis, weighted_multi_qubit_count, total_ops, depth)` cost tuple.
@@ -1337,10 +1339,16 @@ pub(crate) fn two_qubit_peephole_kak(
     }
 
     let get_prev = |idx: usize, q: usize| -> Option<usize> {
-        prev[idx].iter().find(|&&(qq, _)| qq == q).and_then(|&(_, p)| p)
+        prev[idx]
+            .iter()
+            .find(|&&(qq, _)| qq == q)
+            .and_then(|&(_, p)| p)
     };
     let get_next = |idx: usize, q: usize| -> Option<usize> {
-        next[idx].iter().find(|&&(qq, _)| qq == q).and_then(|&(_, n)| n)
+        next[idx]
+            .iter()
+            .find(|&&(qq, _)| qq == q)
+            .and_then(|&(_, n)| n)
     };
 
     let is_eligible_1q = |idx: usize, q: usize| -> bool {
@@ -1477,8 +1485,7 @@ pub(crate) fn two_qubit_peephole_kak(
         let needs_cx_rebasis = basis == Basis::Cx
             && members.iter().any(|&idx| {
                 let op = &seg.nodes[idx].op;
-                op.qubits().len() == 2
-                    && !matches!(op, Operation::Controlled { gate: Gate::X, .. })
+                op.qubits().len() == 2 && !matches!(op, Operation::Controlled { gate: Gate::X, .. })
             });
         if orig_2q <= 1 && !orig_has_unitary2 && !needs_cx_rebasis {
             continue;
@@ -1741,12 +1748,7 @@ fn simplify_swap_networks(seg: &mut Segment) -> bool {
 /// - `CX(c, t) Rz(θ, t) CX(c, t)` -> `Rzz(θ, c, t)` (in `Basis::Native`, fixed OR parametric!)
 /// - `CX(c, t) Rx(θ, c) CX(c, t)` -> `Rxx(θ, c, t)` (in `Basis::Native`, fixed OR parametric!)
 /// - `CX(c, t) Rz(π, t) CX(c, t)` -> `Z(c) Z(t)` + phase `-π/2` (even in `Basis::Cx`!)
-fn apply_local_templates(
-    seg: &mut Segment,
-    basis: Basis,
-    keep_real: bool,
-    tol: f64,
-) -> bool {
+fn apply_local_templates(seg: &mut Segment, basis: Basis, keep_real: bool, tol: f64) -> bool {
     let n_ops = seg.nodes.len();
     if n_ops < 3 {
         return false;

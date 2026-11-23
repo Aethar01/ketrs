@@ -25,9 +25,7 @@ pub(crate) fn op_is_diagonal(op: &Operation, is_param: bool, tol: f64) -> bool {
                 gate_is_diagonal(gate, tol)
             }
         }
-        Operation::PauliRotation { pauli, .. } => {
-            pauli.ops().iter().all(|&(_, p)| p == Pauli::Z)
-        }
+        Operation::PauliRotation { pauli, .. } => pauli.ops().iter().all(|&(_, p)| p == Pauli::Z),
         Operation::Unitary2 { matrix, .. } => mat4_is_diagonal(matrix, tol),
         Operation::Swap(..) | Operation::ControlledSwap { .. } => false,
     }
@@ -162,10 +160,28 @@ pub(crate) fn ops_commute(
     }
 
     // ControlledSwap vs diagonal gate on its controls.
-    if let (Operation::ControlledSwap { controls, a: sa, b: sb }, other)
-    | (other, Operation::ControlledSwap { controls, a: sa, b: sb }) = (a, b)
+    if let (
+        Operation::ControlledSwap {
+            controls,
+            a: sa,
+            b: sb,
+        },
+        other,
+    )
+    | (
+        other,
+        Operation::ControlledSwap {
+            controls,
+            a: sa,
+            b: sb,
+        },
+    ) = (a, b)
     {
-        let other_param = if std::ptr::eq(other, a) { a_param } else { b_param };
+        let other_param = if std::ptr::eq(other, a) {
+            a_param
+        } else {
+            b_param
+        };
         let oq = other.qubits();
         if !oq.contains(sa) && !oq.contains(sb) && op_is_diagonal(other, other_param, tol) {
             // Only touches control qubits diagonally.
@@ -289,7 +305,13 @@ fn gate_commutes_with_op(
                 // Parametric 1q gate commutes with Unitary2 if Unitary2 is diagonal and g is diagonal.
                 return g_diag && mat4_is_diagonal(matrix, tol);
             }
-            let mg = op_matrix4_on(&Operation::Gate { gate: *gate, target: q }, *qubits);
+            let mg = op_matrix4_on(
+                &Operation::Gate {
+                    gate: *gate,
+                    target: q,
+                },
+                *qubits,
+            );
             mat4_commutes(&mg, matrix, tol)
         }
     }

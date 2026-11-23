@@ -59,9 +59,7 @@ pub(crate) fn mat4_is_real(m: &Matrix4, tol: f64) -> bool {
 /// Kronecker product `b ⊗ a`, matching ketrs's `2·b(q₁) + b(q₀)` indexing
 /// (`a` on `qubits[0]`, `b` on `qubits[1]`).
 pub(crate) fn kron2(b: &Matrix2, a: &Matrix2) -> Matrix4 {
-    std::array::from_fn(|r| {
-        std::array::from_fn(|c| b[r >> 1][c >> 1] * a[r & 1][c & 1])
-    })
+    std::array::from_fn(|r| std::array::from_fn(|c| b[r >> 1][c >> 1] * a[r & 1][c & 1]))
 }
 
 /// Determinant of a 4×4 complex matrix via cofactor expansion.
@@ -73,8 +71,7 @@ fn mat4_det(m: &Matrix4) -> C64 {
             - m[r0][c1] * (m[r1][c0] * m[r2][c2] - m[r1][c2] * m[r2][c0])
             + m[r0][c2] * (m[r1][c0] * m[r2][c1] - m[r1][c1] * m[r2][c0])
     };
-    m[0][0] * det3([1, 2, 3], [1, 2, 3])
-        - m[0][1] * det3([1, 2, 3], [0, 2, 3])
+    m[0][0] * det3([1, 2, 3], [1, 2, 3]) - m[0][1] * det3([1, 2, 3], [0, 2, 3])
         + m[0][2] * det3([1, 2, 3], [0, 1, 3])
         - m[0][3] * det3([1, 2, 3], [0, 1, 2])
 }
@@ -88,8 +85,7 @@ fn mat4_det_real(m: &[[f64; 4]; 4]) -> f64 {
             - m[r0][c1] * (m[r1][c0] * m[r2][c2] - m[r1][c2] * m[r2][c0])
             + m[r0][c2] * (m[r1][c0] * m[r2][c1] - m[r1][c1] * m[r2][c0])
     };
-    m[0][0] * det3([1, 2, 3], [1, 2, 3])
-        - m[0][1] * det3([1, 2, 3], [0, 2, 3])
+    m[0][0] * det3([1, 2, 3], [1, 2, 3]) - m[0][1] * det3([1, 2, 3], [0, 2, 3])
         + m[0][2] * det3([1, 2, 3], [0, 1, 3])
         - m[0][3] * det3([1, 2, 3], [0, 1, 2])
 }
@@ -428,20 +424,21 @@ fn canonicalize_weyl(
 ) {
     // Helper: shift coordinate by k * π/2 using exp(i π/2 PP) = i (P ⊗ P).
     // exp(i(c + k π/2) PP) = i^k (P^k ⊗ P^k) exp(i c PP).
-    let shift_axis = |c: &mut f64, p: &Matrix2, a1: &mut Matrix2, b1: &mut Matrix2, phase: &mut f64| {
-        // Reduce c into (-π/4, π/4] by subtracting multiples of π/2:
-        // exp(i c PP) = exp(i (c - k π/2) PP) · exp(i k π/2 PP) = i^k (P^k ⊗ P^k) exp(i c' PP).
-        let k = (*c / FRAC_PI_2).round() as i64;
-        if k != 0 {
-            *c -= (k as f64) * FRAC_PI_2;
-            let k_mod4 = k.rem_euclid(4);
-            *phase += (k_mod4 as f64) * FRAC_PI_2;
-            if k_mod4 % 2 == 1 {
-                *a1 = mat2_mul(a1, p);
-                *b1 = mat2_mul(b1, p);
+    let shift_axis =
+        |c: &mut f64, p: &Matrix2, a1: &mut Matrix2, b1: &mut Matrix2, phase: &mut f64| {
+            // Reduce c into (-π/4, π/4] by subtracting multiples of π/2:
+            // exp(i c PP) = exp(i (c - k π/2) PP) · exp(i k π/2 PP) = i^k (P^k ⊗ P^k) exp(i c' PP).
+            let k = (*c / FRAC_PI_2).round() as i64;
+            if k != 0 {
+                *c -= (k as f64) * FRAC_PI_2;
+                let k_mod4 = k.rem_euclid(4);
+                *phase += (k_mod4 as f64) * FRAC_PI_2;
+                if k_mod4 % 2 == 1 {
+                    *a1 = mat2_mul(a1, p);
+                    *b1 = mat2_mul(b1, p);
+                }
             }
-        }
-    };
+        };
 
     let mx = Gate::X.matrix();
     let my = Gate::Y.matrix();
@@ -753,8 +750,20 @@ pub(crate) fn synthesize_2q(
             control: q0,
             target: q1,
         });
-        push_1q(&mut ops, &mut phase, &Gate::Ry(-2.0 * kak.cx).matrix(), q0, tol);
-        push_1q(&mut ops, &mut phase, &Gate::Ry(-2.0 * kak.cy).matrix(), q1, tol);
+        push_1q(
+            &mut ops,
+            &mut phase,
+            &Gate::Ry(-2.0 * kak.cx).matrix(),
+            q0,
+            tol,
+        );
+        push_1q(
+            &mut ops,
+            &mut phase,
+            &Gate::Ry(-2.0 * kak.cy).matrix(),
+            q1,
+            tol,
+        );
         ops.push(Operation::Controlled {
             gate: Gate::X,
             control: q0,
@@ -993,42 +1002,61 @@ mod tests {
     fn kak_exact_on_degenerate_and_special_gates() {
         let qubits = [0, 1];
         let cases: Vec<(&str, Matrix4, usize, usize)> = vec![
-            (
-                "identity",
-                kron2(&I2, &I2),
-                0,
-                0,
-            ),
+            ("identity", kron2(&I2, &I2), 0, 0),
             (
                 "product",
-                kron2(&Gate::Ry(0.7).matrix(), &Gate::U { theta: 1.1, phi: 0.3, lambda: -0.5 }.matrix()),
+                kron2(
+                    &Gate::Ry(0.7).matrix(),
+                    &Gate::U {
+                        theta: 1.1,
+                        phi: 0.3,
+                        lambda: -0.5,
+                    }
+                    .matrix(),
+                ),
                 0,
                 0,
             ),
             (
                 "cx",
-                op_matrix4_on(&Operation::Controlled { gate: Gate::X, control: 0, target: 1 }, qubits),
+                op_matrix4_on(
+                    &Operation::Controlled {
+                        gate: Gate::X,
+                        control: 0,
+                        target: 1,
+                    },
+                    qubits,
+                ),
                 1,
                 1,
             ),
             (
                 "cz",
-                op_matrix4_on(&Operation::Controlled { gate: Gate::Z, control: 0, target: 1 }, qubits),
+                op_matrix4_on(
+                    &Operation::Controlled {
+                        gate: Gate::Z,
+                        control: 0,
+                        target: 1,
+                    },
+                    qubits,
+                ),
                 1,
                 1,
             ),
             (
                 "cp",
-                op_matrix4_on(&Operation::Controlled { gate: Gate::Phase(0.7), control: 0, target: 1 }, qubits),
+                op_matrix4_on(
+                    &Operation::Controlled {
+                        gate: Gate::Phase(0.7),
+                        control: 0,
+                        target: 1,
+                    },
+                    qubits,
+                ),
                 1,
                 2,
             ),
-            (
-                "swap",
-                op_matrix4_on(&Operation::Swap(0, 1), qubits),
-                1,
-                3,
-            ),
+            ("swap", op_matrix4_on(&Operation::Swap(0, 1), qubits), 1, 3),
             (
                 "rxx",
                 op_matrix4_on(

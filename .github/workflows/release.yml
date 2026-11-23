@@ -80,14 +80,14 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y glslc
       # Built on the runner (where glslc is) with zig as the linker, for
       # glibc 2.28 and later.
-      - run: pip install "maturin>=1.9,<2" ziglang
+      - run: python -m pip install "maturin>=1.9,<2" ziglang
       - run: >
           maturin build --release --out dist --features gpu --find-interpreter
           --zig --compatibility manylinux_2_28
       - name: Smoke test
         run: |
-          pip install numpy
-          pip install --no-index --find-links dist ketrs
+          python -m pip install numpy
+          python -m pip install --no-index --find-links dist ketrs
           python -c "import ketrs; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities()); print('GPU support:', hasattr(ketrs, 'GpuStatevector'))"
       - name: Smoke test (free-threaded)
         shell: bash
@@ -131,12 +131,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # No `gpu` feature: ketrs doesn't enumerate MoltenVK devices, so a GPU
       # build would find no GPU on a Mac.
-      - run: pip install "maturin>=1.9,<2"
+      - run: python -m pip install "maturin>=1.9,<2"
       - run: maturin build --release --out dist --find-interpreter
       - name: Smoke test
         run: |
-          pip install numpy
-          pip install --no-index --find-links dist ketrs
+          python -m pip install numpy
+          python -m pip install --no-index --find-links dist ketrs
           python -c "import ketrs; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities())"
       - name: Smoke test (free-threaded)
         shell: bash
@@ -182,7 +182,7 @@ jobs:
           Start-Process -Wait -FilePath .\vulkan-sdk.exe -ArgumentList '--root', 'C:\VulkanSDK', '--accept-licenses', '--default-answer', '--confirm-command', 'install'
           & C:\VulkanSDK\Bin\glslc.exe --version
           "GLSLC=C:\VulkanSDK\Bin\glslc.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - run: pip install "maturin>=1.9,<2"
+      - run: python -m pip install "maturin>=1.9,<2"
       # Regular and free-threaded interpreters are both `python.exe` here, so
       # --find-interpreter keeps only one of each version: list them all.
       - name: Build
@@ -201,8 +201,8 @@ jobs:
       - name: Smoke test
         shell: bash
         run: |
-          pip install numpy
-          pip install --no-index --find-links dist ketrs
+          python -m pip install numpy
+          python -m pip install --no-index --find-links dist ketrs
           python -c "import ketrs; print(ketrs.Statevector.from_circuit(ketrs.Circuit(2).h(0).cx(0, 1)).probabilities()); print('GPU support:', hasattr(ketrs, 'GpuStatevector'))"
       - name: Smoke test (free-threaded)
         shell: bash
