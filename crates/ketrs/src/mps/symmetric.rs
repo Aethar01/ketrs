@@ -771,7 +771,11 @@ mod tests {
                     },
                 )
                 .unwrap();
-            assert!(res.energy.is_finite(), "noise={noise}: energy={}", res.energy);
+            assert!(
+                res.energy.is_finite(),
+                "noise={noise}: energy={}",
+                res.energy
+            );
             assert!(mps.charge_violation() < 1e-12);
             assert!((mps.norm_sqr() - 1.0).abs() < 1e-10);
         }

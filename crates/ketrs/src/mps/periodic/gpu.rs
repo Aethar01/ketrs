@@ -208,7 +208,8 @@ impl GpuLocalOp {
             let x_addr = ensure(ctx, &mut s.x, bytes, Memory::Device)?.device_address();
             let y_addr = ensure(ctx, &mut s.y, y_bytes, Memory::Device)?.device_address();
             let z_addr = ensure(ctx, &mut s.z, z_bytes, Memory::Device)?.device_address();
-            let parts_addr = ensure(ctx, &mut s.parts, parts_bytes, Memory::Device)?.device_address();
+            let parts_addr =
+                ensure(ctx, &mut s.parts, parts_bytes, Memory::Device)?.device_address();
             let out_addr = ensure(ctx, &mut s.out, bytes, Memory::Device)?.device_address();
             ensure(ctx, &mut s.down, bytes, Memory::Download)?;
             let up = ensure(ctx, &mut s.up, bytes, Memory::Upload)?;

@@ -639,7 +639,9 @@ impl PyPeriodicMps {
         seed: Option<u64>,
     ) -> PyResult<Self> {
         if n_qubits == 0 {
-            return Err(PyValueError::new_err("a PeriodicMPS needs at least one qubit"));
+            return Err(PyValueError::new_err(
+                "a PeriodicMPS needs at least one qubit",
+            ));
         }
         if !(transfer_cutoff >= 0.0 && transfer_cutoff.is_finite()) {
             return Err(PyValueError::new_err(

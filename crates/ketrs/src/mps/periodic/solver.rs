@@ -136,10 +136,11 @@ fn solve_direct(
         let k = kept[c];
         n_u[(i, k)] / n_vals[k].sqrt()
     });
-    let h_proj = matmul(x_mat.adjoint(), matmul(h_mat.as_ref(), x_mat.as_ref()).as_ref());
-    let h_proj = Mat::<C64>::from_fn(r, r, |i, j| {
-        (h_proj[(i, j)] + h_proj[(j, i)].conj()) * 0.5
-    });
+    let h_proj = matmul(
+        x_mat.adjoint(),
+        matmul(h_mat.as_ref(), x_mat.as_ref()).as_ref(),
+    );
+    let h_proj = Mat::<C64>::from_fn(r, r, |i, j| (h_proj[(i, j)] + h_proj[(j, i)].conj()) * 0.5);
     let (h_vals, h_u) = hermitian_evd(h_proj.as_ref());
     let e0 = h_vals[0];
     let mut vec = vec![ZERO; dim];
@@ -266,9 +267,8 @@ fn solve_davidson(
             x_sub.adjoint(),
             matmul(h_sub.as_ref(), x_sub.as_ref()).as_ref(),
         );
-        let h_proj = Mat::<C64>::from_fn(r, r, |i, j| {
-            (h_proj[(i, j)] + h_proj[(j, i)].conj()) * 0.5
-        });
+        let h_proj =
+            Mat::<C64>::from_fn(r, r, |i, j| (h_proj[(i, j)] + h_proj[(j, i)].conj()) * 0.5);
         let (h_vals, h_u) = hermitian_evd(h_proj.as_ref());
 
         let e_ritz = h_vals[0];
@@ -574,10 +574,11 @@ fn evolve_direct(
         let k = kept[c];
         n_u[(i, k)] / n_vals[k].sqrt()
     });
-    let h_proj = matmul(x_mat.adjoint(), matmul(h_mat.as_ref(), x_mat.as_ref()).as_ref());
-    let h_proj = Mat::<C64>::from_fn(r, r, |i, j| {
-        (h_proj[(i, j)] + h_proj[(j, i)].conj()) * 0.5
-    });
+    let h_proj = matmul(
+        x_mat.adjoint(),
+        matmul(h_mat.as_ref(), x_mat.as_ref()).as_ref(),
+    );
+    let h_proj = Mat::<C64>::from_fn(r, r, |i, j| (h_proj[(i, j)] + h_proj[(j, i)].conj()) * 0.5);
     let (h_vals, h_u) = hermitian_evd(h_proj.as_ref());
 
     // c_in = Y x = D_kept^{1/2} U_kept† x.
@@ -862,10 +863,11 @@ fn subspace_generalized_expm(
         let idx = kept[c];
         n_u[(i, idx)] / n_vals[idx].sqrt()
     });
-    let h_proj = matmul(x_mat.adjoint(), matmul(h_sub.as_ref(), x_mat.as_ref()).as_ref());
-    let h_proj = Mat::<C64>::from_fn(r, r, |i, j| {
-        (h_proj[(i, j)] + h_proj[(j, i)].conj()) * 0.5
-    });
+    let h_proj = matmul(
+        x_mat.adjoint(),
+        matmul(h_sub.as_ref(), x_mat.as_ref()).as_ref(),
+    );
+    let h_proj = Mat::<C64>::from_fn(r, r, |i, j| (h_proj[(i, j)] + h_proj[(j, i)].conj()) * 0.5);
     let (h_vals, h_u) = hermitian_evd(h_proj.as_ref());
 
     // z_0 = Y_sub (x_norm * e_0) = D_kept^{1/2} U_kept† (x_norm * e_0).

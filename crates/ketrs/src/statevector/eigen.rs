@@ -516,7 +516,9 @@ mod tests {
         let a: Vec<f64> = (0..m)
             .map(|i| -4000.0 + if i % 2 == 0 { 0.0 } else { 100.0 } + 1e-6 * i as f64)
             .collect();
-        let b: Vec<f64> = (0..m - 1).map(|i| if i % 10 == 0 { 1e-8 } else { 5.0 }).collect();
+        let b: Vec<f64> = (0..m - 1)
+            .map(|i| if i % 10 == 0 { 1e-8 } else { 5.0 })
+            .collect();
         let (lambda, y) = tridiagonal_lowest(&a, &b);
         assert!(lambda.is_finite(), "non-finite lambda: {lambda}");
         assert!(y.iter().all(|v| v.is_finite()), "non-finite eigenvector");

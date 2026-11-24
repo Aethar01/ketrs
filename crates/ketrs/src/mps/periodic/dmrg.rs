@@ -116,9 +116,8 @@ impl PeriodicMps {
             let cur_bonds = self.bond_dimensions();
             let bonds_stable = !prev_bonds.is_empty() && cur_bonds == prev_bonds;
             let all_at_max = cur_bonds.iter().all(|&b| b >= options.max_bond);
-            let pure_one_site = noise == 0.0
-                && sweep >= 2
-                && (all_at_max || (bonds_stable && prev_change < 1e-6));
+            let pure_one_site =
+                noise == 0.0 && sweep >= 2 && (all_at_max || (bonds_stable && prev_change < 1e-6));
             let polish_back = noise == 0.0 && sweep >= 1;
             prev_bonds = cur_bonds;
 
@@ -183,13 +182,8 @@ impl PeriodicMps {
                         // Backward 1-site exact variational polish: pos = (l - 1) ..= 0.
                         for pos in (0..l).rev() {
                             let absorb = (pos > 0).then_some(Absorb::Left);
-                            let (e, ok) = self.optimise_window_site(
-                                pos,
-                                &envs,
-                                &lanczos,
-                                absorb,
-                                null_tol,
-                            )?;
+                            let (e, ok) =
+                                self.optimise_window_site(pos, &envs, &lanczos, absorb, null_tol)?;
                             energy = e + shift;
                             unconverged_solves += usize::from(!ok);
                             if pos > 0 {
@@ -472,7 +466,16 @@ impl PeriodicMps {
                 prob.r_full,
                 matches!(absorb, Absorb::Right),
             );
-            self.split_window_pair_perturbed(q1, q2, &prob, theta_tilde, &theta_full, &pert, noise, absorb);
+            self.split_window_pair_perturbed(
+                q1,
+                q2,
+                &prob,
+                theta_tilde,
+                &theta_full,
+                &pert,
+                noise,
+                absorb,
+            );
         } else {
             self.split_window_pair(q1, q2, &prob, theta_tilde, absorb);
         }
@@ -483,10 +486,7 @@ impl PeriodicMps {
             let n_op = prob.norm_linear_op();
             let mut hv = vec![crate::mps::ZERO; v0.len()];
             let mut nv = vec![crate::mps::ZERO; v0.len()];
-            let eval_current = |tensors: &[Tensor],
-                                hv: &mut [C64],
-                                nv: &mut [C64]|
-             -> f64 {
+            let eval_current = |tensors: &[Tensor], hv: &mut [C64], nv: &mut [C64]| -> f64 {
                 let ta = two_site_dense(&tensors[q1], &tensors[q2]);
                 let va = prob.to_solver_vec(&ta);
                 h_op.apply(&va, hv);
@@ -538,11 +538,8 @@ impl PeriodicMps {
                             v_try[idx] = a_coef * v0[idx] + b_coef * ritz.vector[idx];
                         }
                         let tt_vec = prob.unpack_gauge(&v_try);
-                        let tt = MatRef::from_row_major_slice(
-                            &tt_vec,
-                            prob.l_eff * 2,
-                            2 * prob.r_eff,
-                        );
+                        let tt =
+                            MatRef::from_row_major_slice(&tt_vec, prob.l_eff * 2, 2 * prob.r_eff);
                         self.split_window_pair(q1, q2, &prob, tt, absorb);
                         let e_try = eval_current(&self.tensors, &mut hv, &mut nv);
                         if e_try.is_finite() && e_try < best_e {
@@ -727,9 +724,7 @@ impl PeriodicMps {
                     return None;
                 }
                 Some(match absorb {
-                    Absorb::Right => {
-                        Mat::<C64>::from_fn(side, p.ncols(), |r, c| p[(r, c)] * scale)
-                    }
+                    Absorb::Right => Mat::<C64>::from_fn(side, p.ncols(), |r, c| p[(r, c)] * scale),
                     Absorb::Left => {
                         Mat::<C64>::from_fn(side, p.nrows(), |r, c| p[(c, r)].conj() * scale)
                     }
@@ -829,10 +824,8 @@ impl PeriodicMps {
             let mut entries = Vec::new();
             let mut old_pos = vec![0usize; keep];
             let mut at = 0;
-            for (((label, idx), own_g), ext_g) in side_groups
-                .iter()
-                .zip(&own_blocks)
-                .zip(&extra_blocks)
+            for (((label, idx), own_g), ext_g) in
+                side_groups.iter().zip(&own_blocks).zip(&extra_blocks)
             {
                 let start = at;
                 if let Some(k_old) = cur_mid.find(label) {
@@ -892,10 +885,7 @@ impl PeriodicMps {
         let mut stacked = Mat::<C64>::zeros(side, width);
         let mut at = 0;
         for b in &blocks {
-            stacked
-                .as_mut()
-                .subcols_mut(at, b.ncols())
-                .copy_from(b);
+            stacked.as_mut().subcols_mut(at, b.ncols()).copy_from(b);
             at += b.ncols();
         }
         let rho = matmul(stacked.as_ref(), stacked.adjoint());

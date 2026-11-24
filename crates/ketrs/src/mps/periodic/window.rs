@@ -167,7 +167,9 @@ pub(super) fn split_hamiltonian_on_window(
     let mut by_w: BTreeMap<LocalOps, Vec<(C64, LocalOps)>> = BTreeMap::new();
     let mut by_o: BTreeMap<LocalOps, Vec<(C64, LocalOps)>> = BTreeMap::new();
     for (c, w_ops, o_ops) in raw_cross {
-        by_w.entry(w_ops.clone()).or_default().push((c, o_ops.clone()));
+        by_w.entry(w_ops.clone())
+            .or_default()
+            .push((c, o_ops.clone()));
         by_o.entry(o_ops).or_default().push((c, w_ops));
     }
 
@@ -186,12 +188,7 @@ pub(super) fn split_hamiltonian_on_window(
                 }
                 OppFactor::String(*c, o_str)
             } else {
-                let mpo = Mpo::from_local_terms(
-                    &opp_list,
-                    l_opp,
-                    0.0,
-                    opp_charges.as_ref(),
-                );
+                let mpo = Mpo::from_local_terms(&opp_list, l_opp, 0.0, opp_charges.as_ref());
                 OppFactor::Mpo(mpo)
             };
             cross.push(CrossChannel {
@@ -353,7 +350,9 @@ impl<'a> WindowEnvs<'a> {
                 OppFactor::String(sc, ops) => {
                     compress_string_transfer(tensors, &wh.opp_sites, ops, *sc, comp, sym)
                 }
-                OppFactor::Mpo(mpo) => compress_mpo_transfer(tensors, &wh.opp_sites, mpo, comp, sym),
+                OppFactor::Mpo(mpo) => {
+                    compress_mpo_transfer(tensors, &wh.opp_sites, mpo, comp, sym)
+                }
             })
             .collect();
 
@@ -438,11 +437,8 @@ impl<'a> WindowEnvs<'a> {
         if let Some(mpo) = &self.mpo_w {
             let prev = self.hw_left[pos].as_ref().expect("hw_left built");
             let w_site = &mpo.sites[pos];
-            self.hw_left[pos + 1] = Some(
-                prev.par_iter()
-                    .map(|e| update_left(e, a, w_site))
-                    .collect(),
-            );
+            self.hw_left[pos + 1] =
+                Some(prev.par_iter().map(|e| update_left(e, a, w_site)).collect());
         }
         let prev_h = self.hopp_left[pos].as_ref().expect("hopp_left built");
         self.hopp_left[pos + 1] = Some(batch_mats_right(prev_h, a, Local::I));
@@ -456,11 +452,8 @@ impl<'a> WindowEnvs<'a> {
                 CrossEnvKind::Mpo { mpo, left, .. } => {
                     let w_site = &mpo.sites[pos];
                     let prev = left[pos].as_ref().expect("cross mpo left built");
-                    left[pos + 1] = Some(
-                        prev.par_iter()
-                            .map(|e| update_left(e, a, w_site))
-                            .collect(),
-                    );
+                    left[pos + 1] =
+                        Some(prev.par_iter().map(|e| update_left(e, a, w_site)).collect());
                 }
             }
         }
@@ -522,7 +515,9 @@ impl<'a> WindowEnvs<'a> {
     /// spanning `left_pos ..= right_pos` inside `W`.
     pub(super) fn metric_pair(&self, left_pos: usize, right_pos: usize) -> (Mat<C64>, Mat<C64>) {
         let ls = self.norm_left[left_pos].as_ref().expect("norm_left built");
-        let rs = self.norm_right[right_pos].as_ref().expect("norm_right built");
+        let rs = self.norm_right[right_pos]
+            .as_ref()
+            .expect("norm_right built");
         let d_l = ls.first().map_or(1, |m| m.nrows());
         let d_r = rs.first().map_or(1, |m| m.nrows());
         let mut l_bar = Mat::<C64>::zeros(d_l, d_l);
@@ -940,8 +935,7 @@ impl LocalProblem {
             }
         }
         // Right multiply by g_r_inv^T: ((l_eff * phys) × r_full) * (r_full × r_eff).
-        let mid_mat =
-            MatRef::from_row_major_slice(&mid, self.l_eff * self.phys, self.r_full);
+        let mid_mat = MatRef::from_row_major_slice(&mid, self.l_eff * self.phys, self.r_full);
         let prod_r = matmul(mid_mat, self.g_r_inv.transpose());
         let mut dense = Vec::with_capacity(self.l_eff * self.phys * self.r_eff);
         for i in 0..self.l_eff * self.phys {
@@ -966,8 +960,7 @@ impl LocalProblem {
     /// Map a dense gauge-coordinate tensor `(l_eff, phys, r_eff)` back to full
     /// bond coordinates `(l_full, phys, r_full)`: `Θ = G_L Θ̃ G_R^T`.
     pub(super) fn gauge_to_full(&self, theta_tilde: &[C64]) -> Vec<C64> {
-        let t_mat =
-            MatRef::from_row_major_slice(theta_tilde, self.l_eff, self.phys * self.r_eff);
+        let t_mat = MatRef::from_row_major_slice(theta_tilde, self.l_eff, self.phys * self.r_eff);
         let prod_l = matmul(self.g_l.as_ref(), t_mat);
         let mut mid = Vec::with_capacity(self.l_full * self.phys * self.r_eff);
         for i in 0..self.l_full {
@@ -975,8 +968,7 @@ impl LocalProblem {
                 mid.push(prod_l[(i, j)]);
             }
         }
-        let mid_mat =
-            MatRef::from_row_major_slice(&mid, self.l_full * self.phys, self.r_eff);
+        let mid_mat = MatRef::from_row_major_slice(&mid, self.l_full * self.phys, self.r_eff);
         let prod_r = matmul(mid_mat, self.g_r.transpose());
         let mut full = Vec::with_capacity(self.l_full * self.phys * self.r_full);
         for i in 0..self.l_full * self.phys {
@@ -1231,7 +1223,8 @@ impl LocalProblem {
                     // Solve min_B ‖M_A B - rhs_b‖_2^2.
                     let mut m_a = Mat::<C64>::zeros(2 * rk, cur_k * r_eff);
                     for p1 in 0..2 {
-                        let ap = Mat::<C64>::from_fn(l_eff, cur_k, |i, al| a_tilde[(i * 2 + p1, al)]);
+                        let ap =
+                            Mat::<C64>::from_fn(l_eff, cur_k, |i, al| a_tilde[(i * 2 + p1, al)]);
                         let prod = matmul(y_for_b.as_ref(), ap.as_ref()); // (rk * r_eff) × cur_k
                         for c in 0..rk {
                             for j in 0..r_eff {
@@ -1262,7 +1255,9 @@ impl LocalProblem {
                     // Solve min_A ‖M_B A - rhs_a‖_2^2.
                     let mut m_b = Mat::<C64>::zeros(2 * rk, l_eff * cur_k);
                     for p2 in 0..2 {
-                        let bp_t = Mat::<C64>::from_fn(r_eff, cur_k, |j, al| b_tilde[(al, p2 * r_eff + j)]);
+                        let bp_t = Mat::<C64>::from_fn(r_eff, cur_k, |j, al| {
+                            b_tilde[(al, p2 * r_eff + j)]
+                        });
                         let prod = matmul(y_for_a.as_ref(), bp_t.as_ref()); // (rk * l_eff) × cur_k
                         for c in 0..rk {
                             for i in 0..l_eff {
@@ -1297,7 +1292,8 @@ impl LocalProblem {
                 }
                 let mut b_raw = Mat::<C64>::zeros(cur_k, 2 * r_full);
                 for p2 in 0..2 {
-                    let bp = Mat::<C64>::from_fn(cur_k, r_eff, |al, j| b_tilde[(al, p2 * r_eff + j)]);
+                    let bp =
+                        Mat::<C64>::from_fn(cur_k, r_eff, |al, j| b_tilde[(al, p2 * r_eff + j)]);
                     let prod = matmul(bp.as_ref(), self.g_r.transpose());
                     for al in 0..cur_k {
                         for r in 0..r_full {
@@ -1413,14 +1409,17 @@ impl LocalProblem {
                         if rows.len() < dm || dm == 0 {
                             continue;
                         }
-                        let sub = Mat::<C64>::from_fn(rows.len(), dm, |r, c| a_t[(rows[r], rm.start + c)]);
+                        let sub = Mat::<C64>::from_fn(rows.len(), dm, |r, c| {
+                            a_t[(rows[r], rm.start + c)]
+                        });
                         let (q, rc) = crate::mps::linalg::thin_qr(sub.as_ref());
                         for (r, &row) in rows.iter().enumerate() {
                             for c in 0..dm {
                                 a_t[(row, rm.start + c)] = q[(r, c)];
                             }
                         }
-                        let b_sub = Mat::<C64>::from_fn(dm, 2 * r_eff, |r, c| b_t[(rm.start + r, c)]);
+                        let b_sub =
+                            Mat::<C64>::from_fn(dm, 2 * r_eff, |r, c| b_t[(rm.start + r, c)]);
                         let b_new = matmul(rc.as_ref(), b_sub.as_ref());
                         for r in 0..dm {
                             for c in 0..2 * r_eff {
@@ -1445,8 +1444,9 @@ impl LocalProblem {
                         if cols.len() < dm || dm == 0 {
                             continue;
                         }
-                        let sub_adj =
-                            Mat::<C64>::from_fn(cols.len(), dm, |r, c| b_t[(rm.start + c, cols[r])].conj());
+                        let sub_adj = Mat::<C64>::from_fn(cols.len(), dm, |r, c| {
+                            b_t[(rm.start + c, cols[r])].conj()
+                        });
                         let (q_adj, r_adj) = crate::mps::linalg::thin_qr(sub_adj.as_ref());
                         let l_c = r_adj.adjoint().to_owned();
                         for (c_idx, &col) in cols.iter().enumerate() {
@@ -1454,7 +1454,8 @@ impl LocalProblem {
                                 b_t[(rm.start + r, col)] = q_adj[(c_idx, r)].conj();
                             }
                         }
-                        let a_sub = Mat::<C64>::from_fn(l_eff * 2, dm, |r, c| a_t[(r, rm.start + c)]);
+                        let a_sub =
+                            Mat::<C64>::from_fn(l_eff * 2, dm, |r, c| a_t[(r, rm.start + c)]);
                         let a_new = matmul(a_sub.as_ref(), l_c.as_ref());
                         for r in 0..l_eff * 2 {
                             for c in 0..dm {
@@ -1937,11 +1938,7 @@ impl BondMetricProjector {
     fn project_in(&self, v: &[C64]) -> Vec<C64> {
         match self {
             BondMetricProjector::Dense {
-                l,
-                r,
-                phys,
-                y_mat,
-                ..
+                l, r, phys, y_mat, ..
             } => {
                 let m = l * r;
                 let rk = y_mat.nrows();
@@ -1989,11 +1986,7 @@ impl BondMetricProjector {
     fn expand_to_dense(&self, z: &[C64], out: &mut [C64]) {
         match self {
             BondMetricProjector::Dense {
-                l,
-                r,
-                phys,
-                x_mat,
-                ..
+                l, r, phys, x_mat, ..
             } => {
                 let rk = x_mat.ncols();
                 let z_mat = Mat::<C64>::from_fn(rk, *phys, |c, p| z[p * rk + c]);
@@ -2006,7 +1999,9 @@ impl BondMetricProjector {
                     }
                 }
             }
-            BondMetricProjector::Symmetric { r, phys, blocks, .. } => {
+            BondMetricProjector::Symmetric {
+                r, phys, blocks, ..
+            } => {
                 out.fill(ZERO);
                 for (p, blk) in blocks.iter().enumerate() {
                     let rk = blk.x_mat.ncols();
@@ -2061,11 +2056,7 @@ impl BondMetricProjector {
     fn contract_from_dense(&self, hx: &[C64], out: &mut [C64]) {
         match self {
             BondMetricProjector::Dense {
-                l,
-                r,
-                phys,
-                x_mat,
-                ..
+                l, r, phys, x_mat, ..
             } => {
                 let m = l * r;
                 let rk = x_mat.ncols();
@@ -2084,7 +2075,9 @@ impl BondMetricProjector {
                     }
                 }
             }
-            BondMetricProjector::Symmetric { r, phys, blocks, .. } => {
+            BondMetricProjector::Symmetric {
+                r, phys, blocks, ..
+            } => {
                 out.fill(ZERO);
                 for (p, blk) in blocks.iter().enumerate() {
                     let rk = blk.x_mat.ncols();
@@ -2157,7 +2150,12 @@ impl BondMetricProjector {
             let vec: Vec<C64> = (0..pdim).map(|i| u[(i, 0)]).collect();
             (vals[0], vec, true)
         } else {
-            lanczos_full_reorth(&op, &z0, options.tolerance, pdim.min(options.max_iterations).min(64))
+            lanczos_full_reorth(
+                &op,
+                &z0,
+                options.tolerance,
+                pdim.min(options.max_iterations).min(64),
+            )
         };
         // Preserve `v0`'s null-space component in `ker(Ñ)` ONLY when `v0` has
         // negligible weight in dropped positive modes of `N_bond` (otherwise

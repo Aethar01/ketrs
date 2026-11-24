@@ -322,7 +322,14 @@ fn periodic_circuits_and_tebd_match_statevector_with_direct_seam_gates() {
         circ.cx(q, (q + 1) % n);
         circ.rzz(0.25, q, (q + 1) % n);
     }
-    let pmps = PeriodicMps::from_circuit(&circ, MpsOptions { max_bond: 32, cutoff: 0.0 }).unwrap();
+    let pmps = PeriodicMps::from_circuit(
+        &circ,
+        MpsOptions {
+            max_bond: 32,
+            cutoff: 0.0,
+        },
+    )
+    .unwrap();
     let sv = Statevector::from_circuit(&circ);
     let diff = pmps
         .to_amplitudes()
@@ -337,7 +344,14 @@ fn periodic_circuits_and_tebd_match_statevector_with_direct_seam_gates() {
     // Periodic TEBD on periodic Heisenberg ring (exact at cutoff = 0, max_bond = 64).
     let h = periodic_heisenberg(n, 1.0);
     let neel: Vec<bool> = (0..n).map(|q| q % 2 == 1).collect();
-    let mut pmps = PeriodicMps::basis(n, &neel, MpsOptions { max_bond: 64, cutoff: 0.0 });
+    let mut pmps = PeriodicMps::basis(
+        n,
+        &neel,
+        MpsOptions {
+            max_bond: 64,
+            cutoff: 0.0,
+        },
+    );
     pmps.tebd(&h, 0.4, 8, 2).unwrap();
 
     let mut exact_circ = Circuit::new(n);
@@ -357,7 +371,14 @@ fn periodic_circuits_and_tebd_match_statevector_with_direct_seam_gates() {
     assert!(diff < 1e-8, "periodic TEBD diff {diff}");
 
     // Truncated periodic TEBD exercises exact O(n χ³) metric-weighted bond splits.
-    let mut pmps_trunc = PeriodicMps::basis(n, &neel, MpsOptions { max_bond: 8, cutoff: 1e-12 });
+    let mut pmps_trunc = PeriodicMps::basis(
+        n,
+        &neel,
+        MpsOptions {
+            max_bond: 8,
+            cutoff: 1e-12,
+        },
+    );
     pmps_trunc.tebd(&h, 0.4, 8, 2).unwrap();
     assert!(pmps_trunc.bond_dimensions().into_iter().max().unwrap_or(0) <= 8);
     assert!((pmps_trunc.norm_sqr() - 1.0).abs() < 1e-3);
@@ -366,7 +387,10 @@ fn periodic_circuits_and_tebd_match_statevector_with_direct_seam_gates() {
         .inner(&exact_sv)
         .unwrap()
         .norm();
-    assert!(overlap > 0.999, "truncated periodic TEBD fidelity {overlap}");
+    assert!(
+        overlap > 0.999,
+        "truncated periodic TEBD fidelity {overlap}"
+    );
 }
 
 #[test]
@@ -449,7 +473,10 @@ fn periodic_dmrg_heisenberg_dense_and_symmetric_match_exact() {
     let mut sym = PeriodicMps::basis(n, &neel, MpsOptions::default())
         .with_charges(&charges)
         .unwrap();
-    assert_eq!(sym.total_charge(), Some(vec![(n / 2) as i64, (n / 2 % 2) as i64]));
+    assert_eq!(
+        sym.total_charge(),
+        Some(vec![(n / 2) as i64, (n / 2 % 2) as i64])
+    );
 
     let res_sym = sym
         .dmrg(
@@ -780,12 +807,7 @@ fn periodic_projection_and_sampling_match_statevector() {
     let p = proj.project(2, true).unwrap();
     assert!((proj.norm_sqr() - 1.0).abs() < 1e-11);
     let scale = p.sqrt().recip();
-    for (idx, (&a, &b)) in proj
-        .to_amplitudes()
-        .iter()
-        .zip(sv.amplitudes())
-        .enumerate()
-    {
+    for (idx, (&a, &b)) in proj.to_amplitudes().iter().zip(sv.amplitudes()).enumerate() {
         let want = if (idx >> 2) & 1 == 1 {
             b * scale
         } else {
@@ -829,9 +851,7 @@ fn periodic_from_mps_roundtrip_and_with_charges_seam_unfold() {
     let mut pmps2 = PeriodicMps::basis(n, &neel, MpsOptions::default());
     pmps2.tebd(&h, 0.3, 4, 2).unwrap();
     assert!(pmps2.bond_dimensions()[n - 1] > 1);
-    let sym = pmps2
-        .with_charges(&[Charge::weights(vec![1; n])])
-        .unwrap();
+    let sym = pmps2.with_charges(&[Charge::weights(vec![1; n])]).unwrap();
     assert_eq!(sym.total_charge(), Some(vec![3]));
     let diff2 = sym
         .to_amplitudes()

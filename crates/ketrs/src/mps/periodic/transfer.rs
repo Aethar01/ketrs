@@ -518,13 +518,8 @@ fn trace_delta_block(tensors: &[Tensor], sym: &PeriodicSymmetry, delta: &Label) 
 
     for _ in 0..n {
         let next = (cur + 1) % n;
-        let sb = PeriodicSiteBlocks::new(
-            &tensors[cur],
-            &sym.bonds[cur],
-            &sym.bonds[next],
-            sym,
-            cur,
-        );
+        let sb =
+            PeriodicSiteBlocks::new(&tensors[cur], &sym.bonds[cur], &sym.bonds[next], sym, cur);
         let next_pairs = &bond_pairs[next];
         let mut next_mats: Vec<Vec<C64>> = next_pairs
             .iter()
@@ -557,10 +552,7 @@ fn trace_delta_block(tensors: &[Tensor], sym: &PeriodicSymmetry, delta: &Label) 
                         }
                     }
                 }
-                let w = matmul(
-                    a_bra.adjoint(),
-                    MatRef::from_row_major_slice(&z, dp, cols),
-                );
+                let w = matmul(a_bra.adjoint(), MatRef::from_row_major_slice(&z, dp, cols));
                 let dst = &mut next_mats[next_idx];
                 for bp in 0..dtp {
                     for j in 0..r {
@@ -700,10 +692,8 @@ pub(super) fn compress_string_transfer(
     debug_assert_eq!(opp_sites.len(), ops.len());
     if opp_sites.is_empty() {
         let d = tensors[0].left;
-        let mut ct = CompressedTransfer::identity(
-            d,
-            sym.map(|s| (&s.bonds[0], s.charges.as_ref())),
-        );
+        let mut ct =
+            CompressedTransfer::identity(d, sym.map(|s| (&s.bonds[0], s.charges.as_ref())));
         if scale != ONE {
             for m in &mut ct.left {
                 *m *= faer::Scale(scale);
@@ -837,9 +827,7 @@ fn compress_linear_map(
             }
             let rows_conj = apply_adj(&eye, m_rows);
             // rows_conj[i * n_cols + j] = (M†)[j, i] = conj(M[i, j]).
-            let mat = Mat::<C64>::from_fn(m_rows, n_cols, |i, j| {
-                rows_conj[i * n_cols + j].conj()
-            });
+            let mat = Mat::<C64>::from_fn(m_rows, n_cols, |i, j| rows_conj[i * n_cols + j].conj());
             thin_svd(mat.as_ref())
         }
     } else {
@@ -1458,14 +1446,21 @@ fn build_ring_caches(tensors: &[Tensor], cut: usize) -> (Vec<Vec<C64>>, Vec<Vec<
     prefix.push(eye.clone());
     for step in 0..n {
         let q = (cut + step) % n;
-        let next = batch_transfer_right(prefix.last().unwrap(), batch, &tensors[q], &tensors[q], Local::I);
+        let next = batch_transfer_right(
+            prefix.last().unwrap(),
+            batch,
+            &tensors[q],
+            &tensors[q],
+            Local::I,
+        );
         prefix.push(next);
     }
     let mut suffix = vec![Vec::new(); n + 1];
     suffix[n] = eye;
     for step in (0..n).rev() {
         let q = (cut + step) % n;
-        suffix[step] = batch_transfer_left(&suffix[step + 1], batch, &tensors[q], &tensors[q], Local::I);
+        suffix[step] =
+            batch_transfer_left(&suffix[step + 1], batch, &tensors[q], &tensors[q], Local::I);
     }
     (prefix, suffix)
 }

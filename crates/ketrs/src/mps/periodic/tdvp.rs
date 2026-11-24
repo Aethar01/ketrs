@@ -36,12 +36,7 @@ impl PeriodicMps {
     /// Works for periodic Hamiltonians of any range, supports both dense and
     /// symmetric (`with_charges`) periodic MPS, and grows all `n` bonds
     /// (including the `(n - 1, 0)` seam bond) dynamically up to `max_bond`.
-    pub fn tdvp(
-        &mut self,
-        hamiltonian: &PauliSum,
-        time: f64,
-        steps: usize,
-    ) -> Result<(), Error> {
+    pub fn tdvp(&mut self, hamiltonian: &PauliSum, time: f64, steps: usize) -> Result<(), Error> {
         let n = self.n_qubits();
         if n < 2 {
             return Err(Error::InvalidArgument(

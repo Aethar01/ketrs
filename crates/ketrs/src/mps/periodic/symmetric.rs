@@ -273,12 +273,7 @@ impl PeriodicLayout {
         Self::from_shifts(left, right, &shifts, &sym.charges)
     }
 
-    fn from_shifts(
-        left: &Sectors,
-        right: &Sectors,
-        shifts: &[Label],
-        charges: &Charges,
-    ) -> Self {
+    fn from_shifts(left: &Sectors, right: &Sectors, shifts: &[Label], charges: &Charges) -> Self {
         let phys = shifts.len();
         let mut rows = Vec::new();
         let mut cols = vec![None; left.len() * phys];
@@ -436,9 +431,8 @@ pub(super) fn split_metric_symmetric(
         Absorb::Right => {
             let (q_left, r_carry, final_mid) =
                 qr_left_symmetric(a_raw.as_ref(), left_full, &mid_sectors, sym, q1);
-            let rs_b = Mat::<C64>::from_fn(r_carry.nrows(), mid_dim, |r, c| {
-                r_carry[(r, c)] * s_k[c]
-            });
+            let rs_b =
+                Mat::<C64>::from_fn(r_carry.nrows(), mid_dim, |r, c| r_carry[(r, c)] * s_k[c]);
             let b_final = matmul(rs_b.as_ref(), b_raw.as_ref());
             let k = final_mid.dim();
             (
@@ -491,10 +485,7 @@ impl PeriodicMps {
             // Fast exact O(n χ³) path: treat as an open chain with bond 0 = 1,
             // assign sectors left-to-right, determine Q_tot at site n - 1, then
             // sweep right-to-left.
-            let open = crate::mps::Mps::from_raw_tensors(
-                dense.tensors.clone(),
-                dense.options,
-            );
+            let open = crate::mps::Mps::from_raw_tensors(dense.tensors.clone(), dense.options);
             let sym_open = open.with_charges(charges)?;
             let total_charge: Label = sym_open.total_charge().unwrap().into();
             let mut bonds = Vec::with_capacity(n);
@@ -775,9 +766,7 @@ pub(super) fn block_metric_gauge(
             .iter()
             .enumerate()
             .flat_map(|(pos, (k, vals, _))| {
-                vals.iter()
-                    .enumerate()
-                    .map(move |(j, &v)| (v, pos, *k, j))
+                vals.iter().enumerate().map(move |(j, &v)| (v, pos, *k, j))
             })
             .max_by(|a, b| a.0.total_cmp(&b.0))
             .expect("non-empty bond");

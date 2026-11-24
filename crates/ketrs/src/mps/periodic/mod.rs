@@ -44,7 +44,9 @@ use num_complex::Complex64 as C64;
 use rand::Rng;
 use std::collections::BTreeMap;
 use symmetric::PeriodicSymmetry;
-use transfer::{TransferCompression, exact_expectations, exact_ring_inner, exact_ring_norm_symmetric};
+use transfer::{
+    TransferCompression, exact_expectations, exact_ring_inner, exact_ring_norm_symmetric,
+};
 
 /// Default singular value cutoff for Pippan–White–Evertz transfer-matrix
 /// compression.
@@ -509,9 +511,18 @@ mod tests {
         let mut h = PauliSum::new();
         for i in 0..n {
             let j = (i + 1) % n;
-            h.add(1.0, PauliString::new([(i, Pauli::X), (j, Pauli::X)]).unwrap());
-            h.add(1.0, PauliString::new([(i, Pauli::Y), (j, Pauli::Y)]).unwrap());
-            h.add(0.7, PauliString::new([(i, Pauli::Z), (j, Pauli::Z)]).unwrap());
+            h.add(
+                1.0,
+                PauliString::new([(i, Pauli::X), (j, Pauli::X)]).unwrap(),
+            );
+            h.add(
+                1.0,
+                PauliString::new([(i, Pauli::Y), (j, Pauli::Y)]).unwrap(),
+            );
+            h.add(
+                0.7,
+                PauliString::new([(i, Pauli::Z), (j, Pauli::Z)]).unwrap(),
+            );
             h.add(0.3 * i as f64, PauliString::new([(i, Pauli::Z)]).unwrap());
         }
         let mut pmps = PeriodicMps::random(n, 3, 17, MpsOptions::default());
@@ -574,14 +585,30 @@ mod tests {
         let mut h = PauliSum::new();
         for i in 0..n {
             let j = (i + 1) % n;
-            h.add(1.0, PauliString::new([(i, Pauli::X), (j, Pauli::X)]).unwrap());
-            h.add(1.0, PauliString::new([(i, Pauli::Y), (j, Pauli::Y)]).unwrap());
-            h.add(1.0, PauliString::new([(i, Pauli::Z), (j, Pauli::Z)]).unwrap());
+            h.add(
+                1.0,
+                PauliString::new([(i, Pauli::X), (j, Pauli::X)]).unwrap(),
+            );
+            h.add(
+                1.0,
+                PauliString::new([(i, Pauli::Y), (j, Pauli::Y)]).unwrap(),
+            );
+            h.add(
+                1.0,
+                PauliString::new([(i, Pauli::Z), (j, Pauli::Z)]).unwrap(),
+            );
         }
         let neel: Vec<bool> = (0..n).map(|q| q % 2 == 1).collect();
-        let mut sym = PeriodicMps::basis(n, &neel, MpsOptions { max_bond: 8, cutoff: 1e-13 })
-            .with_charges(&[crate::mps::Charge::weights(vec![1; n])])
-            .unwrap();
+        let mut sym = PeriodicMps::basis(
+            n,
+            &neel,
+            MpsOptions {
+                max_bond: 8,
+                cutoff: 1e-13,
+            },
+        )
+        .with_charges(&[crate::mps::Charge::weights(vec![1; n])])
+        .unwrap();
         sym.dmrg(
             &h,
             &crate::mps::DmrgOptions {

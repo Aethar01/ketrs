@@ -884,9 +884,7 @@ mod tests {
         let n = 4;
         let bits = [true, false, true, false];
         let mut dense = Mps::basis(n, &bits, MpsOptions::default());
-        let mut sym = dense
-            .with_charges(&[Charge::weights(vec![1; n])])
-            .unwrap();
+        let mut sym = dense.with_charges(&[Charge::weights(vec![1; n])]).unwrap();
         let theta = faer::Mat::<C64>::from_fn(2, 2, |r, c| {
             if r == 1 && c == 0 {
                 C64::new(1.0, 0.0)
@@ -908,7 +906,13 @@ mod tests {
         }
         // Also verify zero-norm perturbation blocks and zero-norm theta stay finite.
         let zero = faer::Mat::<C64>::zeros(2, 2);
-        dense.split_perturbed(0, theta.as_ref(), std::slice::from_ref(&zero), 1e-4, super::Absorb::Right);
+        dense.split_perturbed(
+            0,
+            theta.as_ref(),
+            std::slice::from_ref(&zero),
+            1e-4,
+            super::Absorb::Right,
+        );
         sym.split_perturbed_symmetric(0, theta.as_ref(), &[zero], 1e-4, super::Absorb::Right);
         assert!((dense.norm_sqr() - 1.0).abs() < 1e-14);
         assert!((sym.norm_sqr() - 1.0).abs() < 1e-14);
