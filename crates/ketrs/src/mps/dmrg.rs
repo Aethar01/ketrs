@@ -246,7 +246,7 @@ impl Mps {
     /// `θ`'s norm, while their weight is above the cutoff. `θ` keeps exactly
     /// the basis and weights a plain split would give it, so the energy is
     /// unchanged and the new directions only widen the next updates.
-    fn split_perturbed(
+    pub(super) fn split_perturbed(
         &mut self,
         i: usize,
         theta: MatRef<'_, C64>,
@@ -283,11 +283,14 @@ impl Mps {
             let blocks: Vec<Mat<C64>> = perturbation
                 .iter()
                 .filter_map(|p| {
-                    let w = weight(p.as_ref());
-                    if w == 0.0 {
+                    let norm_p = p.as_ref().norm_l2();
+                    if !norm_p.is_finite() || norm_p <= 1e-100 * total.sqrt() {
                         return None;
                     }
-                    let scale = (noise * total / w).sqrt();
+                    let scale = (noise * total).sqrt() / norm_p;
+                    if !scale.is_finite() {
+                        return None;
+                    }
                     Some(match absorb {
                         Absorb::Right => {
                             Mat::<C64>::from_fn(side, p.ncols(), |r, c| p[(r, c)] * scale)
@@ -343,8 +346,14 @@ impl Mps {
             Absorb::Right => {
                 let centre = matmul(basis.adjoint(), theta);
                 let kept = weight(centre.as_ref());
-                self.truncation_error += ((total - kept) / total).max(0.0);
-                let rescale = C64::new((total / kept).sqrt(), 0.0);
+                if total > 0.0 {
+                    self.truncation_error += ((total - kept) / total).max(0.0);
+                }
+                let rescale = if kept > 0.0 {
+                    C64::new((total / kept).sqrt(), 0.0)
+                } else {
+                    C64::new(1.0, 0.0)
+                };
                 let centre = Mat::<C64>::from_fn(bond, cols, |r, c| rescale * centre[(r, c)]);
                 self.tensors[i] = Tensor::from_matrix(basis.as_ref(), left, bond);
                 self.tensors[i + 1] = Tensor::from_matrix(centre.as_ref(), bond, right);
@@ -353,8 +362,14 @@ impl Mps {
             Absorb::Left => {
                 let centre = matmul(theta, basis.as_ref());
                 let kept = weight(centre.as_ref());
-                self.truncation_error += ((total - kept) / total).max(0.0);
-                let rescale = C64::new((total / kept).sqrt(), 0.0);
+                if total > 0.0 {
+                    self.truncation_error += ((total - kept) / total).max(0.0);
+                }
+                let rescale = if kept > 0.0 {
+                    C64::new((total / kept).sqrt(), 0.0)
+                } else {
+                    C64::new(1.0, 0.0)
+                };
                 let centre = Mat::<C64>::from_fn(rows, bond, |r, c| rescale * centre[(r, c)]);
                 let basis = basis.adjoint().to_owned();
                 self.tensors[i] = Tensor::from_matrix(centre.as_ref(), left, bond);

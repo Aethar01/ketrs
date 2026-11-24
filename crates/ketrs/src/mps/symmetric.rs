@@ -150,7 +150,7 @@ impl BlockSvd {
     }
 
     /// The new bond: each block's label with its kept directions.
-    fn sectors(&self, counts: &[usize]) -> Sectors {
+    pub(super) fn sectors(&self, counts: &[usize]) -> Sectors {
         Sectors::new(
             self.labels
                 .iter()
@@ -723,5 +723,57 @@ mod tests {
         assert!(diff < 1e-9, "{diff}");
         assert!(sym.charge_violation() < 1e-12);
         assert!((sym.norm_sqr() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dmrg_with_twenty_u1_charges_and_noise_does_not_diverge() {
+        // Regression test for large-N / >= 18 U(1) charge symmetric DMRG
+        // stability (both noise = 0.0 and noise = 1e-4).
+        use crate::Pauli;
+        let n_blocks = 20;
+        let n = 2 * n_blocks; // 40 qubits, 20 local U(1) charges + 1 global U(1)
+        let mut h = PauliSum::new();
+        for b in 0..n_blocks {
+            let (i, j) = (2 * b, 2 * b + 1);
+            for p in [Pauli::X, Pauli::Y, Pauli::Z] {
+                h.add(1.0, PauliString::new([(i, p), (j, p)]).unwrap());
+            }
+            if b + 1 < n_blocks {
+                h.add(
+                    0.4,
+                    PauliString::new([(j, Pauli::Z), (j + 1, Pauli::Z)]).unwrap(),
+                );
+            }
+        }
+        let mut charges = Vec::with_capacity(n_blocks + 1);
+        charges.push(Charge::weights(vec![1; n]));
+        for b in 0..n_blocks {
+            let mut w = vec![0i64; n];
+            w[2 * b] = 1;
+            w[2 * b + 1] = 1;
+            charges.push(Charge::weights(w));
+        }
+        let neel: Vec<bool> = (0..n).map(|q| q % 2 == 1).collect();
+        for &noise in &[0.0, 1e-4] {
+            let mut mps = Mps::basis(n, &neel, MpsOptions::default())
+                .with_charges(&charges)
+                .unwrap();
+            let res = mps
+                .dmrg(
+                    &h,
+                    &crate::mps::DmrgOptions {
+                        max_bond: 16,
+                        cutoff: 1e-10,
+                        max_sweeps: 4,
+                        tolerance: 1e-8,
+                        noise,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(res.energy.is_finite(), "noise={noise}: energy={}", res.energy);
+            assert!(mps.charge_violation() < 1e-12);
+            assert!((mps.norm_sqr() - 1.0).abs() < 1e-10);
+        }
     }
 }

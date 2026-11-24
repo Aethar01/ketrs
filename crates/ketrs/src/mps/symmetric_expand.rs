@@ -594,11 +594,14 @@ impl Mps {
             let blocks: Vec<Mat<C64>> = perturbation
                 .iter()
                 .filter_map(|p| {
-                    let w = weight(p.as_ref());
-                    if w == 0.0 {
+                    let norm_p = p.as_ref().norm_l2();
+                    if !norm_p.is_finite() || norm_p <= 1e-100 * total.sqrt() {
                         return None;
                     }
-                    let scale = (noise * total / w).sqrt();
+                    let scale = (noise * total).sqrt() / norm_p;
+                    if !scale.is_finite() {
+                        return None;
+                    }
                     Some(match absorb {
                         Absorb::Right => {
                             Mat::<C64>::from_fn(side, p.ncols(), |r, c| p[(r, c)] * scale)
@@ -693,8 +696,14 @@ impl Mps {
             Absorb::Left => matmul(theta, basis.as_ref()),
         };
         let kept = weight(centre.as_ref());
-        self.truncation_error += ((total - kept) / total).max(0.0);
-        let rescale = C64::new((total / kept).sqrt(), 0.0);
+        if total > 0.0 {
+            self.truncation_error += ((total - kept) / total).max(0.0);
+        }
+        let rescale = if kept > 0.0 {
+            C64::new((total / kept).sqrt(), 0.0)
+        } else {
+            C64::new(1.0, 0.0)
+        };
         let centre = Mat::<C64>::from_fn(centre.nrows(), centre.ncols(), |r, c| {
             rescale * centre[(r, c)]
         });
@@ -865,5 +874,43 @@ mod tests {
         sym.move_center(0);
         sym.move_center(n - 1);
         assert!(close(&sym.to_amplitudes(), &start.to_amplitudes()) < 1e-12);
+    }
+
+    #[test]
+    fn subnormal_perturbation_channel_does_not_produce_nan() {
+        // Regression test: an MPO perturbation block with entries around 1e-160
+        // has squared norm ~1e-320 (non-zero subnormal), so dividing noise / w
+        // overflowed to +inf and produced 0.0 * inf = NaN in rho before thin_svd.
+        let n = 4;
+        let bits = [true, false, true, false];
+        let mut dense = Mps::basis(n, &bits, MpsOptions::default());
+        let mut sym = dense
+            .with_charges(&[Charge::weights(vec![1; n])])
+            .unwrap();
+        let theta = faer::Mat::<C64>::from_fn(2, 2, |r, c| {
+            if r == 1 && c == 0 {
+                C64::new(1.0, 0.0)
+            } else {
+                C64::new(0.0, 0.0)
+            }
+        });
+        let mut tiny = faer::Mat::<C64>::zeros(2, 2);
+        tiny[(0, 0)] = C64::new(1e-160, 0.0);
+        for absorb in [super::Absorb::Right, super::Absorb::Left] {
+            let mut d = dense.clone();
+            d.split_perturbed(0, theta.as_ref(), &[tiny.clone()], 1e-4, absorb);
+            assert!(d.norm_sqr().is_finite());
+
+            let mut s = sym.clone();
+            s.split_perturbed_symmetric(0, theta.as_ref(), &[tiny.clone()], 1e-4, absorb);
+            assert!(s.norm_sqr().is_finite());
+            assert!(s.charge_violation() < 1e-14);
+        }
+        // Also verify zero-norm perturbation blocks and zero-norm theta stay finite.
+        let zero = faer::Mat::<C64>::zeros(2, 2);
+        dense.split_perturbed(0, theta.as_ref(), std::slice::from_ref(&zero), 1e-4, super::Absorb::Right);
+        sym.split_perturbed_symmetric(0, theta.as_ref(), &[zero], 1e-4, super::Absorb::Right);
+        assert!((dense.norm_sqr() - 1.0).abs() < 1e-14);
+        assert!((sym.norm_sqr() - 1.0).abs() < 1e-14);
     }
 }

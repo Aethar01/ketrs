@@ -320,26 +320,117 @@ pub(crate) fn tridiagonal_lowest(a: &[f64], b: &[f64]) -> (f64, Vec<f64>) {
     }
     let lambda = 0.5 * (lo + hi);
 
-    // Inverse iteration: solve (T − λ)y = y_prev by the Thomas algorithm.
-    let mut y = vec![1.0; m];
+    // Inverse iteration: solve (T − λ)y = y_prev with partial-pivoted
+    // tridiagonal Gaussian elimination (preventing pivot blow-up and overflow
+    // in unpivoted Thomas elimination on large/near-degenerate Krylov spaces)
+    // and overflow-safe Euclidean normalisation.
+    let mut y = vec![1.0 / (m as f64).sqrt(); m];
     for _ in 0..3 {
-        let mut c = vec![0.0; m];
-        let mut d = vec![0.0; m];
-        for i in 0..m {
-            let sub = if i > 0 { b[i - 1] } else { 0.0 };
-            let mut pivot = a[i] - lambda - if i > 0 { sub * c[i - 1] } else { 0.0 };
-            if pivot.abs() < tiny {
-                pivot = tiny;
-            }
-            c[i] = if i < b.len() { b[i] / pivot } else { 0.0 };
-            d[i] = (y[i] - if i > 0 { sub * d[i - 1] } else { 0.0 }) / pivot;
+        y = solve_tridiag_pivoted(a, b, lambda, &y, tiny);
+        let max_abs = y.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+        if max_abs == 0.0 || !max_abs.is_finite() {
+            return tridiagonal_lowest_evd(a, b);
         }
-        for i in (0..m).rev() {
-            y[i] = d[i] - if i + 1 < m { c[i] * y[i + 1] } else { 0.0 };
+        let norm = max_abs
+            * y.iter()
+                .map(|v| {
+                    let s = v / max_abs;
+                    s * s
+                })
+                .sum::<f64>()
+                .sqrt();
+        if norm == 0.0 || !norm.is_finite() {
+            return tridiagonal_lowest_evd(a, b);
         }
-        let n = y.iter().map(|v| v * v).sum::<f64>().sqrt();
-        y.iter_mut().for_each(|v| *v /= n);
+        y.iter_mut().for_each(|v| *v /= norm);
     }
+    (lambda, y)
+}
+
+/// Solve `(T - lambda I) x = rhs` for symmetric tridiagonal `T(a, b)` using
+/// Gaussian elimination with row partial pivoting (LAPACK `dgttrf`/`dgttrs`).
+fn solve_tridiag_pivoted(a: &[f64], b: &[f64], lambda: f64, rhs: &[f64], tiny: f64) -> Vec<f64> {
+    let m = a.len();
+    let mut diag: Vec<f64> = a.iter().map(|&ai| ai - lambda).collect();
+    let mut upper: Vec<f64> = b.to_vec();
+    let mut upper2 = vec![0.0; m.saturating_sub(2)];
+    let mut x = rhs.to_vec();
+
+    for i in 0..m - 1 {
+        let sub = b[i];
+        if diag[i].abs() >= sub.abs() {
+            let piv = if diag[i].abs() < tiny {
+                if diag[i] < 0.0 { -tiny } else { tiny }
+            } else {
+                diag[i]
+            };
+            diag[i] = piv;
+            let mult = sub / piv;
+            diag[i + 1] -= mult * upper[i];
+            x[i + 1] -= mult * x[i];
+        } else {
+            // Swap rows i and i + 1.
+            let piv = if sub.abs() < tiny {
+                if sub < 0.0 { -tiny } else { tiny }
+            } else {
+                sub
+            };
+            let mult = diag[i] / piv;
+            let u_i = upper[i];
+            let d_next = diag[i + 1];
+            let u_next = if i + 1 < b.len() { b[i + 1] } else { 0.0 };
+            diag[i] = piv;
+            upper[i] = d_next;
+            if i + 2 < m {
+                upper2[i] = u_next;
+            }
+            diag[i + 1] = u_i - mult * d_next;
+            if i + 1 < upper.len() {
+                upper[i + 1] = -mult * u_next;
+            }
+            x.swap(i, i + 1);
+            x[i + 1] -= mult * x[i];
+        }
+    }
+    if diag[m - 1].abs() < tiny {
+        diag[m - 1] = if diag[m - 1] < 0.0 { -tiny } else { tiny };
+    }
+    // Back-substitution with overflow protection.
+    for i in (0..m).rev() {
+        let mut s = x[i];
+        if i + 1 < m {
+            s -= upper[i] * x[i + 1];
+        }
+        if i + 2 < m {
+            s -= upper2[i] * x[i + 2];
+        }
+        x[i] = s / diag[i];
+        if x[i].abs() > 1e100 {
+            let scale = x[i].abs();
+            for v in &mut x[i..] {
+                *v /= scale;
+            }
+        }
+    }
+    x
+}
+
+/// Dense symmetric eigendecomposition fallback for `tridiagonal_lowest`.
+fn tridiagonal_lowest_evd(a: &[f64], b: &[f64]) -> (f64, Vec<f64>) {
+    let m = a.len();
+    let mut t = faer::Mat::<f64>::zeros(m, m);
+    for i in 0..m {
+        t[(i, i)] = a[i];
+        if i < b.len() {
+            t[(i, i + 1)] = b[i];
+            t[(i + 1, i)] = b[i];
+        }
+    }
+    let evd = t
+        .self_adjoint_eigen(faer::Side::Lower)
+        .expect("tridiagonal eigendecomposition converges");
+    let lambda = evd.S().column_vector()[0];
+    let y = (0..m).map(|i| evd.U()[(i, 0)]).collect();
     (lambda, y)
 }
 
@@ -414,5 +505,34 @@ mod tests {
             let right = if i < 5 { -y[i + 1] } else { 0.0 };
             assert!((2.0 * y[i] + left + right - lambda * y[i]).abs() < 1e-10);
         }
+    }
+
+    #[test]
+    fn tridiagonal_lowest_does_not_overflow_on_large_near_degenerate_matrices() {
+        // Regression test: unpivoted Thomas elimination overflowed past 1e154
+        // on large Krylov spaces with small off-diagonals / large spectral shift
+        // (such as L=20 lattice gauge DMRG), yielding inf/inf = NaN.
+        let m = 250;
+        let a: Vec<f64> = (0..m)
+            .map(|i| -4000.0 + if i % 2 == 0 { 0.0 } else { 100.0 } + 1e-6 * i as f64)
+            .collect();
+        let b: Vec<f64> = (0..m - 1).map(|i| if i % 10 == 0 { 1e-8 } else { 5.0 }).collect();
+        let (lambda, y) = tridiagonal_lowest(&a, &b);
+        assert!(lambda.is_finite(), "non-finite lambda: {lambda}");
+        assert!(y.iter().all(|v| v.is_finite()), "non-finite eigenvector");
+        let nrm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!((nrm - 1.0).abs() < 1e-10, "norm {nrm}");
+        let mut max_res = 0.0f64;
+        for i in 0..m {
+            let mut ty = a[i] * y[i];
+            if i > 0 {
+                ty += b[i - 1] * y[i - 1];
+            }
+            if i + 1 < m {
+                ty += b[i] * y[i + 1];
+            }
+            max_res = max_res.max((ty - lambda * y[i]).abs());
+        }
+        assert!(max_res < 1e-8, "residual {max_res}");
     }
 }
