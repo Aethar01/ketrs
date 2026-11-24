@@ -29,6 +29,7 @@ mod layers;
 mod linalg;
 mod measure;
 mod mpo;
+mod periodic;
 mod symmetric;
 mod symmetric_expand;
 mod tdvp;
@@ -37,6 +38,7 @@ use linalg::{matmul, thin_svd};
 
 pub use charges::Charge;
 pub use dmrg::{DmrgOptions, DmrgResult};
+pub use periodic::PeriodicMps;
 pub use symmetric::MAX_CHARGE_LEAK;
 
 use crate::circuit::{Circuit, Operation};
@@ -134,7 +136,7 @@ pub struct Mps {
 /// A GPU context held by an [`Mps`].
 #[cfg(feature = "gpu")]
 #[derive(Clone)]
-struct GpuHandle(std::sync::Arc<crate::gpu::GpuContext>);
+pub(super) struct GpuHandle(pub(super) std::sync::Arc<crate::gpu::GpuContext>);
 
 #[cfg(feature = "gpu")]
 impl std::fmt::Debug for GpuHandle {
@@ -223,6 +225,27 @@ impl Mps {
         let mut mps = Self::zero(circuit.n_qubits(), options);
         mps.run(circuit)?;
         Ok(mps)
+    }
+
+    fn raw_tensors(&self) -> &[Tensor] {
+        &self.tensors
+    }
+
+    fn from_raw_tensors(tensors: Vec<Tensor>, options: MpsOptions) -> Self {
+        let n = tensors.len();
+        Mps {
+            tensors,
+            center: n - 1,
+            options,
+            truncation_error: 0.0,
+            symmetry: None,
+            #[cfg(feature = "gpu")]
+            gpu: None,
+        }
+    }
+
+    fn normalise_center_zero(&mut self) {
+        self.move_center(0);
     }
 
     /// Number of qubits.

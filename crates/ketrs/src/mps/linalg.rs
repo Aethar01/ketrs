@@ -8,6 +8,7 @@
 
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::linalg::evd::{ComputeEigenvectors, self_adjoint_evd, self_adjoint_evd_scratch};
 use faer::linalg::householder::{
     apply_block_householder_sequence_on_the_left_in_place_scratch,
     apply_block_householder_sequence_on_the_left_in_place_with_conj,
@@ -40,14 +41,19 @@ where
     R: Conjugate<Canonical = C64>,
 {
     let mut out = Mat::<C64>::zeros(a.nrows(), b.ncols());
-    let size = (a.nrows() * a.ncols()).max(b.nrows() * b.ncols());
+    let flops = a.nrows() * a.ncols() * b.ncols();
+    let par_mode = if flops >= 1 << 26 {
+        faer::get_global_parallelism()
+    } else {
+        Par::Seq
+    };
     faer_matmul(
         out.as_mut(),
         Accum::Replace,
         a,
         b,
         C64::new(1.0, 0.0),
-        par(size),
+        par_mode,
     );
     out
 }
@@ -87,6 +93,121 @@ pub(crate) fn qr_r(a: MatRef<'_, C64>) -> Mat<C64> {
             C64::new(0.0, 0.0)
         }
     })
+}
+
+/// Thin QR factorisation `a = Q R` (`Q` is `m × k`, `R` is `k × n` with
+/// `k = min(m, n)`), running sequentially below [`QR_PARALLEL_SIZE`] so small
+/// MPS matrices never pay faer's global thread-pool wakeup overhead.
+pub(crate) fn thin_qr(a: MatRef<'_, C64>) -> (Mat<C64>, Mat<C64>) {
+    let (m, n) = (a.nrows(), a.ncols());
+    let k = m.min(n);
+    if k == 0 {
+        return (Mat::zeros(m, 0), Mat::zeros(0, n));
+    }
+    let par = if m * n >= QR_PARALLEL_SIZE {
+        faer::get_global_parallelism()
+    } else {
+        Par::Seq
+    };
+    let mut factors = a.to_owned();
+    let block = recommended_block_size::<C64>(m, n);
+    let mut coeffs = Mat::<C64>::zeros(block, k);
+    let req = qr_in_place_scratch::<C64>(m, n, block, par, Default::default());
+    let mut buffer = MemBuffer::new(req);
+    qr_in_place(
+        factors.as_mut(),
+        coeffs.as_mut(),
+        par,
+        MemStack::new(&mut buffer),
+        Default::default(),
+    );
+    let r = Mat::from_fn(k, n, |i, j| {
+        if i <= j {
+            factors[(i, j)]
+        } else {
+            C64::new(0.0, 0.0)
+        }
+    });
+    let mut q = Mat::<C64>::from_fn(m, k, |i, j| {
+        if i == j {
+            C64::new(1.0, 0.0)
+        } else {
+            C64::new(0.0, 0.0)
+        }
+    });
+    let req_q = apply_block_householder_sequence_on_the_left_in_place_scratch::<C64>(m, block, k);
+    let mut buf_q = MemBuffer::new(req_q);
+    apply_block_householder_sequence_on_the_left_in_place_with_conj(
+        factors.as_ref().subcols(0, k),
+        coeffs.as_ref(),
+        Conj::No,
+        q.as_mut(),
+        par,
+        MemStack::new(&mut buf_q),
+    );
+    (q, r)
+}
+
+/// Eigendecomposition `a = U diag(λ) U†` of a Hermitian matrix (reading the
+/// lower triangle), running sequentially for `n < 256` to avoid thread-pool
+/// contention on small local/subspace matrices.
+pub(crate) fn hermitian_evd(a: MatRef<'_, C64>) -> (Vec<f64>, Mat<C64>) {
+    let n = a.nrows();
+    debug_assert_eq!(n, a.ncols());
+    if n == 0 {
+        return (Vec::new(), Mat::zeros(0, 0));
+    }
+    let par = if n >= 1024 {
+        faer::get_global_parallelism()
+    } else {
+        Par::Seq
+    };
+    let mut s = Diag::<C64>::zeros(n);
+    let mut u = Mat::<C64>::zeros(n, n);
+    let params = Default::default();
+    let req = self_adjoint_evd_scratch::<C64>(n, ComputeEigenvectors::Yes, par, params);
+    let mut buf = MemBuffer::new(req);
+    self_adjoint_evd(
+        a,
+        s.as_mut(),
+        Some(u.as_mut()),
+        par,
+        MemStack::new(&mut buf),
+        params,
+    )
+    .expect("Hermitian eigendecomposition converges");
+    let vals = (0..n).map(|k| s.column_vector()[k].re).collect();
+    (vals, u)
+}
+
+/// Real symmetric eigendecomposition `a = U diag(λ) Uᵀ` (sequential for `n < 256`).
+pub(crate) fn symmetric_evd_f64(a: MatRef<'_, f64>) -> (Vec<f64>, Mat<f64>) {
+    let n = a.nrows();
+    debug_assert_eq!(n, a.ncols());
+    if n == 0 {
+        return (Vec::new(), Mat::zeros(0, 0));
+    }
+    let par = if n >= 1024 {
+        faer::get_global_parallelism()
+    } else {
+        Par::Seq
+    };
+    let mut s = Diag::<f64>::zeros(n);
+    let mut u = Mat::<f64>::zeros(n, n);
+    let params = Default::default();
+    let req = self_adjoint_evd_scratch::<f64>(n, ComputeEigenvectors::Yes, par, params);
+    let mut buf = MemBuffer::new(req);
+    self_adjoint_evd(
+        a,
+        s.as_mut(),
+        Some(u.as_mut()),
+        par,
+        MemStack::new(&mut buf),
+        params,
+    )
+    .expect("symmetric eigendecomposition converges");
+    let vals = (0..n).map(|k| s.column_vector()[k]).collect();
+    (vals, u)
 }
 
 /// Orthonormal rows spanning the orthogonal complement of the row space of

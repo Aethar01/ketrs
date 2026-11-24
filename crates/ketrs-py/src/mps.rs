@@ -1,7 +1,7 @@
 //! Python bindings for matrix product states.
 
 use super::{Observable, PyCircuit, PyStatevector, State, clbit_counts, rng_from_seed, to_py_err};
-use ketrs::{Charge, Complex64 as C64, DmrgOptions, Mps, MpsOptions, Statevector};
+use ketrs::{Charge, Complex64 as C64, DmrgOptions, Mps, MpsOptions, PeriodicMps, Statevector};
 use numpy::PyArray1;
 use pyo3::exceptions::{PyRuntimeWarning, PyValueError};
 use pyo3::prelude::*;
@@ -612,7 +612,461 @@ impl PyMps {
     }
 }
 
+/// A periodic-trace matrix product state (`pMPS`) on a closed ring of qubits:
+/// `ψ(b₀ … bₙ₋₁) = Tr(A[0][b₀] ⋯ A[n−1][bₙ₋₁])`.
+///
+/// Preserves cutwidth 1 and translation symmetry across the `(n - 1, 0)` seam,
+/// with fast `O(p D χ³)` Pippan–White–Evertz transfer-matrix compression for
+/// periodic DMRG, TDVP, and TEBD, and exact conserved `U(1)` / `Z_n` charges
+/// via `with_charges`.
+#[pyclass(name = "PeriodicMPS", module = "ketrs")]
+struct PyPeriodicMps {
+    inner: PeriodicMps,
+    rng: StdRng,
+}
+
+#[pymethods]
+impl PyPeriodicMps {
+    /// `|0…0⟩` on a periodic ring of `n_qubits` qubits.
+    #[new]
+    #[pyo3(signature = (n_qubits, max_bond=64, cutoff=1e-14, transfer_rank=None, transfer_cutoff=1e-12, seed=None))]
+    fn new(
+        n_qubits: usize,
+        max_bond: usize,
+        cutoff: f64,
+        transfer_rank: Option<usize>,
+        transfer_cutoff: f64,
+        seed: Option<u64>,
+    ) -> PyResult<Self> {
+        if n_qubits == 0 {
+            return Err(PyValueError::new_err("a PeriodicMPS needs at least one qubit"));
+        }
+        if !(transfer_cutoff >= 0.0 && transfer_cutoff.is_finite()) {
+            return Err(PyValueError::new_err(
+                "transfer_cutoff must be finite and non-negative",
+            ));
+        }
+        let mut inner = PeriodicMps::zero(n_qubits, options(max_bond, cutoff)?);
+        inner.set_transfer_rank(transfer_rank);
+        inner.set_transfer_cutoff(transfer_cutoff);
+        Ok(PyPeriodicMps {
+            inner,
+            rng: rng_from_seed(seed),
+        })
+    }
+
+    /// Run `circuit` on `|0…0⟩` on the periodic ring.
+    #[staticmethod]
+    #[pyo3(signature = (circuit, max_bond=64, cutoff=1e-14, seed=None))]
+    fn from_circuit(
+        py: Python<'_>,
+        circuit: PyRef<'_, PyCircuit>,
+        max_bond: usize,
+        cutoff: f64,
+        seed: Option<u64>,
+    ) -> PyResult<Self> {
+        let opts = options(max_bond, cutoff)?;
+        let circ = &circuit.inner;
+        Ok(PyPeriodicMps {
+            inner: py
+                .detach(|| PeriodicMps::from_circuit(circ, opts))
+                .map_err(to_py_err)?,
+            rng: rng_from_seed(seed),
+        })
+    }
+
+    /// Wrap an open-boundary `MPS` as a `PeriodicMPS` with seam bond dimension 1.
+    #[staticmethod]
+    fn from_mps(mps: PyRef<'_, PyMps>) -> Self {
+        PyPeriodicMps {
+            inner: PeriodicMps::from_mps(&mps.inner),
+            rng: mps.rng.clone(),
+        }
+    }
+
+    /// A random normalised periodic MPS with bond dimension `bond` on every
+    /// ring bond (including the `(n - 1, 0)` seam bond).
+    #[staticmethod]
+    #[pyo3(signature = (n_qubits, bond=4, seed=0, max_bond=64, cutoff=1e-14))]
+    fn random(
+        n_qubits: usize,
+        bond: usize,
+        seed: u64,
+        max_bond: usize,
+        cutoff: f64,
+    ) -> PyResult<Self> {
+        if n_qubits == 0 || bond == 0 {
+            return Err(PyValueError::new_err("need at least one qubit and bond"));
+        }
+        Ok(PyPeriodicMps {
+            inner: PeriodicMps::random(n_qubits, bond, seed, options(max_bond, cutoff)?),
+            rng: rng_from_seed(Some(seed)),
+        })
+    }
+
+    /// Find the ground state of `hamiltonian` on the periodic ring by two-site
+    /// periodic DMRG. Returns `(energy, sweep_energies, converged)`.
+    #[pyo3(signature = (
+        hamiltonian,
+        max_bond=64,
+        cutoff=1e-12,
+        max_sweeps=20,
+        tolerance=1e-10,
+        noise=1e-4,
+        noise_decay=0.1,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn dmrg(
+        &mut self,
+        py: Python<'_>,
+        hamiltonian: Observable,
+        max_bond: usize,
+        cutoff: f64,
+        max_sweeps: usize,
+        tolerance: f64,
+        noise: f64,
+        noise_decay: f64,
+    ) -> PyResult<(f64, Vec<f64>, bool)> {
+        options(max_bond, cutoff)?;
+        if !(noise >= 0.0 && noise.is_finite() && (0.0..=1.0).contains(&noise_decay)) {
+            return Err(PyValueError::new_err(
+                "noise must be finite and non-negative, and noise_decay in [0, 1]",
+            ));
+        }
+        let sum = hamiltonian.into_sum()?;
+        let opts = DmrgOptions {
+            max_bond,
+            cutoff,
+            max_sweeps,
+            tolerance,
+            noise,
+            noise_decay,
+            ..DmrgOptions::default()
+        };
+        let pmps = &mut self.inner;
+        let result = py.detach(|| pmps.dmrg(&sum, &opts)).map_err(to_py_err)?;
+        if result.unconverged_solves > 0 {
+            let message = format!(
+                "{} periodic local solves did not reach their tolerance; DMRG went on with their best Ritz pairs",
+                result.unconverged_solves
+            );
+            let message = std::ffi::CString::new(message).expect("no NUL bytes");
+            PyErr::warn(py, &py.get_type::<PyRuntimeWarning>(), &message, 1)?;
+        }
+        Ok((result.energy, result.sweep_energies, result.converged))
+    }
+
+    /// Evolve by `exp(-iHt)` with `steps` second-order steps of periodic two-site TDVP.
+    #[pyo3(signature = (hamiltonian, time, steps=1))]
+    fn tdvp(
+        &mut self,
+        py: Python<'_>,
+        hamiltonian: Observable,
+        time: f64,
+        steps: usize,
+    ) -> PyResult<()> {
+        let sum = hamiltonian.into_sum()?;
+        let pmps = &mut self.inner;
+        py.detach(|| pmps.tdvp(&sum, time, steps))
+            .map_err(to_py_err)
+    }
+
+    /// Periodic TEBD: `steps` Trotter–Suzuki steps of the given order for `exp(-iHt)`.
+    #[pyo3(signature = (hamiltonian, time, steps=1, order=2))]
+    fn tebd(
+        &mut self,
+        py: Python<'_>,
+        hamiltonian: Observable,
+        time: f64,
+        steps: usize,
+        order: usize,
+    ) -> PyResult<()> {
+        let sum = hamiltonian.into_sum()?;
+        let pmps = &mut self.inner;
+        py.detach(|| pmps.tebd(&sum, time, steps, order))
+            .map_err(to_py_err)
+    }
+
+    /// Apply unitary `circuit` on the periodic ring.
+    fn run(&mut self, py: Python<'_>, circuit: PyRef<'_, PyCircuit>) -> PyResult<()> {
+        let (pmps, circ) = (&mut self.inner, &circuit.inner);
+        py.detach(|| pmps.run(circ)).map_err(to_py_err)
+    }
+
+    #[getter]
+    fn n_qubits(&self) -> usize {
+        self.inner.n_qubits()
+    }
+
+    /// Bond dimension of every ring bond (length `n_qubits`, with the last
+    /// entry being the `(n - 1, 0)` seam bond).
+    #[getter]
+    fn bond_dimensions(&self) -> Vec<usize> {
+        self.inner.bond_dimensions()
+    }
+
+    #[getter]
+    fn truncation_error(&self) -> f64 {
+        self.inner.truncation_error()
+    }
+
+    /// Whether `dmrg` and `tdvp` local effective operators run on the GPU
+    /// (default False). Needs a build with the `gpu` feature and a Vulkan GPU
+    /// supporting 64-bit floats and buffer device addresses.
+    #[getter]
+    fn gpu(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        return self.inner.gpu().is_some();
+        #[cfg(not(feature = "gpu"))]
+        false
+    }
+
+    #[setter]
+    fn set_gpu(&mut self, enabled: bool) -> PyResult<()> {
+        #[cfg(feature = "gpu")]
+        {
+            let ctx = if enabled {
+                Some(super::gpu::context()?)
+            } else {
+                None
+            };
+            self.inner.set_gpu(ctx).map_err(to_py_err)
+        }
+        #[cfg(not(feature = "gpu"))]
+        if enabled {
+            Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "ketrs was built without GPU support (the `gpu` feature)",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[getter]
+    fn max_bond(&self) -> usize {
+        self.inner.options().max_bond
+    }
+
+    #[setter]
+    fn set_max_bond(&mut self, max_bond: usize) -> PyResult<()> {
+        let cutoff = self.inner.options().cutoff;
+        self.inner.set_options(options(max_bond, cutoff)?);
+        Ok(())
+    }
+
+    #[getter]
+    fn cutoff(&self) -> f64 {
+        self.inner.options().cutoff
+    }
+
+    #[setter]
+    fn set_cutoff(&mut self, cutoff: f64) -> PyResult<()> {
+        let max_bond = self.inner.options().max_bond;
+        self.inner.set_options(options(max_bond, cutoff)?);
+        Ok(())
+    }
+
+    /// PWE opposite-half transfer-matrix rank cap (`None` = adaptive, `0` = exact).
+    #[getter]
+    fn transfer_rank(&self) -> Option<usize> {
+        self.inner.transfer_rank()
+    }
+
+    #[setter]
+    fn set_transfer_rank(&mut self, rank: Option<usize>) {
+        self.inner.set_transfer_rank(rank);
+    }
+
+    /// Relative singular-value cutoff for PWE transfer-matrix compression.
+    #[getter]
+    fn transfer_cutoff(&self) -> f64 {
+        self.inner.transfer_cutoff()
+    }
+
+    #[setter]
+    fn set_transfer_cutoff(&mut self, cutoff: f64) -> PyResult<()> {
+        if !(cutoff >= 0.0 && cutoff.is_finite()) {
+            return Err(PyValueError::new_err(
+                "transfer_cutoff must be finite and non-negative",
+            ));
+        }
+        self.inner.set_transfer_cutoff(cutoff);
+        Ok(())
+    }
+
+    fn norm_sqr(&self) -> f64 {
+        self.inner.norm_sqr()
+    }
+
+    fn normalise(&mut self) {
+        self.inner.normalise();
+    }
+
+    /// Exact periodic trace inner product `⟨self|other⟩`.
+    fn inner(&self, py: Python<'_>, other: PyRef<'_, PyPeriodicMps>) -> PyResult<C64> {
+        let (a, b) = (&self.inner, &other.inner);
+        py.detach(|| a.inner(b)).map_err(to_py_err)
+    }
+
+    /// Exact expectation value `⟨ψ|H|ψ⟩ / ⟨ψ|ψ⟩`.
+    fn expectation(&self, py: Python<'_>, observable: Observable) -> PyResult<f64> {
+        let sum = observable.into_sum()?;
+        let pmps = &self.inner;
+        py.detach(|| pmps.expectation(&sum)).map_err(to_py_err)
+    }
+
+    /// Exact batched expectation values `⟨ψ|O|ψ⟩ / ⟨ψ|ψ⟩` for every observable.
+    fn expectations(&self, py: Python<'_>, observables: Vec<Observable>) -> PyResult<Vec<f64>> {
+        let sums = observables
+            .into_iter()
+            .map(Observable::into_sum)
+            .collect::<PyResult<Vec<_>>>()?;
+        let pmps = &self.inner;
+        py.detach(|| pmps.expectations(&sums)).map_err(to_py_err)
+    }
+
+    /// Exact amplitude `Tr(A[0][b₀] ⋯ A[n−1][bₙ₋₁])` of a basis state.
+    fn amplitude(&self, state: BasisState) -> PyResult<C64> {
+        Ok(self.inner.amplitude(&state.bits(self.inner.n_qubits())?))
+    }
+
+    /// Expand to a full `Statevector`; at most 24 qubits.
+    fn to_statevector(&self) -> PyResult<PyStatevector> {
+        if self.inner.n_qubits() > 24 {
+            return Err(PyValueError::new_err("too many qubits to expand"));
+        }
+        let state = Statevector::from_amplitudes(self.inner.to_amplitudes()).map_err(to_py_err)?;
+        Ok(PyStatevector::wrap(State::Complex(state), self.rng.clone()))
+    }
+
+    /// Convert to a symmetric `PeriodicMPS` with conserved `charges`.
+    fn with_charges(&self, charges: Vec<PyCharge>) -> PyResult<Self> {
+        let charges: Vec<Charge> = charges.into_iter().map(|c| c.inner).collect();
+        Ok(PyPeriodicMps {
+            inner: self.inner.with_charges(&charges).map_err(to_py_err)?,
+            rng: self.rng.clone(),
+        })
+    }
+
+    /// The same state without charges, as a dense `PeriodicMPS`.
+    fn to_dense(&self) -> Self {
+        PyPeriodicMps {
+            inner: self.inner.to_dense(),
+            rng: self.rng.clone(),
+        }
+    }
+
+    #[getter]
+    fn charges(&self) -> Option<Vec<PyCharge>> {
+        self.inner
+            .charges()
+            .map(|cs| cs.iter().map(|c| PyCharge { inner: c.clone() }).collect())
+    }
+
+    #[getter]
+    fn total_charge(&self) -> Option<Vec<i64>> {
+        self.inner.total_charge()
+    }
+
+    /// The sectors of ring bond `bond` (between `bond` and `(bond + 1) % n`),
+    /// where `bond = n - 1` is the periodic seam bond.
+    fn bond_sectors(&self, bond: usize) -> PyResult<Option<BondSectors>> {
+        if bond >= self.inner.n_qubits() {
+            return Err(PyValueError::new_err(format!("no bond {bond}")));
+        }
+        Ok(self.inner.bond_sectors(bond))
+    }
+
+    #[pyo3(signature = (qubits, outcome=None))]
+    fn project(&mut self, qubits: Projection, outcome: Option<u8>) -> PyResult<f64> {
+        let bit = |b: u8| match b {
+            0 | 1 => Ok(b == 1),
+            _ => Err(PyValueError::new_err("an outcome must be 0 or 1")),
+        };
+        let outcomes = match (qubits, outcome) {
+            (Projection::One(qubit), Some(b)) => vec![(qubit, bit(b)?)],
+            (Projection::Many(pairs), None) => pairs
+                .into_iter()
+                .map(|(qubit, b)| Ok((qubit, bit(b)?)))
+                .collect::<PyResult<_>>()?,
+            (Projection::One(_), None) => {
+                return Err(PyValueError::new_err(
+                    "project(qubit, outcome) needs an outcome",
+                ));
+            }
+            (Projection::Many(_), Some(_)) => {
+                return Err(PyValueError::new_err(
+                    "give either project(qubit, outcome) or project([(qubit, outcome), ...])",
+                ));
+            }
+        };
+        self.inner.project_all(&outcomes).map_err(to_py_err)
+    }
+
+    fn sample<'py>(
+        &mut self,
+        py: Python<'py>,
+        shots: usize,
+    ) -> PyResult<Bound<'py, PyArray1<usize>>> {
+        if self.inner.n_qubits() > usize::BITS as usize {
+            return Err(PyValueError::new_err("sampling is limited to 64 qubits"));
+        }
+        let samples = self.inner.sample(shots, &mut self.rng);
+        Ok(PyArray1::from_vec(py, samples))
+    }
+
+    fn sample_counts<'py>(
+        &mut self,
+        py: Python<'py>,
+        shots: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if self.inner.n_qubits() > usize::BITS as usize {
+            return Err(PyValueError::new_err("sampling is limited to 64 qubits"));
+        }
+        let n = self.inner.n_qubits();
+        let dict = PyDict::new(py);
+        for (index, count) in self.inner.sample_counts(shots, &mut self.rng) {
+            dict.set_item(format!("{index:0n$b}"), count)?;
+        }
+        Ok(dict)
+    }
+
+    #[pyo3(signature = (seed=None))]
+    fn copy(&self, seed: Option<u64>) -> Self {
+        PyPeriodicMps {
+            inner: self.inner.clone(),
+            rng: match seed {
+                Some(_) => rng_from_seed(seed),
+                None => self.rng.clone(),
+            },
+        }
+    }
+
+    fn __copy__(&self) -> Self {
+        self.copy(None)
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.copy(None)
+    }
+
+    fn __repr__(&self) -> String {
+        let max = self.inner.bond_dimensions().into_iter().max().unwrap_or(1);
+        let seam = self.inner.bond_dimensions().last().copied().unwrap_or(1);
+        let charges = match self.inner.total_charge() {
+            Some(total) => format!(", charges={total:?}"),
+            None => String::new(),
+        };
+        format!(
+            "PeriodicMPS(n_qubits={}, max_bond={max}, seam_bond={seam}, truncation_error={:.1e}{charges})",
+            self.inner.n_qubits(),
+            self.inner.truncation_error()
+        )
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCharge>()?;
-    m.add_class::<PyMps>()
+    m.add_class::<PyMps>()?;
+    m.add_class::<PyPeriodicMps>()
 }

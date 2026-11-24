@@ -186,6 +186,136 @@ impl Mpo {
         Ok(Mpo::from_terms(&kept, n_qubits, shift, Some(charges)))
     }
 
+    /// Expand `hamiltonian` into `(shift, terms)` of elementary single-qubit
+    /// operators (Pauli operators when `charges` is `None`, or charge-graded
+    /// ladder operators with symmetry verification when `charges` is `Some`).
+    pub(super) fn elementary_terms(
+        hamiltonian: &PauliSum,
+        n_qubits: usize,
+        charges: Option<&Charges>,
+    ) -> Result<(f64, Vec<Term>), Error> {
+        match charges {
+            None => {
+                let (shift, terms) = pauli_terms(hamiltonian, n_qubits)?;
+                let terms: Vec<Term> = terms
+                    .into_iter()
+                    .map(|(c, ops)| {
+                        let ops = ops.into_iter().map(|(q, p)| (q, Local::from(p))).collect();
+                        (C64::new(c, 0.0), ops)
+                    })
+                    .collect();
+                Ok((shift, terms))
+            }
+            Some(charges) => {
+                let (shift, terms) = pauli_terms(hamiltonian, n_qubits)?;
+                let scale = terms.iter().map(|t| t.0.abs()).fold(0.0, f64::max);
+                let mut strings: HashMap<Suffix, (C64, Vec<usize>)> = HashMap::new();
+                for (index, (c, ops)) in terms.iter().enumerate() {
+                    let split = ops
+                        .iter()
+                        .filter(|&&(q, p)| {
+                            matches!(p, Pauli::X | Pauli::Y) && charges.distinguishes(q)
+                        })
+                        .count();
+                    if split > MAX_SPLIT {
+                        return Err(Error::InvalidArgument(format!(
+                            "term {} has {split} X or Y factors on charged qubits, more than {MAX_SPLIT}",
+                            describe(ops)
+                        )));
+                    }
+                    let mut expanded: Vec<Term> =
+                        vec![(C64::new(*c, 0.0), Vec::with_capacity(ops.len()))];
+                    for &(q, p) in ops {
+                        let ladder = match p {
+                            Pauli::X if charges.distinguishes(q) => {
+                                [C64::new(1.0, 0.0), C64::new(1.0, 0.0)]
+                            }
+                            Pauli::Y if charges.distinguishes(q) => {
+                                [C64::new(0.0, -1.0), C64::new(0.0, 1.0)]
+                            }
+                            _ => {
+                                expanded.iter_mut().for_each(|t| t.1.push((q, p.into())));
+                                continue;
+                            }
+                        };
+                        expanded = expanded
+                            .into_iter()
+                            .flat_map(|(c, ops)| {
+                                [(Local::Lower, ladder[0]), (Local::Raise, ladder[1])].map(
+                                    |(op, f)| {
+                                        let mut ops = ops.clone();
+                                        ops.push((q, op));
+                                        (c * f, ops)
+                                    },
+                                )
+                            })
+                            .collect();
+                    }
+                    for (c, ops) in expanded {
+                        let entry = strings
+                            .entry(ops)
+                            .or_insert((C64::new(0.0, 0.0), Vec::new()));
+                        entry.0 += c;
+                        entry.1.push(index);
+                    }
+                }
+                let tolerance = 1e-12 * scale;
+                let mut kept: Vec<Term> = Vec::new();
+                let mut broken = Vec::new();
+                for (ops, (c, sources)) in strings {
+                    if c.norm() <= tolerance {
+                        continue;
+                    }
+                    let change = charge_change(&ops, charges);
+                    if change.iter().any(|&x| x != 0) {
+                        broken.push((change, sources));
+                    } else {
+                        kept.push((c, ops));
+                    }
+                }
+                if !broken.is_empty() {
+                    broken.sort();
+                    let examples: Vec<String> = broken
+                        .iter()
+                        .take(3)
+                        .map(|(change, sources)| {
+                            let names: Vec<String> = sources
+                                .iter()
+                                .take(4)
+                                .map(|&k| describe(&terms[k].1))
+                                .collect();
+                            format!("{} change the charges by {change:?}", names.join(" + "))
+                        })
+                        .collect();
+                    return Err(Error::BreaksSymmetry(format!(
+                        "the Hamiltonian doesn't conserve the charges: {} part(s) don't, e.g. {}",
+                        broken.len(),
+                        examples.join("; ")
+                    )));
+                }
+                kept.sort_by(|a, b| a.1.cmp(&b.1));
+                Ok((shift, kept))
+            }
+        }
+    }
+
+    /// Build an automaton MPO from pre-expanded local operator terms.
+    pub(super) fn from_local_terms(
+        terms: &[Term],
+        n_qubits: usize,
+        shift: f64,
+        charges: Option<&Charges>,
+    ) -> Mpo {
+        let mut mpo = Mpo::from_terms(terms, n_qubits, shift, charges);
+        // For a crossing-term MPO whose terms all share a non-zero total charge
+        // change `δ`, record `δ` on `channels[0][0]` so callers know the total shift.
+        if let (Some(ch), Some(cuts), Some((_, ops))) = (charges, &mut mpo.channels, terms.first())
+        {
+            cuts[0][0] = charge_change(ops, ch);
+        }
+        mpo
+    }
+
     /// The automaton MPO of `terms`, each a product on increasing qubits,
     /// with the charge of each channel if `charges` are given.
     fn from_terms(terms: &[Term], n_qubits: usize, shift: f64, charges: Option<&Charges>) -> Mpo {

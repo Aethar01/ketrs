@@ -1268,3 +1268,141 @@ def test_circuit_optimize_lossless_against_qiskit():
         ketrs.Circuit(2).optimize(level=5)
     with pytest.raises(ValueError):
         ketrs.Circuit(2).optimize(basis="bogus")
+
+
+def _periodic_heisenberg(n: int, field: float = 0.0) -> ketrs.PauliSum:
+    terms = []
+    for i in range(n):
+        j = (i + 1) % n
+        for p in ("X", "Y", "Z"):
+            s = ["I"] * n
+            s[n - 1 - i] = p
+            s[n - 1 - j] = p
+            terms.append(("".join(s), 1.0))
+        if field != 0.0:
+            s = ["I"] * n
+            s[n - 1 - i] = "Z"
+            terms.append(("".join(s), field))
+    return ketrs.PauliSum(terms)
+
+
+def test_periodic_mps_basics_circuits_tebd_sampling():
+    n = 6
+    c = ketrs.Circuit(n)
+    for q in range(n):
+        c.ry(0.25 + 0.1 * q, q)
+    for q in range(n):
+        c.cx(q, (q + 1) % n).rzz(0.2, q, (q + 1) % n)
+
+    pmps = ketrs.PeriodicMPS.from_circuit(c, max_bond=32, cutoff=0.0, seed=7)
+    sv = ketrs.Statevector.from_circuit(c)
+    assert pmps.n_qubits == n
+    assert len(pmps.bond_dimensions) == n
+    assert pmps.bond_dimensions[-1] > 1  # non-trivial seam bond
+    assert abs(pmps.norm_sqr() - 1.0) < 1e-12
+    np.testing.assert_allclose(pmps.to_statevector().amplitudes(), sv.amplitudes(), atol=1e-12)
+    assert abs(pmps.amplitude(5) - sv.amplitudes()[5]) < 1e-12
+    assert abs(pmps.amplitude("000101") - sv.amplitudes()[5]) < 1e-12
+
+    # Inner product, expectations (single + batched), and from_mps roundtrip.
+    h = _periodic_heisenberg(n, 0.4)
+    seam_zz = ketrs.PauliSum([("Z" + "I" * (n - 2) + "Z", 1.0)])
+    assert abs(pmps.expectation(h) - sv.expectation(h)) < 1e-12
+    batch = pmps.expectations([h, seam_zz])
+    np.testing.assert_allclose(batch, [sv.expectation(h), sv.expectation(seam_zz)], atol=1e-12)
+    other = ketrs.PeriodicMPS.random(n, bond=3, seed=11)
+    ov_sv = np.vdot(pmps.to_statevector().amplitudes(), other.to_statevector().amplitudes())
+    assert abs(pmps.inner(other) - ov_sv) < 1e-12
+
+    open_mps = ketrs.MPS.from_circuit(c, max_bond=32, cutoff=0.0)
+    from_open = ketrs.PeriodicMPS.from_mps(open_mps)
+    np.testing.assert_allclose(
+        from_open.to_statevector().amplitudes(), open_mps.to_statevector().amplitudes(), atol=1e-12
+    )
+
+    # Periodic TEBD matches exact Trotter circuit.
+    neel = ketrs.Circuit(n)
+    for q in range(1, n, 2):
+        neel.x(q)
+    pmps_t = ketrs.PeriodicMPS.from_circuit(neel, max_bond=64, cutoff=0.0)
+    pmps_t.tebd(h, 0.3, steps=6, order=2)
+    neel.pauli_evolution(h, 0.3, steps=6, order=2)
+    sv_t = ketrs.Statevector.from_circuit(neel)
+    np.testing.assert_allclose(pmps_t.to_statevector().amplitudes(), sv_t.amplitudes(), atol=1e-8)
+
+    # Projection, sampling, copy, transfer_rank / transfer_cutoff properties.
+    cp = pmps.copy(seed=99)
+    p = cp.project(2, 1)
+    assert 0.0 < p < 1.0
+    assert abs(cp.norm_sqr() - 1.0) < 1e-11
+    counts = pmps.sample_counts(64)
+    assert sum(counts.values()) == 64
+    samples = pmps.sample(32)
+    assert len(samples) == 32
+    pmps.transfer_rank = 16
+    assert pmps.transfer_rank == 16
+    pmps.transfer_cutoff = 1e-11
+    assert pmps.transfer_cutoff == 1e-11
+    assert "PeriodicMPS(" in repr(pmps)
+
+
+def test_periodic_mps_dmrg_and_charges():
+    n = 8
+    h = _periodic_heisenberg(n, 0.0)
+    exact = ketrs.lowest_eigenstates(h, n, 1)[0].energy
+
+    # Dense periodic DMRG.
+    dense = ketrs.PeriodicMPS.random(n, bond=4, seed=5)
+    e_dense, sweeps, conv = dense.dmrg(h, max_bond=16, cutoff=1e-13, max_sweeps=10, noise=0.0)
+    assert conv
+    assert len(sweeps) >= 2
+    assert abs(e_dense - exact) < 1e-9
+    assert abs(dense.expectation(h) - exact) < 1e-9
+
+    # Symmetric U(1) periodic DMRG with multi-sector seam bond.
+    neel = ketrs.Circuit(n)
+    for q in range(1, n, 2):
+        neel.x(q)
+    charge = ketrs.Charge.weights([1] * n)
+    sym = ketrs.PeriodicMPS.from_circuit(neel).with_charges([charge])
+    assert sym.total_charge == [n // 2]
+    assert len(sym.charges) == 1
+    e_sym, _, _ = sym.dmrg(h, max_bond=16, cutoff=1e-13, max_sweeps=10, noise=1e-3, noise_decay=0.2)
+    assert abs(e_sym - exact) < 1e-9
+    assert len(sym.bond_sectors(n - 1)) >= 2  # multi-sector seam bond
+    assert abs(sym.to_dense().expectation(h) - exact) < 1e-9
+
+
+def test_periodic_mps_tdvp_and_gpu():
+    n = 6
+    h = _periodic_heisenberg(n, 0.6)
+    neel = ketrs.Circuit(n)
+    for q in range(1, n, 2):
+        neel.x(q)
+
+    sv = ketrs.Statevector.from_circuit(neel)
+    sv.evolve(h, 0.3)
+
+    pmps = ketrs.PeriodicMPS.from_circuit(neel, max_bond=12, cutoff=1e-14)
+    pmps.tdvp(h, 0.3, steps=6)
+    assert abs(pmps.norm_sqr() - 1.0) < 1e-9
+    np.testing.assert_allclose(pmps.to_statevector().amplitudes(), sv.amplitudes(), atol=5e-3)
+
+    sym = ketrs.PeriodicMPS.from_circuit(neel, max_bond=12, cutoff=1e-14).with_charges(
+        [ketrs.Charge.weights([1] * n)]
+    )
+    sym.tdvp(h, 0.3, steps=6)
+    np.testing.assert_allclose(
+        sym.to_statevector().amplitudes(), pmps.to_statevector().amplitudes(), atol=1e-8
+    )
+
+    # Vulkan GPU equivalence when built with --features gpu and supported GPU is present.
+    assert pmps.gpu is False
+    if ketrs.gpu_device() is not None:
+        gpu_pmps = ketrs.PeriodicMPS.from_circuit(neel, max_bond=12, cutoff=1e-14)
+        gpu_pmps.gpu = True
+        assert gpu_pmps.gpu is True
+        gpu_pmps.tdvp(h, 0.3, steps=6)
+        np.testing.assert_allclose(
+            gpu_pmps.to_statevector().amplitudes(), pmps.to_statevector().amplitudes(), atol=1e-10
+        )

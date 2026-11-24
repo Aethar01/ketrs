@@ -43,18 +43,18 @@ mod qr;
 
 pub(super) use blocks::{GpuBlockOp, GpuBlockSweep};
 
-const COMPLEX: u64 = 16;
+pub(in crate::mps) const COMPLEX: u64 = 16;
 
 /// Tile edge of `mps_gemm.comp`.
-const TILE: u32 = 16;
+pub(in crate::mps) const TILE: u32 = 16;
 
 /// Output tiles below which a product's k range is split. At bond 32 a
 /// split made the second contraction 2× faster; at 64, with 64 tiles, it
 /// no longer helped.
-const TARGET_GROUPS: u32 = 128;
+pub(in crate::mps) const TARGET_GROUPS: u32 = 128;
 
 /// Shortest k range of a split product.
-const MIN_SPLIT_K: u32 = 64;
+pub(in crate::mps) const MIN_SPLIT_K: u32 = 64;
 
 /// Workgroups of a grid-stride kernel.
 const MAX_GROUPS: u32 = 65_535;
@@ -66,7 +66,7 @@ fn usage() -> vk::BufferUsageFlags {
         | vk::BufferUsageFlags::TRANSFER_DST
 }
 
-fn bytes_of(values: &[C64]) -> &[u8] {
+pub(in crate::mps) fn bytes_of(values: &[C64]) -> &[u8] {
     // SAFETY: Complex64 is two f64s with no padding, so any value is bytes.
     unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
 }
@@ -92,16 +92,16 @@ impl PushBytes {
 /// One operand of a product: a device address and element strides
 /// `(batch, row, column)`.
 #[derive(Clone, Copy)]
-struct Operand {
-    addr: u64,
-    batch: usize,
-    row: usize,
-    col: usize,
-    conj: bool,
+pub(in crate::mps) struct Operand {
+    pub(in crate::mps) addr: u64,
+    pub(in crate::mps) batch: usize,
+    pub(in crate::mps) row: usize,
+    pub(in crate::mps) col: usize,
+    pub(in crate::mps) conj: bool,
 }
 
 impl Operand {
-    fn new(addr: u64, batch: usize, row: usize, col: usize) -> Self {
+    pub(in crate::mps) fn new(addr: u64, batch: usize, row: usize, col: usize) -> Self {
         Operand {
             addr,
             batch,
@@ -110,7 +110,7 @@ impl Operand {
             conj: false,
         }
     }
-    fn conj(mut self) -> Self {
+    pub(in crate::mps) fn conj(mut self) -> Self {
         self.conj = true;
         self
     }
@@ -119,26 +119,26 @@ impl Operand {
 /// `C_b = op(A_b) op(B_b)` for `batch` products of shape `m × k` by
 /// `k × n`; C has strides `(c_batch, c_row, 1)`.
 #[derive(Clone, Copy)]
-struct Gemm {
-    a: Operand,
-    b: Operand,
-    c: u64,
-    c_batch: usize,
-    c_row: usize,
-    m: usize,
-    n: usize,
-    k: usize,
-    batch: usize,
+pub(in crate::mps) struct Gemm {
+    pub(in crate::mps) a: Operand,
+    pub(in crate::mps) b: Operand,
+    pub(in crate::mps) c: u64,
+    pub(in crate::mps) c_batch: usize,
+    pub(in crate::mps) c_row: usize,
+    pub(in crate::mps) m: usize,
+    pub(in crate::mps) n: usize,
+    pub(in crate::mps) k: usize,
+    pub(in crate::mps) batch: usize,
     /// Add the product into C rather than overwrite it.
-    add: bool,
+    pub(in crate::mps) add: bool,
 }
 
 /// A sparse mixing table, `mps_mix.comp`'s `starts` and `entries`, at
 /// these byte offsets in [`GpuSweep::tables`].
 #[derive(Clone, Copy)]
-struct Table {
-    starts: u64,
-    entries: u64,
+pub(in crate::mps) struct Table {
+    pub(in crate::mps) starts: u64,
+    pub(in crate::mps) entries: u64,
 }
 
 /// An environment in GPU memory: `blocks` channels on a bond of dimension
@@ -179,7 +179,7 @@ pub(super) struct Scratch {
 }
 
 /// A buffer of at least `bytes`, reusing `slot`'s if it is large enough.
-fn ensure<'a>(
+pub(in crate::mps) fn ensure<'a>(
     ctx: &Arc<GpuContext>,
     slot: &'a mut Option<Buffer>,
     bytes: u64,
@@ -608,7 +608,7 @@ impl GpuSweep {
     }
 }
 
-fn read_complex(bytes: &[u8], len: usize) -> Vec<C64> {
+pub(in crate::mps) fn read_complex(bytes: &[u8], len: usize) -> Vec<C64> {
     bytes[..len * 16]
         .as_chunks::<16>()
         .0
@@ -633,7 +633,7 @@ fn reuse(ctx: &Arc<GpuContext>, old: Option<DeviceEnv>, len: usize) -> Result<Bu
 }
 
 /// A device buffer holding `bytes`.
-fn upload(ctx: &Arc<GpuContext>, bytes: &[u8]) -> Result<Buffer, Error> {
+pub(in crate::mps) fn upload(ctx: &Arc<GpuContext>, bytes: &[u8]) -> Result<Buffer, Error> {
     let size = bytes.len() as u64;
     let buffer = Buffer::new(ctx, size, usage(), Memory::Device)?;
     let mut staging = Buffer::new(ctx, size, usage(), Memory::Upload)?;
@@ -642,14 +642,20 @@ fn upload(ctx: &Arc<GpuContext>, bytes: &[u8]) -> Result<Buffer, Error> {
     Ok(buffer)
 }
 
-fn copy(ctx: &GpuContext, cmd: vk::CommandBuffer, src: vk::Buffer, dst: vk::Buffer, bytes: u64) {
+pub(in crate::mps) fn copy(
+    ctx: &GpuContext,
+    cmd: vk::CommandBuffer,
+    src: vk::Buffer,
+    dst: vk::Buffer,
+    bytes: u64,
+) {
     let region = [vk::BufferCopy::default().size(bytes)];
     // SAFETY: recording into a command buffer in the recording state; both
     // buffers hold at least `bytes`.
     unsafe { ctx.device.cmd_copy_buffer(cmd, src, dst, &region) };
 }
 
-fn compute_barrier(ctx: &GpuContext, cmd: vk::CommandBuffer) {
+pub(in crate::mps) fn compute_barrier(ctx: &GpuContext, cmd: vk::CommandBuffer) {
     let stages = vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER;
     ctx.barrier(cmd, stages, stages);
 }
@@ -658,7 +664,12 @@ fn compute_barrier(ctx: &GpuContext, cmd: vk::CommandBuffer) {
 /// `splits · batch · m · n` elements, and a batch of one), the k range may
 /// be split to fill the GPU, the partial products going to `parts` and
 /// their sum to `c` (never when adding into `c`).
-fn gemm(ctx: &GpuContext, cmd: vk::CommandBuffer, g: Gemm, parts: Option<(u64, usize)>) {
+pub(in crate::mps) fn gemm(
+    ctx: &GpuContext,
+    cmd: vk::CommandBuffer,
+    g: Gemm,
+    parts: Option<(u64, usize)>,
+) {
     let tiles = (g.m as u32).div_ceil(TILE) * (g.n as u32).div_ceil(TILE) * g.batch as u32;
     let splits = match parts {
         Some((_, max)) if g.batch == 1 && !g.add => (TARGET_GROUPS.div_ceil(tiles))
@@ -708,19 +719,19 @@ fn groups(threads: usize) -> u32 {
 /// One `mps_mix.comp` dispatch: `blocks` output channels of `phys`
 /// physical indices, each `rows × cols`, with element strides
 /// `(block, row, physical, column)` for input and output.
-struct Mix {
-    input: u64,
-    output: u64,
-    table: Table,
-    blocks: usize,
-    phys: usize,
-    rows: usize,
-    cols: usize,
-    in_strides: [usize; 4],
-    out_strides: [usize; 4],
+pub(in crate::mps) struct Mix {
+    pub(in crate::mps) input: u64,
+    pub(in crate::mps) output: u64,
+    pub(in crate::mps) table: Table,
+    pub(in crate::mps) blocks: usize,
+    pub(in crate::mps) phys: usize,
+    pub(in crate::mps) rows: usize,
+    pub(in crate::mps) cols: usize,
+    pub(in crate::mps) in_strides: [usize; 4],
+    pub(in crate::mps) out_strides: [usize; 4],
 }
 
-fn mix(ctx: &GpuContext, cmd: vk::CommandBuffer, m: Mix) {
+pub(in crate::mps) fn mix(ctx: &GpuContext, cmd: vk::CommandBuffer, m: Mix) {
     let push = PushBytes::default()
         .addr(m.input)
         .addr(m.output)
