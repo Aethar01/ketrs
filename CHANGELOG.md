@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.2 (2026-11-24)
+
+### MPS
+
+- Periodic-trace matrix product states on closed rings: `PeriodicMps` in Rust
+  and `PeriodicMPS` in Python. Includes exact periodic trace norm, inner
+  product, amplitudes, antipodal-cut batched expectations, projections, and
+  sampling; hybrid two-site / one-site periodic DMRG with Pippan–White–Evertz
+  (2010) adaptive transfer-matrix compression and gauge-conditioned solvers;
+  time-reversible second-order antipodal window-split periodic TDVP with
+  Y-metric ALS pair polishing; periodic circuits and TEBD with direct
+  `(n - 1, 0)` seam gates; conserved `U(1)` / `Z_n` Abelian charges
+  (`with_charges`) supporting multi-sector seam bonds; and Vulkan FP64 GPU
+  acceleration (`gpu = True`, `--features gpu`).
+- Fixed numerical divergence in symmetric DMRG with noise or many conserved
+  charges: guarded subnormal perturbation channel weights against overflow/NaN
+  in dense and symmetric subspace-expansion splits, and replaced unpivoted
+  Thomas inverse iteration in `tridiagonal_lowest` with partial-pivoted
+  elimination, overflow-safe rescaling, and `faer` EVD fallback.
+
 ## 0.2.1 (2026-11-22)
 
 ### Circuits
