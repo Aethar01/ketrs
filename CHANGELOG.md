@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.3 (2026-11-25)
+
+### MPS
+
+- Fixed `PeriodicMps::tdvp` (`PeriodicMPS.tdvp` in Python) silently skipping
+  multi-site (`> 2`-qubit), non-nearest-neighbour, and wrap-around Pauli terms
+  from product or weakly entangled states: added Yang–White global subspace
+  expansion on cyclic windows for both dense and charge-conserving
+  (`with_charges`) periodic MPS, partitioned Hamiltonians into cyclic windows
+  (including seam-centred and shortest-cyclic-arc windows) so every term acts
+  strictly inside its assigned window without frozen complement sites, and
+  fixed empty-complement seam bond indexing in `compress_string_transfer`.
+- Ensured `PeriodicMps::dmrg` appends minimal covering cyclic windows when
+  multi-site terms straddle all base half-ring cuts, preventing stalling on
+  seam-straddling multi-qubit Hamiltonians from product states.
+
 ## 0.2.2 (2026-11-24)
 
 ### MPS
