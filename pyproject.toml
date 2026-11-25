@@ -21,6 +21,7 @@ classifiers = [
 ]
 
 [project.urls]
+Documentation = "https://aethar01.github.io/ketrs/"
 Repository = "https://github.com/Aethar01/ketrs"
 Changelog = "https://github.com/Aethar01/ketrs/blob/main/CHANGELOG.md"
 
@@ -30,6 +31,7 @@ aer = ["qiskit>=1.0", "qiskit-aer"]
 
 [dependency-groups]
 dev = ["maturin>=1.9,<2", "pytest", "qiskit>=1.0", "qiskit-aer", "qiskit-qasm3-import", "scipy"]
+docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.27", "ruff"]
 
 [tool.maturin]
 manifest-path = "crates/ketrs-py/Cargo.toml"

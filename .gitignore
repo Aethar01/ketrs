@@ -6,3 +6,4 @@ __pycache__/
 proptest-regressions/
 bench/results.json
 todo.md
+/site
