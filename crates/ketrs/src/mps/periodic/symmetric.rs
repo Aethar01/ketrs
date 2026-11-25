@@ -313,8 +313,14 @@ impl PeriodicLayout {
 
     /// Gather allowed blocks from a dense `(l, phys, r)` slice into a compact vector.
     pub(super) fn gather(&self, dense: &[C64]) -> Vec<C64> {
-        let r_dim = self.right.dim();
         let mut out = vec![ZERO; self.len];
+        self.gather_into(dense, &mut out);
+        out
+    }
+
+    /// Gather allowed blocks from a dense `(l, phys, r)` slice into `out`.
+    pub(super) fn gather_into(&self, dense: &[C64], out: &mut [C64]) {
+        let r_dim = self.right.dim();
         for &(s, _ds, offset, width) in &self.rows {
             let rs = self.left.range(s);
             for p in 0..self.phys {
@@ -329,13 +335,20 @@ impl PeriodicLayout {
                 }
             }
         }
-        out
     }
 
     /// Scatter a compact vector back into a dense `(l, phys, r)` tensor.
     pub(super) fn scatter(&self, compact: &[C64]) -> Vec<C64> {
         let (l_dim, r_dim) = (self.left.dim(), self.right.dim());
         let mut out = vec![ZERO; l_dim * self.phys * r_dim];
+        self.scatter_into(compact, &mut out);
+        out
+    }
+
+    /// Scatter a compact vector into a pre-allocated dense `(l, phys, r)` buffer.
+    pub(super) fn scatter_into(&self, compact: &[C64], out: &mut [C64]) {
+        let r_dim = self.right.dim();
+        out.fill(ZERO);
         for &(s, _ds, offset, width) in &self.rows {
             let rs = self.left.range(s);
             for p in 0..self.phys {
@@ -350,7 +363,6 @@ impl PeriodicLayout {
                 }
             }
         }
-        out
     }
 }
 

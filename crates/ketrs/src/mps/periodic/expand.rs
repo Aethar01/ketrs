@@ -28,133 +28,221 @@ impl PeriodicMps {
     /// Enlarge the internal right bases of cyclic window `win_sites`
     /// (`pos = 1..L`) with the directions `mpo |ψ⟩` reaches, leaving `|ψ⟩`
     /// unchanged and `win_sites[1..L]` strictly right-orthonormal.
+    /// Returns the total number of basis vectors added across all window bonds.
     ///
     /// Requires `win_sites[1..L]` to already be right-orthonormal (as produced
     /// by `canonicalise_window_left`). Boundary bonds outside `win_sites` are
     /// left untouched.
-    pub(super) fn expand_window_right(&mut self, win_sites: &[usize], mpo: &Mpo) {
+    pub(super) fn expand_window_right(&mut self, win_sites: &[usize], mpo: &Mpo) -> usize {
         let l_win = win_sites.len();
         if l_win < 3 {
-            return;
+            return 0;
         }
         if self.symmetry.is_some() {
-            self.expand_window_right_symmetric(win_sites, mpo);
-            return;
+            return self.expand_window_right_symmetric(win_sites, mpo);
         }
         let max_bond = self.options.max_bond;
+        let min_pos = match (1..l_win).find(|&pos| self.tensors[win_sites[pos]].left < max_bond) {
+            Some(p) => p,
+            None => return 0,
+        };
         let r_end = self.tensors[win_sites[l_win - 1]].right;
         let mut env = Env {
             blocks: vec![Mat::<C64>::identity(r_end, r_end)],
         };
         let mut added = 0usize;
-        for pos in (1..l_win).rev() {
+        let mut total_added = 0usize;
+        for pos in (min_pos..l_win).rev() {
             let q = win_sites[pos];
             let ket = &self.tensors[q];
             let (l, r) = (ket.left, ket.right + added);
-            let padded = pad_right(ket, r);
+            let padded = if added > 0 {
+                pad_right(ket, r)
+            } else {
+                ket.clone()
+            };
             let room = max_bond.min(2 * r).saturating_sub(l);
-            let channels = right_operator(&env, ket, &mpo.sites[pos]);
-            let cols = 2 * r;
-            let mut rows = Mat::<C64>::zeros(channels.len() * l, cols);
-            for (a, ya) in channels.iter().enumerate() {
-                rows.as_mut().submatrix_mut(a * l, 0, l, cols).copy_from(ya);
-            }
-            let new_rows = complement(rows.as_ref(), padded.as_right_matrix(), room);
-            let k = new_rows.nrows();
-            let mut data = padded.data;
-            data.reserve(k * cols);
-            for row in 0..k {
-                for col in 0..cols {
-                    data.push(new_rows[(row, col)]);
+            if room == 0 && pos == min_pos {
+                if added > 0 {
+                    self.tensors[q] = padded;
                 }
+                added = 0;
+                break;
             }
-            let expanded = Tensor {
-                left: l + k,
-                right: r,
-                data,
+            let channels = right_operator(&env, ket, &mpo.sites[pos]);
+            let k = if room == 0 {
+                0
+            } else {
+                let cols = 2 * r;
+                let mut rows = Mat::<C64>::zeros(channels.len() * l, cols);
+                for (a, ya) in channels.iter().enumerate() {
+                    rows.as_mut().submatrix_mut(a * l, 0, l, cols).copy_from(ya);
+                }
+                let new_rows = complement(rows.as_ref(), padded.as_right_matrix(), room);
+                let k = new_rows.nrows();
+                if k > 0 {
+                    let mut data = padded.data;
+                    data.reserve(k * cols);
+                    for row in 0..k {
+                        for col in 0..cols {
+                            data.push(new_rows[(row, col)]);
+                        }
+                    }
+                    let expanded = Tensor {
+                        left: l + k,
+                        right: r,
+                        data,
+                    };
+                    if pos > min_pos {
+                        env = Env {
+                            blocks: channels
+                                .par_iter()
+                                .map(|ya| {
+                                    matmul(expanded.as_right_matrix().conjugate(), ya.transpose())
+                                })
+                                .collect(),
+                        };
+                    }
+                    self.tensors[q] = expanded;
+                    total_added += k;
+                    added = k;
+                    continue;
+                }
+                0
             };
-            env = Env {
-                blocks: channels
-                    .par_iter()
-                    .map(|ya| matmul(expanded.as_right_matrix().conjugate(), ya.transpose()))
-                    .collect(),
-            };
+            let expanded = padded;
+            if pos > min_pos {
+                env = Env {
+                    blocks: channels
+                        .par_iter()
+                        .map(|ya| matmul(expanded.as_right_matrix().conjugate(), ya.transpose()))
+                        .collect(),
+                };
+            }
             self.tensors[q] = expanded;
             added = k;
         }
         if added > 0 {
-            let q0 = win_sites[0];
-            self.tensors[q0] = pad_right(&self.tensors[q0], self.tensors[q0].right + added);
+            let q_prev = win_sites[min_pos - 1];
+            self.tensors[q_prev] =
+                pad_right(&self.tensors[q_prev], self.tensors[q_prev].right + added);
         }
+        total_added
     }
 
     /// Mirror of [`expand_window_right`](Self::expand_window_right): enlarge
     /// the internal left bases of cyclic window `win_sites` (`pos = 0..L-1`)
     /// with the directions `mpo |ψ⟩` reaches, leaving `|ψ⟩` unchanged and
     /// `win_sites[0..L-1]` strictly left-orthonormal.
+    /// Returns the total number of basis vectors added across all window bonds.
     ///
     /// Requires `win_sites[0..L-1]` to already be left-orthonormal (as produced
     /// by `canonicalise_window_right`).
     #[allow(clippy::needless_range_loop)]
-    pub(super) fn expand_window_left(&mut self, win_sites: &[usize], mpo: &Mpo) {
+    pub(super) fn expand_window_left(&mut self, win_sites: &[usize], mpo: &Mpo) -> usize {
         let l_win = win_sites.len();
         if l_win < 3 {
-            return;
+            return 0;
         }
         if self.symmetry.is_some() {
-            self.expand_window_left_symmetric(win_sites, mpo);
-            return;
+            return self.expand_window_left_symmetric(win_sites, mpo);
         }
         let max_bond = self.options.max_bond;
+        let max_pos = match (0..l_win - 1)
+            .rev()
+            .find(|&pos| self.tensors[win_sites[pos]].right < max_bond)
+        {
+            Some(p) => p,
+            None => return 0,
+        };
         let l_start = self.tensors[win_sites[0]].left;
         let mut env = Env {
             blocks: vec![Mat::<C64>::identity(l_start, l_start)],
         };
         let mut added = 0usize;
-        for pos in 0..l_win - 1 {
+        let mut total_added = 0usize;
+        for pos in 0..=max_pos {
             let q = win_sites[pos];
             let ket = &self.tensors[q];
             let (l, r) = (ket.left + added, ket.right);
-            let padded = pad_left(ket, l);
-            let basis = padded.as_left_matrix().transpose();
-            let room = max_bond.min(2 * l).saturating_sub(r);
-            let channels = left_operator(&env, ket, &mpo.sites[pos]);
-            let cols = 2 * l;
-            let mut rows = Mat::<C64>::zeros(channels.len() * r, cols);
-            for (b, yb) in channels.iter().enumerate() {
-                rows.as_mut()
-                    .submatrix_mut(b * r, 0, r, cols)
-                    .copy_from(yb.transpose());
-            }
-            let new_cols = complement(rows.as_ref(), basis, room);
-            let k = new_cols.nrows();
-            let expanded = Mat::<C64>::from_fn(2 * l, r + k, |row, col| {
-                if col < r {
-                    padded.data[row * r + col]
-                } else {
-                    new_cols[(col - r, row)]
-                }
-            });
-            let expanded = Tensor::from_matrix(expanded.as_ref(), l, r + k);
-            env = Env {
-                blocks: channels
-                    .par_iter()
-                    .map(|yb| matmul(expanded.as_left_matrix().adjoint(), yb.as_ref()))
-                    .collect(),
+            let padded = if added > 0 {
+                pad_left(ket, l)
+            } else {
+                ket.clone()
             };
+            let room = max_bond.min(2 * l).saturating_sub(r);
+            if room == 0 && pos == max_pos {
+                if added > 0 {
+                    self.tensors[q] = padded;
+                }
+                added = 0;
+                break;
+            }
+            let channels = left_operator(&env, ket, &mpo.sites[pos]);
+            let k = if room == 0 {
+                0
+            } else {
+                let basis = padded.as_left_matrix().transpose();
+                let cols = 2 * l;
+                let mut rows = Mat::<C64>::zeros(channels.len() * r, cols);
+                for (b, yb) in channels.iter().enumerate() {
+                    rows.as_mut()
+                        .submatrix_mut(b * r, 0, r, cols)
+                        .copy_from(yb.transpose());
+                }
+                let new_cols = complement(rows.as_ref(), basis, room);
+                let k = new_cols.nrows();
+                if k > 0 {
+                    let expanded = Mat::<C64>::from_fn(2 * l, r + k, |row, col| {
+                        if col < r {
+                            padded.data[row * r + col]
+                        } else {
+                            new_cols[(col - r, row)]
+                        }
+                    });
+                    let expanded = Tensor::from_matrix(expanded.as_ref(), l, r + k);
+                    if pos < max_pos {
+                        env = Env {
+                            blocks: channels
+                                .par_iter()
+                                .map(|yb| matmul(expanded.as_left_matrix().adjoint(), yb.as_ref()))
+                                .collect(),
+                        };
+                    }
+                    self.tensors[q] = expanded;
+                    total_added += k;
+                    added = k;
+                    continue;
+                }
+                0
+            };
+            let expanded = padded;
+            if pos < max_pos {
+                env = Env {
+                    blocks: channels
+                        .par_iter()
+                        .map(|yb| matmul(expanded.as_left_matrix().adjoint(), yb.as_ref()))
+                        .collect(),
+                };
+            }
             self.tensors[q] = expanded;
             added = k;
         }
         if added > 0 {
-            let q_last = win_sites[l_win - 1];
-            self.tensors[q_last] =
-                pad_left(&self.tensors[q_last], self.tensors[q_last].left + added);
+            let q_next = win_sites[max_pos + 1];
+            self.tensors[q_next] =
+                pad_left(&self.tensors[q_next], self.tensors[q_next].left + added);
         }
+        total_added
     }
 
-    fn expand_window_right_symmetric(&mut self, win_sites: &[usize], mpo: &Mpo) {
+    fn expand_window_right_symmetric(&mut self, win_sites: &[usize], mpo: &Mpo) -> usize {
         let l_win = win_sites.len();
         let max_bond = self.options.max_bond;
+        let min_pos = match (1..l_win).find(|&pos| self.tensors[win_sites[pos]].left < max_bond) {
+            Some(p) => p,
+            None => return 0,
+        };
         let deltas = mpo.channels.as_ref().expect("charge-graded window MPO");
         let charges = self.symmetry.as_ref().unwrap().charges.clone();
         let mut ket_right = self
@@ -172,8 +260,9 @@ impl PeriodicMps {
                 .collect(),
         ];
         let mut placed: Option<Placement> = None;
+        let mut total_added = 0usize;
 
-        for pos in (1..l_win).rev() {
+        for pos in (min_pos..l_win).rev() {
             let q = win_sites[pos];
             let ket = self.tensors[q].clone();
             let padded = placed
@@ -182,9 +271,15 @@ impl PeriodicMps {
             let sym = self.symmetry.as_ref().unwrap();
             let bond = sym.left_bond(q).clone();
             let bra_right = sym.right_bond(q);
+            let dim = bra_right.dim();
+            let room = max_bond.min(2 * dim).saturating_sub(ket.left);
+            if room == 0 && pos == min_pos {
+                self.tensors[q] = padded;
+                placed = None;
+                break;
+            }
             let blocks = PeriodicSiteBlocks::new(&ket, &bond, &ket_right, sym, q);
             let rows = left_keyed(&mpo.sites[pos]);
-            let dim = bra_right.dim();
             let shift = [sym.site_shift(q, 0), sym.site_shift(q, 1)];
             let pieces = |a: usize, s: usize| -> Vec<Piece> {
                 let label = charges.sub(bond.label(s), &deltas[pos][a]);
@@ -214,7 +309,6 @@ impl PeriodicMps {
             };
             let index = |p: usize, b: usize, j: usize| p * dim + bra_right.range(b).start + j;
             let cols = sym.group_cols(bra_right, q);
-            let room = max_bond.min(2 * dim).saturating_sub(ket.left);
             let (sectors, placement, grown, next) = chain_step(
                 &bond,
                 &deltas[pos],
@@ -225,6 +319,7 @@ impl PeriodicMps {
                 index,
                 pieces,
             );
+            total_added += placement.dim.saturating_sub(ket.left);
             self.tensors[q] = Tensor::from_matrix(grown.as_ref(), placement.dim, padded.right);
             self.symmetry.as_mut().unwrap().bonds[q] = sectors;
             chain = next;
@@ -232,14 +327,22 @@ impl PeriodicMps {
             placed = Some(placement);
         }
         if let Some(p) = placed {
-            let q0 = win_sites[0];
-            self.tensors[q0] = p.right(&self.tensors[q0]);
+            let q_prev = win_sites[min_pos - 1];
+            self.tensors[q_prev] = p.right(&self.tensors[q_prev]);
         }
+        total_added
     }
 
-    fn expand_window_left_symmetric(&mut self, win_sites: &[usize], mpo: &Mpo) {
+    fn expand_window_left_symmetric(&mut self, win_sites: &[usize], mpo: &Mpo) -> usize {
         let l_win = win_sites.len();
         let max_bond = self.options.max_bond;
+        let max_pos = match (0..l_win - 1)
+            .rev()
+            .find(|&pos| self.tensors[win_sites[pos]].right < max_bond)
+        {
+            Some(p) => p,
+            None => return 0,
+        };
         let deltas = mpo.channels.as_ref().expect("charge-graded window MPO");
         let charges = self.symmetry.as_ref().unwrap().charges.clone();
         let mut ket_left = self
@@ -257,8 +360,9 @@ impl PeriodicMps {
                 .collect(),
         ];
         let mut placed: Option<Placement> = None;
+        let mut total_added = 0usize;
 
-        for pos in 0..l_win - 1 {
+        for pos in 0..=max_pos {
             let q = win_sites[pos];
             let q_next = win_sites[pos + 1];
             let ket = self.tensors[q].clone();
@@ -268,6 +372,13 @@ impl PeriodicMps {
             let sym = self.symmetry.as_ref().unwrap();
             let bond = sym.right_bond(q).clone();
             let bra_left = sym.left_bond(q);
+            let width = 2 * padded.left;
+            let room = max_bond.min(width).saturating_sub(ket.right);
+            if room == 0 && pos == max_pos {
+                self.tensors[q] = padded;
+                placed = None;
+                break;
+            }
             let blocks = PeriodicSiteBlocks::new(&ket, &ket_left, &bond, sym, q);
             let rows = right_keyed(&mpo.sites[pos]);
             let shift = [sym.site_shift(q, 0), sym.site_shift(q, 1)];
@@ -300,8 +411,6 @@ impl PeriodicMps {
             };
             let index = |p: usize, b: usize, j: usize| (bra_left.range(b).start + j) * 2 + p;
             let cols = sym.group_rows(bra_left, q);
-            let width = 2 * padded.left;
-            let room = max_bond.min(width).saturating_sub(ket.right);
             let (sectors, placement, grown, next) = chain_step(
                 &bond,
                 &deltas[pos + 1],
@@ -312,6 +421,7 @@ impl PeriodicMps {
                 index,
                 pieces,
             );
+            total_added += placement.dim.saturating_sub(ket.right);
             self.tensors[q] = Tensor::from_matrix(grown.transpose(), padded.left, placement.dim);
             self.symmetry.as_mut().unwrap().bonds[q_next] = sectors;
             chain = next;
@@ -319,9 +429,10 @@ impl PeriodicMps {
             placed = Some(placement);
         }
         if let Some(p) = placed {
-            let q_last = win_sites[l_win - 1];
-            self.tensors[q_last] = p.left(&self.tensors[q_last]);
+            let q_next = win_sites[max_pos + 1];
+            self.tensors[q_next] = p.left(&self.tensors[q_next]);
         }
+        total_added
     }
 }
 

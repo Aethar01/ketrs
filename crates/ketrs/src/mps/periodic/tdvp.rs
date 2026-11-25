@@ -117,20 +117,24 @@ impl PeriodicMps {
                 )
             });
             let half = dt / 2.0;
+            // Track per-(window, direction) bond dimensions at `wh.gse_bonds`
+            // when the last GSE call added 0 directions so converged / sector-capped
+            // windows don't re-run GSE every step.
+            let mut gse_done: Vec<[Option<Vec<usize>>; 2]> = vec![[None, None]; windows.len()];
             for _step in 0..steps {
-                for wh in &windows {
+                for (w_idx, wh) in windows.iter().enumerate() {
                     #[cfg(feature = "gpu")]
                     let g = gpu_scratch.as_ref();
                     #[cfg(not(feature = "gpu"))]
                     let g = None::<&()>;
-                    self.tdvp_window_forward(wh, half, null_tol, g)?;
+                    self.tdvp_window_forward(wh, half, null_tol, &mut gse_done[w_idx][0], g)?;
                 }
-                for wh in windows.iter().rev() {
+                for (w_idx, wh) in windows.iter().enumerate().rev() {
                     #[cfg(feature = "gpu")]
                     let g = gpu_scratch.as_ref();
                     #[cfg(not(feature = "gpu"))]
                     let g = None::<&()>;
-                    self.tdvp_window_backward(wh, half, null_tol, g)?;
+                    self.tdvp_window_backward(wh, half, null_tol, &mut gse_done[w_idx][1], g)?;
                 }
             }
         }
@@ -148,6 +152,7 @@ impl PeriodicMps {
         wh: &WindowHamiltonian,
         dt: f64,
         null_tol: f64,
+        gse_done_bonds: &mut Option<Vec<usize>>,
         #[cfg(feature = "gpu")] gpu: Option<&(
             std::sync::Arc<crate::gpu::GpuContext>,
             std::sync::Arc<std::sync::Mutex<super::gpu::GpuPeriodicScratch>>,
@@ -162,12 +167,26 @@ impl PeriodicMps {
         self.canonicalise_opp_right(&wh.opp_sites, wh.win_sites[0]);
         self.canonicalise_window_left(&wh.win_sites);
         if l >= 3
+            && !wh.gse_bonds.is_empty()
             && let Some(mpo) = &wh.mpo_w
-            && wh.win_sites[1..]
+            && wh
+                .gse_bonds
                 .iter()
-                .any(|&q| self.tensors[q].left < self.options.max_bond)
+                .any(|&pos| self.tensors[wh.win_sites[pos]].left < self.options.max_bond)
         {
-            self.expand_window_right(&wh.win_sites, mpo);
+            let cur_bonds: Vec<usize> = wh
+                .gse_bonds
+                .iter()
+                .map(|&pos| self.tensors[wh.win_sites[pos]].left)
+                .collect();
+            if gse_done_bonds.as_ref() != Some(&cur_bonds) {
+                let added = self.expand_window_right(&wh.win_sites, mpo);
+                if added == 0 {
+                    *gse_done_bonds = Some(cur_bonds);
+                } else {
+                    *gse_done_bonds = None;
+                }
+            }
         }
         let mut envs = WindowEnvs::new(&self.tensors, wh, comp, self.symmetry.as_ref());
         #[cfg(feature = "gpu")]
@@ -193,6 +212,7 @@ impl PeriodicMps {
         wh: &WindowHamiltonian,
         dt: f64,
         null_tol: f64,
+        gse_done_bonds: &mut Option<Vec<usize>>,
         #[cfg(feature = "gpu")] gpu: Option<&(
             std::sync::Arc<crate::gpu::GpuContext>,
             std::sync::Arc<std::sync::Mutex<super::gpu::GpuPeriodicScratch>>,
@@ -207,12 +227,26 @@ impl PeriodicMps {
         self.canonicalise_opp_left(&wh.opp_sites, *wh.win_sites.last().unwrap());
         self.canonicalise_window_right(&wh.win_sites);
         if l >= 3
+            && !wh.gse_bonds.is_empty()
             && let Some(mpo) = &wh.mpo_w
-            && wh.win_sites[..l - 1]
+            && wh
+                .gse_bonds
                 .iter()
-                .any(|&q| self.tensors[q].right < self.options.max_bond)
+                .any(|&pos| self.tensors[wh.win_sites[pos - 1]].right < self.options.max_bond)
         {
-            self.expand_window_left(&wh.win_sites, mpo);
+            let cur_bonds: Vec<usize> = wh
+                .gse_bonds
+                .iter()
+                .map(|&pos| self.tensors[wh.win_sites[pos - 1]].right)
+                .collect();
+            if gse_done_bonds.as_ref() != Some(&cur_bonds) {
+                let added = self.expand_window_left(&wh.win_sites, mpo);
+                if added == 0 {
+                    *gse_done_bonds = Some(cur_bonds);
+                } else {
+                    *gse_done_bonds = None;
+                }
+            }
         }
         let mut envs = WindowEnvs::new(&self.tensors, wh, comp, self.symmetry.as_ref());
         #[cfg(feature = "gpu")]
@@ -249,21 +283,62 @@ impl PeriodicMps {
         let theta_tilde_vec = prob.unpack_gauge(&x);
         let theta_tilde =
             MatRef::from_row_major_slice(&theta_tilde_vec, prob.l_eff * 2, 2 * prob.r_eff);
-        self.split_window_pair(q1, q2, &prob, theta_tilde, absorb);
-        let (mut a_pol, mut b_pol) = (self.tensors[q1].clone(), self.tensors[q2].clone());
-        if prob.n_norm_polish_pair(
-            &x,
-            &mut a_pol,
-            &mut b_pol,
-            self.symmetry.as_ref(),
-            q1,
-            q2,
-            absorb,
-            proj.as_ref(),
-            null_tol,
-        ) {
-            self.tensors[q1] = a_pol;
-            self.tensors[q2] = b_pol;
+        let discarded = self.split_window_pair(q1, q2, &prob, theta_tilde, absorb);
+        if discarded > 0.0 {
+            if proj.is_some() {
+                let (mut a_pol, mut b_pol) = (self.tensors[q1].clone(), self.tensors[q2].clone());
+                if prob.n_norm_polish_pair(
+                    &x,
+                    &mut a_pol,
+                    &mut b_pol,
+                    self.symmetry.as_ref(),
+                    q1,
+                    q2,
+                    absorb,
+                    proj.as_ref(),
+                    null_tol,
+                ) {
+                    self.tensors[q1] = a_pol;
+                    self.tensors[q2] = b_pol;
+                }
+            }
+            // Preserve exact periodic Hilbert norm `⟨ψ|ψ⟩` across truncated splits
+            // by rescaling the absorbed site tensor (leaving the other site strictly
+            // left-/right-orthonormal).
+            let scale = if prob.n_is_identity || envs.norm_trunc_err > 1e-2 {
+                let kept = (1.0 - discarded).max(0.0);
+                if kept > 1e-30 {
+                    kept.sqrt().recip()
+                } else {
+                    1.0
+                }
+            } else {
+                use crate::statevector::krylov::{LinearOperator, dot};
+                let n_op = prob.norm_linear_op();
+                let mut nx = vec![crate::mps::ZERO; x.len()];
+                n_op.apply(&x, &mut nx);
+                let n_before = dot(&x, &nx).re;
+                let ta = two_site_dense(&self.tensors[q1], &self.tensors[q2]);
+                let va = prob.to_solver_vec(&ta);
+                let mut nva = vec![crate::mps::ZERO; va.len()];
+                n_op.apply(&va, &mut nva);
+                let n_after = dot(&va, &nva).re;
+                if n_before > 1e-30 && n_after > 1e-30 {
+                    (n_before / n_after).sqrt().clamp(0.5, 2.0)
+                } else {
+                    1.0
+                }
+            };
+            if scale.is_finite() && (scale - 1.0).abs() > 1e-13 {
+                let target_q = match absorb {
+                    Absorb::Right => q2,
+                    Absorb::Left => q1,
+                };
+                self.tensors[target_q]
+                    .data
+                    .iter_mut()
+                    .for_each(|a| *a *= scale);
+            }
         }
         Ok(())
     }
@@ -373,18 +448,16 @@ fn partition_hamiltonian_windows(
     }
 
     let m = n / 2;
-    // Window 1: [0, 1, ..., m], opp: [m+1, ..., n-1]
+    // Window 1: [0, 1, ..., m]
     let w1: Vec<usize> = (0..=m).collect();
-    let o1: Vec<usize> = (m + 1..n).collect();
-    // Window 2: [m, m+1, ..., n-1, 0], opp: [1, ..., m-1]
+    // Window 2: [m, m+1, ..., n-1, 0]
     let mut w2: Vec<usize> = (m..n).collect();
     w2.push(0);
-    let o2: Vec<usize> = (1..m).collect();
     // Window 3: shifted half-ring centred near `m`.
     let q0 = m / 2;
-    let (w3, o3) = cyclic_window(q0, m + 1, n);
+    let (w3, _) = cyclic_window(q0, m + 1, n);
     // Window 4: shifted half-ring centred near seam `0` (covers wrap-around terms).
-    let (w4, o4) = cyclic_window((q0 + m) % n, m + 1, n);
+    let (w4, _) = cyclic_window((q0 + m) % n, m + 1, n);
 
     let mut h1 = PauliSum::new();
     let mut h2 = PauliSum::new();
@@ -425,8 +498,20 @@ fn partition_hamiltonian_windows(
     }
 
     let mut out = Vec::with_capacity(4);
-    for (h, w, o) in [(h1, w1, o1), (h2, w2, o2), (h3, w3, o3), (h4, w4, o4)] {
+    for h in [h1, h2, h3, h4] {
         if !h.terms().is_empty() {
+            // Shrink each window to the minimal cyclic arc covering the qubits
+            // actually touched by `h` (at least 2 sites), eliminating redundant
+            // sweeps over untouched sites (especially for seam-straddling W3/W4).
+            let mut touched: Vec<usize> = h
+                .terms()
+                .iter()
+                .flat_map(|(_, ps)| ps.ops().iter().map(|&(q, _)| q))
+                .collect();
+            touched.sort_unstable();
+            touched.dedup();
+            let (start, span) = shortest_cyclic_arc(&touched, n);
+            let (w, o) = cyclic_window(start, span, n);
             let wh = split_hamiltonian_on_window(&h, w, o, n, charges)?;
             debug_assert!(wh.mpo_opp.is_none() && wh.cross.is_empty());
             out.push(wh);

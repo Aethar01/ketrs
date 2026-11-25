@@ -46,8 +46,15 @@ struct LocalScratch {
     z: Vec<C64>,
 }
 
+#[derive(Default)]
+struct PackedScratch {
+    dense_in: Vec<C64>,
+    dense_out: Vec<C64>,
+}
+
 thread_local! {
     static LOCAL_SCRATCH: RefCell<LocalScratch> = RefCell::new(LocalScratch::default());
+    static PACKED_SCRATCH: RefCell<PackedScratch> = RefCell::new(PackedScratch::default());
 }
 
 fn ensure_len(buf: &mut Vec<C64>, len: usize) {
@@ -89,6 +96,10 @@ pub(super) struct WindowHamiltonian {
     pub(super) mpo_opp: Option<Mpo>,
     /// Grouped crossing channels `A_κ^(W) ⊗ B_κ^(opp)`.
     pub(super) cross: Vec<CrossChannel>,
+    /// Internal window bond positions `pos ∈ 1..win_sites.len()` strictly
+    /// spanned by at least one term in `mpo_w` of span `>= 3` (the only bonds
+    /// where 2-site TDVP can ever need global subspace expansion).
+    pub(super) gse_bonds: Vec<usize>,
 }
 
 type LocalOps = Vec<(usize, Local)>;
@@ -142,6 +153,21 @@ pub(super) fn split_hamiltonian_on_window(
             (true, true) => {}
         }
     }
+
+    // Collect internal bonds strictly spanned by terms of span >= 3 inside W.
+    let mut gse_bond_set = std::collections::BTreeSet::new();
+    for (_, w_ops) in &w_only {
+        if w_ops.len() >= 2 {
+            let first = w_ops[0].0;
+            let last = w_ops.last().unwrap().0;
+            if last - first >= 2 {
+                for pos in (first + 1)..=last {
+                    gse_bond_set.insert(pos);
+                }
+            }
+        }
+    }
+    let gse_bonds: Vec<usize> = gse_bond_set.into_iter().collect();
 
     // Build remapped Charges for `W` and `opp` if needed for MPO channels.
     let win_charges = charges.map(|ch| remap_charges(ch, &win_sites));
@@ -233,6 +259,7 @@ pub(super) fn split_hamiltonian_on_window(
         mpo_w,
         mpo_opp,
         cross,
+        gse_bonds,
     })
 }
 
@@ -253,6 +280,9 @@ fn remap_charges(charges: &Charges, sites: &[usize]) -> Charges {
 
 pub(super) struct WindowEnvs<'a> {
     pub(super) win_sites: &'a [usize],
+    /// True for small rings (`n <= 12`) where `N_bond` is structurally
+    /// rank-deficient and direct bond-metric projection up to dim 256 is cheap.
+    pub(super) short_ring: bool,
     /// Relative truncation error `σ_{p} / σ_0` of the opposite-half norm
     /// transfer matrix (used to set the safe null-space cutoff for `Ñ`).
     pub(super) norm_trunc_err: f64,
@@ -399,6 +429,7 @@ impl<'a> WindowEnvs<'a> {
 
         WindowEnvs {
             win_sites: &wh.win_sites,
+            short_ring: tensors.len() <= 12,
             norm_trunc_err,
             norm_left,
             norm_right,
@@ -594,33 +625,34 @@ impl<'a> WindowEnvs<'a> {
         gauge_tol: f64,
     ) -> LocalProblem {
         let (l_bar, r_bar) = self.metric_pair(left_pos, right_pos);
-        let (g_l, g_l_inv, g_r, g_r_inv, layout, left_eff_sec, right_eff_sec) = match sym {
-            Some(sym) => {
-                let left_sec = sym.left_bond(sites[0]);
-                let right_sec = sym.right_bond(*sites.last().unwrap());
-                let (gl, l_eff_sec, gl_inv) = block_metric_gauge(&l_bar, left_sec, gauge_tol);
-                let (gr, r_eff_sec, gr_inv) = block_metric_gauge(&r_bar, right_sec, gauge_tol);
-                let layout = if sites.len() == 2 {
-                    PeriodicLayout::two_site(&l_eff_sec, &r_eff_sec, sym, sites[0], sites[1])
-                } else {
-                    PeriodicLayout::one_site(&l_eff_sec, &r_eff_sec, sym, sites[0])
-                };
-                (
-                    gl,
-                    gl_inv,
-                    gr,
-                    gr_inv,
-                    Some(layout),
-                    Some(l_eff_sec),
-                    Some(r_eff_sec),
-                )
-            }
-            None => {
-                let (gl, gl_inv) = dense_metric_gauge(&l_bar, gauge_tol);
-                let (gr, gr_inv) = dense_metric_gauge(&r_bar, gauge_tol);
-                (gl, gl_inv, gr, gr_inv, None, None, None)
-            }
-        };
+        let (mut g_l, mut g_l_inv, mut g_r, mut g_r_inv, layout, left_eff_sec, right_eff_sec) =
+            match sym {
+                Some(sym) => {
+                    let left_sec = sym.left_bond(sites[0]);
+                    let right_sec = sym.right_bond(*sites.last().unwrap());
+                    let (gl, l_eff_sec, gl_inv) = block_metric_gauge(&l_bar, left_sec, gauge_tol);
+                    let (gr, r_eff_sec, gr_inv) = block_metric_gauge(&r_bar, right_sec, gauge_tol);
+                    let layout = if sites.len() == 2 {
+                        PeriodicLayout::two_site(&l_eff_sec, &r_eff_sec, sym, sites[0], sites[1])
+                    } else {
+                        PeriodicLayout::one_site(&l_eff_sec, &r_eff_sec, sym, sites[0])
+                    };
+                    (
+                        gl,
+                        gl_inv,
+                        gr,
+                        gr_inv,
+                        Some(layout),
+                        Some(l_eff_sec),
+                        Some(r_eff_sec),
+                    )
+                }
+                None => {
+                    let (gl, gl_inv) = dense_metric_gauge(&l_bar, gauge_tol);
+                    let (gr, gr_inv) = dense_metric_gauge(&r_bar, gauge_tol);
+                    (gl, gl_inv, gr, gr_inv, None, None, None)
+                }
+            };
 
         let l_eff = g_l.ncols();
         let r_eff = g_r.ncols();
@@ -628,11 +660,74 @@ impl<'a> WindowEnvs<'a> {
         debug_assert_eq!(g_l.nrows(), l_full);
         debug_assert_eq!(g_r.nrows(), r_full);
 
+        // 1. Transformed norm terms. When `Ñ` is proportional to identity
+        // (`p == 1` or negligible subleading tail `< 1e-11`), rescale `(G_L, G_R)`
+        // by `prod^{-1/4}` so `Ñ == I` and the identity fast path triggers
+        // without altering `p > 1` gauge conditioning.
+        let nl_raw = self.norm_left[left_pos].as_ref().unwrap();
+        let nr_raw = self.norm_right[right_pos].as_ref().unwrap();
+        let mut norm_terms: Vec<(Mat<C64>, Mat<C64>)> = nl_raw
+            .iter()
+            .zip(nr_raw)
+            .map(|(lm, rm)| {
+                (
+                    matmul(g_l.adjoint(), matmul(lm.as_ref(), g_l.as_ref()).as_ref()),
+                    matmul(g_r.adjoint(), matmul(rm.as_ref(), g_r.as_ref()).as_ref()),
+                )
+            })
+            .collect();
+
+        let n_is_identity = if l_eff > 0 && r_eff > 0 && !norm_terms.is_empty() {
+            let (lm0, rm0) = &norm_terms[0];
+            let scale_l = lm0[(0, 0)];
+            let scale_r = rm0[(0, 0)];
+            let prod = scale_l * scale_r;
+            let lead_is_id = prod.re > 0.0
+                && prod.im.abs() <= 1e-11 * prod.re
+                && is_scaled_identity(lm0, scale_l, 1e-11)
+                && is_scaled_identity(rm0, scale_r, 1e-11);
+            let tail_negligible = if !lead_is_id {
+                false
+            } else if norm_terms.len() == 1 {
+                true
+            } else {
+                let tail_norm: f64 = norm_terms[1..]
+                    .iter()
+                    .map(|(lm, rm)| lm.as_ref().norm_l2() * rm.as_ref().norm_l2())
+                    .sum();
+                tail_norm < 1e-11 * prod.re
+            };
+            if !self.short_ring && tail_negligible && (prod.re - 1.0).abs() > 1e-12 {
+                let s = prod.re.powf(-0.25);
+                let inv_s = s.recip();
+                let s2 = s * s;
+                g_l *= faer::Scale(C64::new(s, 0.0));
+                g_r *= faer::Scale(C64::new(s, 0.0));
+                g_l_inv *= faer::Scale(C64::new(inv_s, 0.0));
+                g_r_inv *= faer::Scale(C64::new(inv_s, 0.0));
+                for (lm, rm) in &mut norm_terms {
+                    *lm *= faer::Scale(C64::new(s2, 0.0));
+                    *rm *= faer::Scale(C64::new(s2, 0.0));
+                }
+                true
+            } else {
+                norm_terms.len() == 1 && lead_is_id && (prod - ONE).norm() < 1e-11
+            }
+        } else {
+            false
+        };
+
         // Helper to transform a left matrix M -> G_L† M G_L and right matrix M -> G_R† M G_R.
         let xform_l = |m: &Mat<C64>| -> Mat<C64> {
+            if !mat_is_nonzero(m) {
+                return Mat::zeros(l_eff, l_eff);
+            }
             matmul(g_l.adjoint(), matmul(m.as_ref(), g_l.as_ref()).as_ref())
         };
         let xform_r = |m: &Mat<C64>| -> Mat<C64> {
+            if !mat_is_nonzero(m) {
+                return Mat::zeros(r_eff, r_eff);
+            }
             matmul(g_r.adjoint(), matmul(m.as_ref(), g_r.as_ref()).as_ref())
         };
         let xform_env_l = |e: &Env| -> Env {
@@ -646,26 +741,49 @@ impl<'a> WindowEnvs<'a> {
             }
         };
 
-        // 1. Transformed norm terms.
-        let nl_raw = self.norm_left[left_pos].as_ref().unwrap();
-        let nr_raw = self.norm_right[right_pos].as_ref().unwrap();
-        let norm_terms: Vec<(Mat<C64>, Mat<C64>)> = nl_raw
-            .iter()
-            .zip(nr_raw)
-            .map(|(lm, rm)| (xform_l(lm), xform_r(rm)))
-            .collect();
-
-        // Check if Ñ is proportional to identity (fast path: exact p0 == 1 and L̃_0 ∝ I, R̃_0 ∝ I).
-        let n_is_identity = if norm_terms.len() == 1 {
-            let (lm, rm) = &norm_terms[0];
-            let scale_l = if l_eff > 0 { lm[(0, 0)].re } else { 1.0 };
-            let scale_r = if r_eff > 0 { rm[(0, 0)].re } else { 1.0 };
-            let prod = scale_l * scale_r;
-            (prod - 1.0).abs() < 1e-11
-                && is_scaled_identity(lm, C64::new(scale_l, 0.0), 1e-11)
-                && is_scaled_identity(rm, C64::new(scale_r, 0.0), 1e-11)
+        // Exact diagonal of Ñ for Jacobi-preconditioned CG (O(p * l_eff * r_eff)).
+        let n_diag: Vec<f64> = if n_is_identity || l_eff == 0 || r_eff == 0 {
+            Vec::new()
         } else {
-            false
+            let mut diag_lr = vec![0.0f64; l_eff * r_eff];
+            for (lm, rm) in &norm_terms {
+                for i in 0..l_eff {
+                    let lii = lm[(i, i)];
+                    let row = &mut diag_lr[i * r_eff..(i + 1) * r_eff];
+                    for j in 0..r_eff {
+                        row[j] += (lii * rm[(j, j)]).re;
+                    }
+                }
+            }
+            match &layout {
+                None => {
+                    let mut out = vec![0.0f64; l_eff * phys * r_eff];
+                    for i in 0..l_eff {
+                        let src = &diag_lr[i * r_eff..(i + 1) * r_eff];
+                        for p in 0..phys {
+                            out[(i * phys + p) * r_eff..][..r_eff].copy_from_slice(src);
+                        }
+                    }
+                    out
+                }
+                Some(lay) => {
+                    let mut out = vec![0.0f64; lay.len];
+                    for &(s, _ds, offset, width) in &lay.rows {
+                        let rs = lay.left.range(s);
+                        for p in 0..lay.phys {
+                            let Some((_, col0, t)) = lay.cols[s * lay.phys + p] else {
+                                continue;
+                            };
+                            let rt = lay.right.range(t);
+                            for (a, li) in rs.clone().enumerate() {
+                                let dst = &mut out[offset + a * width + col0..][..rt.len()];
+                                dst.copy_from_slice(&diag_lr[li * r_eff + rt.start..][..rt.len()]);
+                            }
+                        }
+                    }
+                    out
+                }
+            }
         };
 
         // 2. Transformed H_W batched MPO operator (all p_0 modes stacked into ONE operator!).
@@ -812,6 +930,7 @@ impl<'a> WindowEnvs<'a> {
             l_eff,
             r_eff,
             phys,
+            short_ring: self.short_ring,
             g_l,
             g_l_inv,
             g_r,
@@ -820,6 +939,7 @@ impl<'a> WindowEnvs<'a> {
             left_eff_sec,
             right_eff_sec,
             n_is_identity,
+            n_diag,
             norm_op: LocalNormOp {
                 stacked: norm_stacked,
                 #[cfg(feature = "gpu")]
@@ -911,6 +1031,7 @@ pub(super) struct LocalProblem {
     pub(super) l_eff: usize,
     pub(super) r_eff: usize,
     pub(super) phys: usize,
+    pub(super) short_ring: bool,
     /// `G_L` (`l_full × l_eff`), maps gauge coords -> bond coords.
     pub(super) g_l: Mat<C64>,
     /// `G_L^{-1}` (`l_eff × l_full`), maps bond coords -> gauge coords.
@@ -923,6 +1044,7 @@ pub(super) struct LocalProblem {
     pub(super) left_eff_sec: Option<crate::mps::charges::Sectors>,
     pub(super) right_eff_sec: Option<crate::mps::charges::Sectors>,
     pub(super) n_is_identity: bool,
+    pub(super) n_diag: Vec<f64>,
     pub(super) norm_op: LocalNormOp,
     pub(super) norm_terms: Vec<(Mat<C64>, Mat<C64>)>,
     pub(super) ham_op: LocalHamOp,
@@ -1020,14 +1142,37 @@ impl LocalProblem {
         cap_norm: bool,
     ) -> Result<crate::statevector::eigen::Ritz<C64>, Error> {
         if self.n_is_identity {
-            return super::solver::solve_generalized_lowest(
+            let dim = v0.len();
+            if self.short_ring || dim <= 16 {
+                return super::solver::solve_generalized_lowest(
+                    &self.ham_linear_op(),
+                    &self.norm_linear_op(),
+                    v0,
+                    true,
+                    None,
+                    options,
+                    null_tol,
+                );
+            }
+            let nrm = crate::statevector::krylov::norm(v0);
+            let u0: Vec<C64> = if nrm > 0.0 {
+                v0.iter().map(|&a| a / nrm).collect()
+            } else {
+                let mut u = vec![ZERO; dim];
+                u[0] = ONE;
+                u
+            };
+            let (value, vector, converged) = lanczos_full_reorth(
                 &self.ham_linear_op(),
-                &self.norm_linear_op(),
-                v0,
-                true,
-                options,
-                null_tol,
+                &u0,
+                options.tolerance,
+                dim.min(options.max_iterations).min(64),
             );
+            return Ok(crate::statevector::eigen::Ritz {
+                value,
+                vector,
+                converged,
+            });
         }
         if let Some(proj) = BondMetricProjector::try_build(self, null_tol.max(1e-10)) {
             let v0_norm = crate::statevector::krylov::norm(v0).max(1.0);
@@ -1056,14 +1201,16 @@ impl LocalProblem {
             &self.norm_linear_op(),
             v0,
             false,
+            Some(&self.n_diag),
             options,
             null_tol,
         )
     }
 
     /// Evolve `i Ñ dx/dt = H̃ x` in place for time `dt`. Uses exact bond-metric
-    /// projection + standard `krylov_evolve` whenever `bond_dim ≤ 256`, falling
-    /// back to matrix-free `N`-inner-product Lanczos for larger bonds.
+    /// projection + standard `krylov_evolve` whenever `bond_dim ≤ MAX_BOND_METRIC_DIM`,
+    /// falling back to Jacobi-preconditioned matrix-free `N`-inner-product Lanczos
+    /// in `O(p D χ³)` for larger bonds.
     ///
     /// Returns the built [`BondMetricProjector`] (if any) so two-site TDVP can
     /// reuse it for exact `N`-norm pair polishing without recomputing `N_bond` EVD.
@@ -1083,6 +1230,7 @@ impl LocalProblem {
                 x,
                 dt,
                 true,
+                None,
                 null_tol,
             )?;
             return Ok(None);
@@ -1113,6 +1261,7 @@ impl LocalProblem {
             x,
             dt,
             false,
+            Some(&self.n_diag),
             null_tol,
         )?;
         Ok(None)
@@ -1143,6 +1292,13 @@ impl LocalProblem {
         if self.n_is_identity || self.phys != 4 {
             return false;
         }
+        let Some(proj) = cached_proj else {
+            return false;
+        };
+        if proj.proj_dim() > 4 * MAX_BOND_METRIC_DIM {
+            return false;
+        }
+        let _ = null_tol;
         let eval_err = |a: &Tensor, b: &Tensor| -> f64 {
             let theta = super::dmrg::two_site_dense(a, b);
             let va = self.to_solver_vec(&theta);
@@ -1152,20 +1308,9 @@ impl LocalProblem {
             crate::statevector::krylov::dot(&diff, &nd).re.max(0.0)
         };
         let err0 = eval_err(a_full, b_full);
-        if err0 <= 1e-22 {
+        if err0 <= 1e-16 {
             return false;
         }
-        let owned_proj;
-        let proj = match cached_proj {
-            Some(p) => p,
-            None => match BondMetricProjector::try_build(self, null_tol) {
-                Some(p) => {
-                    owned_proj = p;
-                    &owned_proj
-                }
-                None => return false,
-            },
-        };
         let z_target = proj.project_in(x_target);
         let k = a_full.right;
         if k == 0 {
@@ -1221,7 +1366,7 @@ impl LocalProblem {
                     z_target[(p1 * 2 + p2) * rk + c]
                 });
 
-                for _sweep in 0..3 {
+                for _sweep in 0..2 {
                     // Orthonormalize A before solving for B.
                     if a_tilde.nrows() >= cur_k {
                         let (q, _r_c) = crate::mps::linalg::thin_qr(a_tilde.as_ref());
@@ -1473,7 +1618,7 @@ impl LocalProblem {
                     }
                 };
 
-                for _sweep in 0..3 {
+                for _sweep in 0..2 {
                     qr_a_sym(&mut a_tilde, &mut b_tilde);
                     // B-step: decoupled per p2.
                     let mut res_b_sq = 0.0f64;
@@ -1719,10 +1864,14 @@ fn min_norm_lstsq(a: MatRef<'_, C64>, b: MatRef<'_, C64>, rcond: f64) -> Mat<C64
 }
 
 /// Maximum single-block bond metric dimension for direct `N_bond`
-/// canonical orthogonalization (covers `χ ≤ 16` dense, and `χ ≫ 16` symmetric;
-/// above this, `O(p D χ³)` matrix-free Davidson / subspace Rayleigh–Ritz runs
-/// so we never pay `O(χ⁶)` EVD cost).
-const MAX_BOND_METRIC_DIM: usize = 256;
+/// canonical orthogonalization on general rings (`χ ≤ 8` dense, or small
+/// symmetric blocks; above this, `O(p D χ³)` Jacobi-preconditioned matrix-free
+/// Davidson / subspace Rayleigh–Ritz runs so we never pay `O(χ⁶)` EVD cost).
+const MAX_BOND_METRIC_DIM: usize = 64;
+
+/// On small rings (`n <= 12`) where `N_bond` is structurally rank-deficient
+/// (`χ² > 2^{L_opp}`), allow direct bond-metric projection up to dim 256.
+const SHORT_RING_BOND_METRIC_DIM: usize = 256;
 
 /// Exact canonical orthogonaliser `X = U_kept D_kept^{-1/2}`, `Y = D_kept^{1/2} U_kept†`
 /// of the bond metric `N_bond` (dense: shared across all `phys` states;
@@ -1758,11 +1907,16 @@ pub(super) struct SymMetricBlock {
 impl BondMetricProjector {
     fn try_build(prob: &LocalProblem, null_tol: f64) -> Option<Self> {
         let (l, r, phys) = (prob.l_eff, prob.r_eff, prob.phys);
+        let max_dim = if prob.short_ring {
+            SHORT_RING_BOND_METRIC_DIM
+        } else {
+            MAX_BOND_METRIC_DIM
+        };
         let thresh_rel = null_tol.max(1e-12);
         match &prob.layout {
             None => {
                 let m = l * r;
-                if m == 0 || m > MAX_BOND_METRIC_DIM {
+                if m == 0 || m > max_dim {
                     return None;
                 }
                 // Build N_bond[(i, j), (i', j')] = Σ_μ L_μ[i, i'] R_μ[j, j'] in ONE GEMM!
@@ -1852,7 +2006,7 @@ impl BondMetricProjector {
                         }
                     }
                 }
-                if by_p.iter().any(|b| b.0.len() > MAX_BOND_METRIC_DIM) {
+                if by_p.iter().any(|b| b.0.len() > max_dim) {
                     return None;
                 }
                 // EVD each physical block `N_p`.
@@ -2499,13 +2653,22 @@ impl<O: LinearOperator<C64>> LinearOperator<C64> for PackedOp<'_, O> {
         match self.layout {
             None => self.inner.apply(x, out),
             Some(layout) => {
-                // Note: LOCAL_SCRATCH is borrowed inside `self.inner.apply`, so keep
-                // dense_in / dense_out outside that borrow.
-                let dense_in = layout.scatter(x);
-                let mut dense_out = vec![ZERO; dense_in.len()];
-                self.inner.apply(&dense_in, &mut dense_out);
-                let packed = layout.gather(&dense_out);
-                out.copy_from_slice(&packed);
+                // Note: LOCAL_SCRATCH is borrowed inside `self.inner.apply`, so
+                // PACKED_SCRATCH is kept in a separate thread-local cell.
+                let dense_len = layout.left.dim() * layout.phys * layout.right.dim();
+                PACKED_SCRATCH.with(|cell| {
+                    let mut sc = cell.borrow_mut();
+                    ensure_len(&mut sc.dense_in, dense_len);
+                    ensure_len(&mut sc.dense_out, dense_len);
+                    let PackedScratch {
+                        dense_in,
+                        dense_out,
+                    } = &mut *sc;
+                    layout.scatter_into(x, &mut dense_in[..dense_len]);
+                    self.inner
+                        .apply(&dense_in[..dense_len], &mut dense_out[..dense_len]);
+                    layout.gather_into(&dense_out[..dense_len], out);
+                });
             }
         }
     }
@@ -2621,20 +2784,24 @@ impl StackedPairOp {
 }
 
 /// One cache-sized tile of `ck ≤ MPO_MODE_TILE` PWE boundary modes inside
-/// [`BatchedMpoOp`], storing only non-zero left/right channel blocks so
-/// block-sparse symmetric MPOs skip empty charge channels completely.
+/// [`BatchedMpoOp`], storing only non-zero left/right channel blocks and a
+/// pre-flattened instruction list so block-sparse symmetric MPOs skip empty
+/// charge channels with zero branching in the hot matvec loop.
 struct MpoModeChunk {
-    ck: usize,
     /// Compact active `(m_rel, a)` left blocks stacked row-major: `(n_l * l) × l`.
     l_stack: Vec<C64>,
-    /// Index in `0..n_l` for each `(m_rel * lb + a)`, or `None` if zero.
-    l_slot: Vec<Option<usize>>,
     n_l: usize,
     /// Compact active `(m_rel, c)` right blocks stacked row-major: `(n_r * r) × r`.
     r_stack: Vec<C64>,
-    /// Index in `0..n_r` for each `(m_rel * rb + c)`, or `None` if zero.
-    r_slot: Vec<Option<usize>>,
     n_r: usize,
+    /// Pre-flattened non-zero mix instructions `(sl, p_in, sr, p_out, coeff)`.
+    mix: Vec<(usize, usize, usize, usize, C64)>,
+    #[cfg(feature = "gpu")]
+    ck: usize,
+    #[cfg(feature = "gpu")]
+    l_slot: Vec<Option<usize>>,
+    #[cfg(feature = "gpu")]
+    r_slot: Vec<Option<usize>>,
 }
 
 const MPO_MODE_TILE: usize = 8;
@@ -2648,8 +2815,10 @@ struct BatchedMpoOp {
     phys: usize,
     k: usize,
     lb: usize,
+    #[cfg(feature = "gpu")]
     rb: usize,
     chunks: Vec<MpoModeChunk>,
+    #[cfg(feature = "gpu")]
     rows: Rows,
 }
 
@@ -2706,15 +2875,41 @@ impl BatchedMpoOp {
                 }
             }
             if n_l > 0 && n_r > 0 {
-                chunks.push(MpoModeChunk {
-                    ck,
-                    l_stack,
-                    l_slot,
-                    n_l,
-                    r_stack,
-                    r_slot,
-                    n_r,
-                });
+                let mut mix = Vec::new();
+                for mr in 0..ck {
+                    let l_base = mr * lb;
+                    let r_base = mr * rb;
+                    for (key, terms) in rows.iter().enumerate() {
+                        if terms.is_empty() {
+                            continue;
+                        }
+                        let (c, p_out) = (key / phys, key % phys);
+                        let Some(sr) = r_slot[r_base + c] else {
+                            continue;
+                        };
+                        for &(a, p_in, f) in terms {
+                            let Some(sl) = l_slot[l_base + a] else {
+                                continue;
+                            };
+                            mix.push((sl, p_in, sr, p_out, f));
+                        }
+                    }
+                }
+                if !mix.is_empty() {
+                    chunks.push(MpoModeChunk {
+                        l_stack,
+                        n_l,
+                        r_stack,
+                        n_r,
+                        mix,
+                        #[cfg(feature = "gpu")]
+                        ck,
+                        #[cfg(feature = "gpu")]
+                        l_slot,
+                        #[cfg(feature = "gpu")]
+                        r_slot,
+                    });
+                }
             }
         }
         BatchedMpoOp {
@@ -2723,18 +2918,21 @@ impl BatchedMpoOp {
             phys,
             k,
             lb,
+            #[cfg(feature = "gpu")]
             rb,
             chunks,
+            #[cfg(feature = "gpu")]
             rows,
         }
     }
 
     fn apply_chunk(&self, ch: &MpoModeChunk, x: &[C64], out: &mut [C64]) {
-        let (l, r, phys, lb, rb) = (self.l, self.r, self.phys, self.lb, self.rb);
+        let (l, r, phys) = (self.l, self.r, self.phys);
         let pr = phys * r;
         let y_len = ch.n_l * l * pr;
         let nr_r = ch.n_r * r;
         let z_len = l * phys * nr_r;
+        let neg_one = C64::new(-1.0, 0.0);
         LOCAL_SCRATCH.with(|cell| {
             let mut sc = cell.borrow_mut();
             ensure_len(&mut sc.y, y_len);
@@ -2753,29 +2951,31 @@ impl BatchedMpoOp {
             let z_slice = &mut z[..z_len];
             z_slice.fill(ZERO);
             let y_slice = &y[..y_len];
-            for mr in 0..ch.ck {
-                let l_base = mr * lb;
-                let r_base = mr * rb;
-                for (key, terms) in self.rows.iter().enumerate() {
-                    if terms.is_empty() {
-                        continue;
+            for &(sl, p_in, sr, p_out, f) in &ch.mix {
+                let y_a_off = sl * l * pr + p_in * r;
+                let z_col = sr * r;
+                if f == ONE {
+                    for i in 0..l {
+                        let y_src = &y_slice[y_a_off + i * pr..][..r];
+                        let z_dst = &mut z_slice[(i * phys + p_out) * nr_r + z_col..][..r];
+                        for (zv, &yv) in z_dst.iter_mut().zip(y_src) {
+                            *zv += yv;
+                        }
                     }
-                    let (c, p_out) = (key / phys, key % phys);
-                    let Some(sr) = ch.r_slot[r_base + c] else {
-                        continue;
-                    };
-                    let z_col = sr * r;
-                    for &(a, p_in, f) in terms {
-                        let Some(sl) = ch.l_slot[l_base + a] else {
-                            continue;
-                        };
-                        let y_a_off = sl * l * pr + p_in * r;
-                        for i in 0..l {
-                            let y_src = &y_slice[y_a_off + i * pr..][..r];
-                            let z_dst = &mut z_slice[(i * phys + p_out) * nr_r + z_col..][..r];
-                            for (zv, &yv) in z_dst.iter_mut().zip(y_src) {
-                                *zv += f * yv;
-                            }
+                } else if f == neg_one {
+                    for i in 0..l {
+                        let y_src = &y_slice[y_a_off + i * pr..][..r];
+                        let z_dst = &mut z_slice[(i * phys + p_out) * nr_r + z_col..][..r];
+                        for (zv, &yv) in z_dst.iter_mut().zip(y_src) {
+                            *zv -= yv;
+                        }
+                    }
+                } else {
+                    for i in 0..l {
+                        let y_src = &y_slice[y_a_off + i * pr..][..r];
+                        let z_dst = &mut z_slice[(i * phys + p_out) * nr_r + z_col..][..r];
+                        for (zv, &yv) in z_dst.iter_mut().zip(y_src) {
+                            *zv += f * yv;
                         }
                     }
                 }
@@ -3192,12 +3392,16 @@ pub(super) fn dense_metric_gauge(m: &Mat<C64>, tol: f64) -> (Mat<C64>, Mat<C64>)
 }
 
 fn is_scaled_identity(m: &Mat<C64>, scale: C64, tol: f64) -> bool {
+    let ref_norm = scale.norm();
+    if ref_norm <= 0.0 || !ref_norm.is_finite() {
+        return false;
+    }
+    let thresh = tol * ref_norm;
     let d = m.nrows();
-    let ref_norm = scale.norm().max(1.0);
     for i in 0..d {
         for j in 0..d {
             let want = if i == j { scale } else { ZERO };
-            if (m[(i, j)] - want).norm() > tol * ref_norm {
+            if (m[(i, j)] - want).norm() > thresh {
                 return false;
             }
         }

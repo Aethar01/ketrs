@@ -586,7 +586,8 @@ impl PeriodicMps {
 
     /// Split gauge-conditioned two-site tensor `theta_tilde` into `tensors[q1]`
     /// and `tensors[q2]` with optimal metric-weighted truncation and strict QR
-    /// orthonormality on the side moved away from.
+    /// orthonormality on the side moved away from. Returns the discarded weight
+    /// fraction of this split (`0.0` if no singular values were truncated).
     pub(super) fn split_window_pair(
         &mut self,
         q1: usize,
@@ -594,7 +595,7 @@ impl PeriodicMps {
         prob: &super::window::LocalProblem,
         theta_tilde: MatRef<'_, C64>,
         absorb: Absorb,
-    ) {
+    ) -> f64 {
         if let Some(sym) = &self.symmetry {
             let (a_new, b_new, mid_sec, disc) = split_metric_symmetric(
                 theta_tilde,
@@ -614,16 +615,19 @@ impl PeriodicMps {
             self.tensors[q2] = b_new;
             self.symmetry.as_mut().unwrap().bonds[q2] = mid_sec;
             self.truncation_error += disc;
-            return;
+            return disc;
         }
 
         let (u, s, v) = thin_svd(theta_tilde);
         let total: f64 = s.iter().map(|x| x * x).sum();
         let keep = keep_count(&s, total, &self.options);
         let kept: f64 = s[..keep].iter().map(|x| x * x).sum();
-        if total > 0.0 {
-            self.truncation_error += ((total - kept) / total).max(0.0);
-        }
+        let disc = if total > 0.0 && keep < s.len() {
+            ((total - kept) / total).max(0.0)
+        } else {
+            0.0
+        };
+        self.truncation_error += disc;
 
         let u_k = u.as_ref().subcols(0, keep);
         let vh_k = Mat::<C64>::from_fn(keep, v.nrows(), |r, c| v[(c, r)].conj());
@@ -674,6 +678,7 @@ impl PeriodicMps {
                 self.tensors[q2] = Tensor::from_matrix(q_right.as_ref(), k, r_full);
             }
         }
+        disc
     }
 
     /// Metric-weighted split with White's subspace-expansion noise: keeps the

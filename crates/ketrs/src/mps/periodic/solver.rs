@@ -49,6 +49,7 @@ pub(super) fn solve_generalized_lowest(
     n_op: &impl LinearOperator<C64>,
     v0: &[C64],
     n_is_identity: bool,
+    n_diag: Option<&[f64]>,
     options: &EigenOptions,
     null_tol: f64,
 ) -> Result<Ritz<C64>, Error> {
@@ -69,7 +70,7 @@ pub(super) fn solve_generalized_lowest(
         return solve_direct(h_op, n_op, v0, null_tol);
     }
 
-    solve_davidson(h_op, n_op, v0, options, null_tol)
+    solve_davidson(h_op, n_op, v0, n_diag, options, null_tol)
 }
 
 /// Exact dense generalized eigensolver via canonical orthogonalization of `N`.
@@ -184,6 +185,7 @@ fn solve_davidson(
     h_op: &impl LinearOperator<C64>,
     n_op: &impl LinearOperator<C64>,
     v0: &[C64],
+    n_diag: Option<&[f64]>,
     options: &EigenOptions,
     null_tol: f64,
 ) -> Result<Ritz<C64>, Error> {
@@ -319,14 +321,21 @@ fn solve_davidson(
             break;
         }
 
-        // Light CG preconditioning on (N + η I) w = res only when the projected
-        // metric has noticeable spread; otherwise gauge-conditioned Ñ ≈ I already!
+        // Light Jacobi-preconditioned CG on (N + η I) w = res only when the
+        // projected metric has noticeable spread; otherwise gauge-conditioned Ñ ≈ I already!
         let min_kept_n = kept
             .iter()
             .map(|&k| n_vals[k])
             .fold(f64::INFINITY, f64::min);
         let mut w = if max_n > 10.0 * min_kept_n {
-            cg_precondition(n_op, &res, 2, (1e-3 * max_n).max(thresh_rel * max_n))
+            pcg_solve_reg(
+                n_op,
+                &res,
+                n_diag,
+                (1e-3 * max_n).max(thresh_rel * max_n),
+                3,
+                1e-2,
+            )
         } else {
             res.clone()
         };
@@ -447,52 +456,6 @@ fn solve_davidson(
     })
 }
 
-/// Approximate solve `(N + shift * I) x = rhs` by `max_steps` CG iterations.
-fn cg_precondition(
-    n_op: &impl LinearOperator<C64>,
-    rhs: &[C64],
-    max_steps: usize,
-    shift: f64,
-) -> Vec<C64> {
-    let dim = rhs.len();
-    let mut x = vec![ZERO; dim];
-    let mut r = rhs.to_vec();
-    let mut p = r.clone();
-    let mut rr = dot(&r, &r).re;
-    let r0 = rr;
-    if r0 == 0.0 {
-        return x;
-    }
-    let mut ap = vec![ZERO; dim];
-    for _ in 0..max_steps {
-        n_op.apply(&p, &mut ap);
-        if shift > 0.0 {
-            for j in 0..dim {
-                ap[j] += C64::new(shift, 0.0) * p[j];
-            }
-        }
-        let pap = dot(&p, &ap).re;
-        if pap <= 1e-18 * r0 {
-            break;
-        }
-        let alpha = rr / pap;
-        for j in 0..dim {
-            x[j] += C64::new(alpha, 0.0) * p[j];
-            r[j] -= C64::new(alpha, 0.0) * ap[j];
-        }
-        let rr_new = dot(&r, &r).re;
-        if rr_new <= 1e-6 * r0 {
-            break;
-        }
-        let beta = rr_new / rr;
-        for j in 0..dim {
-            p[j] = r[j] + C64::new(beta, 0.0) * p[j];
-        }
-        rr = rr_new;
-    }
-    x
-}
-
 /// Solve `i N dx/dt = H x` for time `dt`, replacing `x` in place with
 /// `exp(-i dt N^+ H) x`.
 pub(super) fn evolve_generalized(
@@ -501,6 +464,7 @@ pub(super) fn evolve_generalized(
     x: &mut [C64],
     dt: f64,
     n_is_identity: bool,
+    n_diag: Option<&[f64]>,
     null_tol: f64,
 ) -> Result<(), Error> {
     if dt == 0.0 || x.is_empty() {
@@ -513,7 +477,7 @@ pub(super) fn evolve_generalized(
     if dim <= DIRECT_DIM {
         return evolve_direct(h_op, n_op, x, dt, null_tol);
     }
-    evolve_n_lanczos(h_op, n_op, x, dt, null_tol)
+    evolve_n_lanczos(h_op, n_op, x, dt, n_diag, null_tol)
 }
 
 /// Exact dense generalized evolution via canonical orthogonalization of `N`.
@@ -632,16 +596,26 @@ fn evolve_n_lanczos(
     n_op: &impl LinearOperator<C64>,
     x: &mut [C64],
     time: f64,
+    n_diag: Option<&[f64]>,
     null_tol: f64,
 ) -> Result<(), Error> {
     let dim = x.len();
-    let max_m = 20usize.min(dim);
-    let tol = 1e-8;
+    let max_m = if null_tol > 1e-3 {
+        12usize.min(dim)
+    } else {
+        20usize.min(dim)
+    };
+    let tol = if null_tol > 1e-5 {
+        (0.05 * null_tol).clamp(1e-7, 1e-3)
+    } else {
+        1e-7
+    };
     let thresh_rel = null_tol.max(NULL_TOL);
     let mut remaining = time;
     let mut substeps = 0;
+    let max_substeps = 4usize;
 
-    while remaining.abs() > 1e-15 && substeps < 2 {
+    while remaining.abs() > 1e-15 && substeps < max_substeps {
         substeps += 1;
         let x_norm = norm(x);
         if x_norm <= 1e-30 {
@@ -656,7 +630,13 @@ fn evolve_n_lanczos(
         if n0_quad <= 1e-30 {
             break;
         }
-        let reg_eta = (null_tol.max(1e-8) * n0_quad).max(1e-12);
+        // When PWE truncation makes `N` slightly indefinite (`null_tol > 1e-4`),
+        // add a small SPD shift to the PCG preconditioner so CG never diverges.
+        let prec_eta = if null_tol > 1e-4 {
+            (0.05 * null_tol * n0_quad).max(1e-10)
+        } else {
+            (1e-10 * n0_quad).max(1e-14)
+        };
 
         let mut basis: Vec<Vec<C64>> = Vec::with_capacity(max_m);
         let mut h_basis: Vec<Vec<C64>> = Vec::with_capacity(max_m);
@@ -676,9 +656,9 @@ fn evolve_n_lanczos(
 
         for k in 0..max_m {
             let m = basis.len();
-            // Check convergence starting at m >= 4, every 2 steps or at m == max_m.
-            if m >= 4
-                && (m.is_multiple_of(2) || m == max_m)
+            // Check convergence starting at m >= 3 (every step up to 6, then every 2).
+            if m >= 3
+                && (m <= 6 || m.is_multiple_of(2) || m == max_m)
                 && let Some((delta_c, z0_norm)) =
                     subspace_generalized_expm(&h_sub, &n_sub, m, x_norm, remaining, thresh_rel)
             {
@@ -709,9 +689,18 @@ fn evolve_n_lanczos(
                 break;
             }
 
-            // Generate next basis vector w ≈ (N + η I)^{-1} H v_k (strictly SPD,
-            // bounded at 15 CG iterations — never stalls on rank-deficient N).
-            let mut w = cg_solve_reg(n_op, &h_basis[k], reg_eta, 15, 1e-5);
+            // Leading Krylov directions `k = 0, 1` dominate `exp(-i dt N^+ H) v0`
+            // by powers of `dt`, while higher `k` tolerate looser PCG precision.
+            let (pcg_iters, pcg_tol) = if null_tol > 1e-4 {
+                (6, 1e-3)
+            } else if k == 0 {
+                (20, 1e-9)
+            } else if k == 1 {
+                (14, 1e-7)
+            } else {
+                (8, 1e-5)
+            };
+            let mut w = pcg_solve_reg(n_op, &h_basis[k], n_diag, prec_eta, pcg_iters, pcg_tol);
             // Two-pass Modified Gram-Schmidt orthogonalization against `basis`.
             for _ in 0..2 {
                 for v in &basis {
@@ -772,46 +761,62 @@ fn evolve_n_lanczos(
         let (dt, delta_c) = match chosen_delta {
             Some(dc) => (chosen_dt, dc),
             None => {
-                // Subspace hit max_m without converging for full `remaining`:
-                // halve dt until m vs m-2 agree to `tol` (or accept smallest step).
-                let mut frac = 0.5;
-                let mut picked = None;
-                for _ in 0..8 {
-                    let dt_try = remaining * frac;
-                    if let (Some((dc_full, z0n)), Some((dc_prev, _))) = (
-                        subspace_generalized_expm(&h_sub, &n_sub, m, x_norm, dt_try, thresh_rel),
-                        subspace_generalized_expm(
-                            &h_sub,
-                            &n_sub,
-                            m.saturating_sub(2).max(1),
-                            x_norm,
-                            dt_try,
-                            thresh_rel,
-                        ),
-                    ) {
-                        let mut diff_c = dc_full.clone();
-                        for i in 0..dc_prev.len() {
-                            diff_c[i] -= dc_prev[i];
-                        }
-                        let mut err_sq = 0.0f64;
-                        for i in 0..m {
-                            let mut acc = ZERO;
-                            for j in 0..m {
-                                acc += n_sub[(i, j)] * diff_c[j];
-                            }
-                            err_sq += (diff_c[i].conj() * acc).re;
-                        }
-                        if err_sq.max(0.0).sqrt() / z0n.max(1e-30) <= tol {
-                            picked = Some((dt_try, dc_full));
-                            break;
-                        }
-                    }
-                    frac *= 0.5;
-                }
-                picked.unwrap_or_else(|| {
-                    let dc = prev_delta.unwrap_or_else(|| vec![ZERO; m]);
+                // On the final allowed substep or when PWE metric noise limits
+                // precision, take the full remaining `dt` cleanly.
+                if substeps >= max_substeps || null_tol > 1e-4 {
+                    let dc =
+                        subspace_generalized_expm(&h_sub, &n_sub, m, x_norm, remaining, thresh_rel)
+                            .map(|(dc, _)| dc)
+                            .or(prev_delta)
+                            .unwrap_or_else(|| vec![ZERO; m]);
                     (remaining, dc)
-                })
+                } else {
+                    let mut frac = 0.5;
+                    let mut picked = None;
+                    for _ in 0..2 {
+                        let dt_try = remaining * frac;
+                        if let (Some((dc_full, z0n)), Some((dc_prev, _))) = (
+                            subspace_generalized_expm(
+                                &h_sub, &n_sub, m, x_norm, dt_try, thresh_rel,
+                            ),
+                            subspace_generalized_expm(
+                                &h_sub,
+                                &n_sub,
+                                m.saturating_sub(2).max(1),
+                                x_norm,
+                                dt_try,
+                                thresh_rel,
+                            ),
+                        ) {
+                            let mut diff_c = dc_full.clone();
+                            for i in 0..dc_prev.len() {
+                                diff_c[i] -= dc_prev[i];
+                            }
+                            let mut err_sq = 0.0f64;
+                            for i in 0..m {
+                                let mut acc = ZERO;
+                                for j in 0..m {
+                                    acc += n_sub[(i, j)] * diff_c[j];
+                                }
+                                err_sq += (diff_c[i].conj() * acc).re;
+                            }
+                            if err_sq.max(0.0).sqrt() / z0n.max(1e-30) <= tol {
+                                picked = Some((dt_try, dc_full));
+                                break;
+                            }
+                        }
+                        frac *= 0.5;
+                    }
+                    picked.unwrap_or_else(|| {
+                        let dc = subspace_generalized_expm(
+                            &h_sub, &n_sub, m, x_norm, remaining, thresh_rel,
+                        )
+                        .map(|(dc, _)| dc)
+                        .or(prev_delta)
+                        .unwrap_or_else(|| vec![ZERO; m]);
+                        (remaining, dc)
+                    })
+                }
             }
         };
 
@@ -845,10 +850,14 @@ fn subspace_generalized_expm(
     let h_sub = Mat::<C64>::from_fn(m, m, |i, j| h_sub_full[(i, j)]);
     let (n_vals, n_u) = hermitian_evd(n_sub.as_ref());
     let max_n = n_vals.iter().copied().fold(0.0f64, f64::max);
+    let min_n = n_vals.iter().copied().fold(f64::INFINITY, f64::min);
     if max_n <= 0.0 {
         return None;
     }
-    let thresh = thresh_rel * max_n;
+    // Project out modes below the safe PWE noise floor (capped at 0.1 * max_n
+    // so an aggressive fixed `transfer_rank` still retains O(1) physical modes).
+    let neg_floor = (-min_n).max(0.0) * 5.0;
+    let thresh = (thresh_rel.min(0.1) * max_n).max(neg_floor);
     let kept: Vec<usize> = n_vals
         .iter()
         .enumerate()
@@ -910,47 +919,132 @@ fn subspace_generalized_expm(
     Some((delta_c, z0_norm))
 }
 
-/// Strictly SPD Tikhonov-regularized Conjugate Gradients for `(N + η I) w = rhs`.
-fn cg_solve_reg(
+/// Strictly SPD Jacobi-preconditioned Tikhonov-regularized Conjugate Gradients
+/// for `(N + η I) w = rhs`, starting from the Jacobi guess `w_0 = D^{-1} rhs`.
+fn pcg_solve_reg(
     n_op: &impl LinearOperator<C64>,
     rhs: &[C64],
+    n_diag: Option<&[f64]>,
     eta: f64,
     max_iters: usize,
     tol: f64,
 ) -> Vec<C64> {
     let dim = rhs.len();
-    let mut x = vec![ZERO; dim];
-    let mut r = rhs.to_vec();
-    let mut p = r.clone();
-    let mut rr = dot(&r, &r).re;
-    let r0 = rr;
-    if r0 == 0.0 {
+    let rhs_sq = dot(rhs, rhs).re;
+    if rhs_sq == 0.0 {
+        return vec![ZERO; dim];
+    }
+
+    // Cauchy–Schwarz Jacobi inverse diagonal for Hermitian PSD `N`:
+    // Any entry with `diag[j] <= null_cut` satisfies `|N[i,j]| <= sqrt(null_cut * d_max)`
+    // and lies in `ker(N)` — zero it out (`inv_d[j] = 0.0`) instead of amplifying it!
+    // On active entries (`diag[j] > null_cut`), use exact `1 / (diag[j] + eta)` so
+    // small physical modes (e.g. 1e-6) are preconditioned to O(1) for fast CG!
+    let (inv_d, active_mask): (Vec<f64>, Option<Vec<bool>>) = match n_diag {
+        Some(diag) if diag.len() == dim => {
+            let d_max = diag.iter().copied().fold(0.0f64, f64::max);
+            if d_max <= 0.0 {
+                return vec![ZERO; dim];
+            }
+            let null_cut = (1e-10 * d_max).max(eta);
+            let mut inv = Vec::with_capacity(dim);
+            let mut mask = Vec::with_capacity(dim);
+            let mut any_masked = false;
+            for &d in diag {
+                if d > null_cut {
+                    inv.push(1.0 / (d + eta));
+                    mask.push(true);
+                } else {
+                    inv.push(0.0);
+                    mask.push(false);
+                    any_masked = true;
+                }
+            }
+            (inv, any_masked.then_some(mask))
+        }
+        _ => (vec![1.0 / (1.0 + eta); dim], None),
+    };
+
+    // Restrict RHS to active support (`P rhs`) so PCG operates strictly on
+    // the non-null support of `N` without chasing `ker(N)` noise.
+    let mut rhs_eff_sq = rhs_sq;
+    if let Some(ref mask) = active_mask {
+        rhs_eff_sq = 0.0;
+        for j in 0..dim {
+            if mask[j] {
+                rhs_eff_sq += rhs[j].norm_sqr();
+            }
+        }
+        if rhs_eff_sq == 0.0 {
+            return vec![ZERO; dim];
+        }
+    }
+
+    // Initial guess x_0 = M^{-1} rhs (exact in 1 matvec when Ñ is diagonal / ≈ I!).
+    let mut x: Vec<C64> = (0..dim).map(|j| rhs[j] * inv_d[j]).collect();
+    let mut ap = vec![ZERO; dim];
+    n_op.apply(&x, &mut ap);
+    let mut r = vec![ZERO; dim];
+    let mut rr = 0.0f64;
+    for j in 0..dim {
+        if active_mask.as_ref().is_none_or(|m| m[j]) {
+            let rj = rhs[j] - (ap[j] + C64::new(eta, 0.0) * x[j]);
+            r[j] = rj;
+            rr += rj.norm_sqr();
+        }
+    }
+    if rr <= tol * tol * rhs_eff_sq {
         return x;
     }
-    let mut ap = vec![ZERO; dim];
+
+    let mut z: Vec<C64> = (0..dim).map(|j| r[j] * inv_d[j]).collect();
+    let mut p = z.clone();
+    let mut rz = dot(&r, &z).re;
+    let mut best_r_sq = rr;
+    let mut best_x = x.clone();
+
     for _ in 0..max_iters {
         n_op.apply(&p, &mut ap);
         for j in 0..dim {
-            ap[j] += C64::new(eta, 0.0) * p[j];
+            if active_mask.as_ref().is_none_or(|m| m[j]) {
+                ap[j] += C64::new(eta, 0.0) * p[j];
+            } else {
+                ap[j] = ZERO;
+            }
         }
         let pap = dot(&p, &ap).re;
         if pap <= 1e-30 {
             break;
         }
-        let alpha = rr / pap;
+        let alpha = rz / pap;
+        let mut r_sq = 0.0f64;
         for j in 0..dim {
             x[j] += C64::new(alpha, 0.0) * p[j];
             r[j] -= C64::new(alpha, 0.0) * ap[j];
+            r_sq += r[j].norm_sqr();
         }
-        let rr_new = dot(&r, &r).re;
-        if rr_new <= tol * tol * r0 {
+        if r_sq < best_r_sq {
+            best_r_sq = r_sq;
+            best_x.copy_from_slice(&x);
+        } else if r_sq > 1e2 * best_r_sq {
+            // Indefinite metric caused CG to diverge: return best iterate.
+            return best_x;
+        }
+        if r_sq <= tol * tol * rhs_eff_sq {
             break;
         }
-        let beta = rr_new / rr;
         for j in 0..dim {
-            p[j] = r[j] + C64::new(beta, 0.0) * p[j];
+            z[j] = r[j] * inv_d[j];
         }
-        rr = rr_new;
+        let rz_new = dot(&r, &z).re;
+        if rz_new <= 1e-30 || rz <= 1e-30 {
+            break;
+        }
+        let beta = rz_new / rz;
+        for j in 0..dim {
+            p[j] = z[j] + C64::new(beta, 0.0) * p[j];
+        }
+        rz = rz_new;
     }
-    x
+    best_x
 }

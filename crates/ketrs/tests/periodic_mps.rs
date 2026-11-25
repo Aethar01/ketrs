@@ -1246,6 +1246,134 @@ fn periodic_tdvp_n3_and_dmrg_expectation_multisite_wrap_around() {
     );
 }
 
+#[test]
+fn periodic_tdvp_medium_ring_high_chi_matrix_free_matches_open_mps() {
+    // 24-qubit periodic ring (`n = 24 > SHORT_RING_QUBITS = 12`) with 2-qubit NN,
+    // 3-qubit Jordan-Wigner (`X Z X + Y Z Y`), and span-4 hopping across the
+    // periodic seam at `max_bond = 16`. Exercises the full high-χ O(p D χ³) path:
+    // progressive adaptive randomized SVD (EXACT_TRANSFER_DIM = 64), matrix-free
+    // Cauchy-Schwarz Jacobi-preconditioned N-Lanczos (MAX_BOND_METRIC_DIM = 64),
+    // shrunk seam-straddling windows, and gated global subspace expansion.
+    let n = 24;
+    let mut h = PauliSum::new();
+    for q in 0..n {
+        let q1 = (q + 1) % n;
+        let q2 = (q + 2) % n;
+        let q3 = (q + 3) % n;
+        let stag = if q % 2 == 0 { 0.45 } else { -0.45 };
+        h.add(stag, pauli_term(&[(q, Pauli::Z)]));
+        h.add(0.35, pauli_term(&[(q, Pauli::Z), (q1, Pauli::Z)]));
+        for p in [Pauli::X, Pauli::Y] {
+            // 2-qubit nearest-neighbour hopping (including across seam 23-0).
+            h.add(0.65, pauli_term(&[(q, p), (q1, p)]));
+            // 3-qubit JW hopping on every 2nd site (spans seam 22-23-0 & 23-0-1).
+            if q % 2 == 0 {
+                h.add(0.35, pauli_term(&[(q, p), (q1, Pauli::Z), (q2, p)]));
+            }
+            // Span-4 hopping on every 4th site (straddles cuts 0 and n/2).
+            if q % 4 == 0 {
+                h.add(0.25, pauli_term(&[(q, p), (q3, p)]));
+            }
+        }
+    }
+    let h = h.simplify(0.0);
+    let charges = vec![Charge::weights(vec![1; n])];
+    let neel: Vec<bool> = (0..n).map(|q| q % 2 == 1).collect();
+
+    let t = 0.35;
+    let steps = 5;
+    let z_ops: Vec<PauliSum> = (0..n)
+        .map(|q| PauliSum::from(pauli_term(&[(q, Pauli::Z)])))
+        .collect();
+
+    // Open MPS reference in the same U(1) sector.
+    let mut open = Mps::basis(
+        n,
+        &neel,
+        MpsOptions {
+            max_bond: 48,
+            cutoff: 1e-12,
+        },
+    )
+    .with_charges(&charges)
+    .unwrap();
+    let e0 = open.expectation(&h).unwrap();
+    open.tdvp(&h, t, steps).unwrap();
+    let z_open = open.expectations(&z_ops).unwrap();
+
+    let pbc_opts = MpsOptions {
+        max_bond: 16,
+        cutoff: 1e-12,
+    };
+    let mut dense = PeriodicMps::basis(n, &neel, pbc_opts);
+    dense.tdvp(&h, t, steps).unwrap();
+    let mut sym = PeriodicMps::basis(n, &neel, pbc_opts)
+        .with_charges(&charges)
+        .unwrap();
+    sym.tdvp(&h, t, steps).unwrap();
+
+    // Exact periodic norm conservation on the matrix-free high-χ path (`χ > 8 => m > 64`).
+    assert!(
+        (dense.norm_sqr() - 1.0).abs() < 1e-9,
+        "dense n=24 norm_sqr = {}",
+        dense.norm_sqr()
+    );
+    assert!(
+        (sym.norm_sqr() - 1.0).abs() < 1e-9,
+        "sym n=24 norm_sqr = {}",
+        sym.norm_sqr()
+    );
+
+    // Energy conservation within Strang-splitting O(dt^2) tolerance.
+    let e_dense = dense.expectation(&h).unwrap();
+    let e_sym = sym.expectation(&h).unwrap();
+    assert!(
+        (e_dense - e0).abs() < 1e-2,
+        "dense n=24 energy drift: {e0} -> {e_dense}"
+    );
+    assert!(
+        (e_sym - e0).abs() < 1e-2,
+        "sym n=24 energy drift: {e0} -> {e_sym}"
+    );
+    assert!(
+        (e_dense - e_sym).abs() < 1e-5,
+        "dense vs sym n=24 energy mismatch: {e_dense} vs {e_sym}"
+    );
+
+    // Local <Z_q> observables match open MPS and dense == symmetric!
+    let z_dense = dense.expectations(&z_ops).unwrap();
+    let z_sym = sym.expectations(&z_ops).unwrap();
+    for q in 0..n {
+        assert!(
+            (z_dense[q] - z_open[q]).abs() < 1e-2,
+            "q{q}: dense <Z>={} vs open {}",
+            z_dense[q],
+            z_open[q]
+        );
+        assert!(
+            (z_sym[q] - z_open[q]).abs() < 1e-2,
+            "q{q}: sym <Z>={} vs open {}",
+            z_sym[q],
+            z_open[q]
+        );
+        assert!(
+            (z_dense[q] - z_sym[q]).abs() < 1e-5,
+            "q{q}: dense <Z>={} vs sym {}",
+            z_dense[q],
+            z_sym[q]
+        );
+    }
+
+    // Confirmed bond growth past the χ = 8 matrix-free threshold (m = χ² > 64)
+    // and multi-sector entanglement across the periodic seam!
+    assert!(
+        dense.bond_dimensions().into_iter().max().unwrap_or(0) > 8,
+        "expected bond growth past matrix-free cutoff: {:?}",
+        dense.bond_dimensions()
+    );
+    assert!(sym.bond_sectors(n - 1).unwrap().len() >= 2);
+}
+
 #[cfg(feature = "gpu")]
 #[test]
 fn periodic_gpu_dmrg_and_tdvp_match_cpu() {
