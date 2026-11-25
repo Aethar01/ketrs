@@ -161,6 +161,14 @@ impl PeriodicMps {
         let comp = self.transfer_compression();
         self.canonicalise_opp_right(&wh.opp_sites, wh.win_sites[0]);
         self.canonicalise_window_left(&wh.win_sites);
+        if l >= 3
+            && let Some(mpo) = &wh.mpo_w
+            && wh.win_sites[1..]
+                .iter()
+                .any(|&q| self.tensors[q].left < self.options.max_bond)
+        {
+            self.expand_window_right(&wh.win_sites, mpo);
+        }
         let mut envs = WindowEnvs::new(&self.tensors, wh, comp, self.symmetry.as_ref());
         #[cfg(feature = "gpu")]
         if let Some((ctx, scratch)) = gpu {
@@ -198,6 +206,14 @@ impl PeriodicMps {
         let comp = self.transfer_compression();
         self.canonicalise_opp_left(&wh.opp_sites, *wh.win_sites.last().unwrap());
         self.canonicalise_window_right(&wh.win_sites);
+        if l >= 3
+            && let Some(mpo) = &wh.mpo_w
+            && wh.win_sites[..l - 1]
+                .iter()
+                .any(|&q| self.tensors[q].right < self.options.max_bond)
+        {
+            self.expand_window_left(&wh.win_sites, mpo);
+        }
         let mut envs = WindowEnvs::new(&self.tensors, wh, comp, self.symmetry.as_ref());
         #[cfg(feature = "gpu")]
         if let Some((ctx, scratch)) = gpu {
@@ -274,14 +290,88 @@ impl PeriodicMps {
     }
 }
 
+/// Shortest cyclic arc `(start, span)` on a ring of `n` qubits containing all
+/// sorted distinct sites in `qubits` (`2 <= span <= n`).
+pub(super) fn shortest_cyclic_arc(qubits: &[usize], n: usize) -> (usize, usize) {
+    debug_assert!(!qubits.is_empty());
+    let k = qubits.len();
+    if k == 1 {
+        return (qubits[0], 2.min(n));
+    }
+    let mut best_gap = n - qubits[k - 1] + qubits[0];
+    let mut best_start = qubits[0];
+    for i in 0..k - 1 {
+        let gap = qubits[i + 1] - qubits[i];
+        if gap > best_gap {
+            best_gap = gap;
+            best_start = qubits[i + 1];
+        }
+    }
+    let span = (n - best_gap + 1).max(2);
+    (best_start, span)
+}
+
+/// Cyclic window `win` of length `span` starting at `start`, and its
+/// complement `opp` of length `n - span`.
+pub(super) fn cyclic_window(start: usize, span: usize, n: usize) -> (Vec<usize>, Vec<usize>) {
+    let win = (0..span).map(|k| (start + k) % n).collect();
+    let opp = (span..n).map(|k| (start + k) % n).collect();
+    (win, opp)
+}
+
 /// Partition `hamiltonian` (excluding global identity shift) across overlapping
-/// half-ring windows so each window's sub-Hamiltonian acts purely inside its
-/// own open interval (zero `H_opp`, zero crossing channels for any range `≤ n/2`).
+/// cyclic windows so **every** term acts strictly inside its assigned window
+/// (`H_opp = 0`, zero crossing channels for any range, including multi-qubit
+/// wrap-around and full-ring terms).
 fn partition_hamiltonian_windows(
     hamiltonian: &PauliSum,
     n: usize,
     charges: Option<&crate::mps::charges::Charges>,
 ) -> Result<Vec<WindowHamiltonian>, Error> {
+    let in_set = |sites: &[usize], ps: &crate::observable::PauliString| -> bool {
+        ps.ops().iter().all(|&(q, _)| sites.contains(&q))
+    };
+
+    if n == 3 {
+        let base = [
+            (vec![0, 1], vec![2]),
+            (vec![1, 2], vec![0]),
+            (vec![2, 0], vec![1]),
+        ];
+        let mut h_base = [PauliSum::new(), PauliSum::new(), PauliSum::new()];
+        let mut h_full = PauliSum::new();
+        for &(coeff, ref ps) in hamiltonian.terms() {
+            if ps.ops().is_empty() || coeff == 0.0 {
+                continue;
+            }
+            let matching: Vec<usize> = (0..3).filter(|&k| in_set(&base[k].0, ps)).collect();
+            if matching.is_empty() {
+                h_full.add(coeff, ps.clone());
+            } else {
+                let share = coeff / matching.len() as f64;
+                for k in matching {
+                    h_base[k].add(share, ps.clone());
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(4);
+        for ((w, o), h) in base.into_iter().zip(h_base) {
+            if !h.terms().is_empty() {
+                out.push(split_hamiltonian_on_window(&h, w, o, n, charges)?);
+            }
+        }
+        if !h_full.terms().is_empty() {
+            out.push(split_hamiltonian_on_window(
+                &h_full,
+                vec![0, 1, 2],
+                vec![],
+                n,
+                charges,
+            )?);
+        }
+        return Ok(out);
+    }
+
     let m = n / 2;
     // Window 1: [0, 1, ..., m], opp: [m+1, ..., n-1]
     let w1: Vec<usize> = (0..=m).collect();
@@ -290,18 +380,22 @@ fn partition_hamiltonian_windows(
     let mut w2: Vec<usize> = (m..n).collect();
     w2.push(0);
     let o2: Vec<usize> = (1..m).collect();
-    // Optional shifted window 3 for mid-range terms touching both `1..m-1` and `m+1..n-1`:
+    // Window 3: shifted half-ring centred near `m`.
     let q0 = m / 2;
-    let w3: Vec<usize> = (0..=m).map(|k| (q0 + k) % n).collect();
-    let o3: Vec<usize> = (m + 1..n).map(|k| (q0 + k) % n).collect();
-
-    let in_set = |sites: &[usize], ps: &crate::observable::PauliString| -> bool {
-        ps.ops().iter().all(|&(q, _)| sites.contains(&q))
-    };
+    let (w3, o3) = cyclic_window(q0, m + 1, n);
+    // Window 4: shifted half-ring centred near seam `0` (covers wrap-around terms).
+    let (w4, o4) = cyclic_window((q0 + m) % n, m + 1, n);
 
     let mut h1 = PauliSum::new();
     let mut h2 = PauliSum::new();
     let mut h3 = PauliSum::new();
+    let mut h4 = PauliSum::new();
+    // Leftover terms (span > m + 1 or straddling all 4 base windows), grouped by
+    // exact qubit support so symmetry-partner terms stay together.
+    let mut leftover: std::collections::BTreeMap<
+        Vec<usize>,
+        Vec<(f64, crate::observable::PauliString)>,
+    > = std::collections::BTreeMap::new();
 
     for &(coeff, ref ps) in hamiltonian.terms() {
         if ps.ops().is_empty() || coeff == 0.0 {
@@ -319,21 +413,67 @@ fn partition_hamiltonian_windows(
             h2.add(coeff, ps.clone());
         } else if in_set(&w3, ps) {
             h3.add(coeff, ps.clone());
+        } else if in_set(&w4, ps) {
+            h4.add(coeff, ps.clone());
         } else {
-            // Very long-range term (span > n/2): keep in window 1 as a crossing channel.
-            h1.add(coeff, ps.clone());
+            let support: Vec<usize> = ps.ops().iter().map(|&(q, _)| q).collect();
+            leftover
+                .entry(support)
+                .or_default()
+                .push((coeff, ps.clone()));
         }
     }
 
-    let mut out = Vec::with_capacity(3);
-    if !h1.terms().is_empty() {
-        out.push(split_hamiltonian_on_window(&h1, w1, o1, n, charges)?);
+    let mut out = Vec::with_capacity(4);
+    for (h, w, o) in [(h1, w1, o1), (h2, w2, o2), (h3, w3, o3), (h4, w4, o4)] {
+        if !h.terms().is_empty() {
+            let wh = split_hamiltonian_on_window(&h, w, o, n, charges)?;
+            debug_assert!(wh.mpo_opp.is_none() && wh.cross.is_empty());
+            out.push(wh);
+        }
     }
-    if !h2.terms().is_empty() {
-        out.push(split_hamiltonian_on_window(&h2, w2, o2, n, charges)?);
-    }
-    if !h3.terms().is_empty() {
-        out.push(split_hamiltonian_on_window(&h3, w3, o3, n, charges)?);
+
+    if !leftover.is_empty() {
+        // Pack leftover supports into minimal cyclic windows (largest span first
+        // so smaller supports reuse compatible windows).
+        type TermGroup = (
+            usize,
+            usize,
+            Vec<usize>,
+            Vec<(f64, crate::observable::PauliString)>,
+        );
+        let mut groups: Vec<TermGroup> = leftover
+            .into_iter()
+            .map(|(supp, terms)| {
+                let (start, span) = shortest_cyclic_arc(&supp, n);
+                (span, start, supp, terms)
+            })
+            .collect();
+        groups.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+
+        let mut extra: Vec<(Vec<usize>, Vec<usize>, PauliSum)> = Vec::new();
+        for (span, start, supp, terms) in groups {
+            let target = extra
+                .iter_mut()
+                .find(|(w, _, _)| supp.iter().all(|q| w.contains(q)));
+            if let Some((_, _, h_ext)) = target {
+                for (c, ps) in terms {
+                    h_ext.add(c, ps);
+                }
+            } else {
+                let (w, o) = cyclic_window(start, span, n);
+                let mut h_ext = PauliSum::new();
+                for (c, ps) in terms {
+                    h_ext.add(c, ps);
+                }
+                extra.push((w, o, h_ext));
+            }
+        }
+        for (w, o, h_ext) in extra {
+            let wh = split_hamiltonian_on_window(&h_ext, w, o, n, charges)?;
+            debug_assert!(wh.mpo_opp.is_none() && wh.cross.is_empty());
+            out.push(wh);
+        }
     }
     Ok(out)
 }

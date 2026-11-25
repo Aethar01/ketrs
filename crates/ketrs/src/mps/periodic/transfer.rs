@@ -684,6 +684,7 @@ pub(super) struct TransferCompression {
 pub(super) fn compress_string_transfer(
     tensors: &[Tensor],
     opp_sites: &[usize],
+    seam_site: usize,
     ops: &[Local],
     scale: C64,
     comp: TransferCompression,
@@ -691,9 +692,9 @@ pub(super) fn compress_string_transfer(
 ) -> CompressedTransfer {
     debug_assert_eq!(opp_sites.len(), ops.len());
     if opp_sites.is_empty() {
-        let d = tensors[0].left;
+        let d = tensors[seam_site].left;
         let mut ct =
-            CompressedTransfer::identity(d, sym.map(|s| (&s.bonds[0], s.charges.as_ref())));
+            CompressedTransfer::identity(d, sym.map(|s| (&s.bonds[seam_site], s.charges.as_ref())));
         if scale != ONE {
             for m in &mut ct.left {
                 *m *= faer::Scale(scale);

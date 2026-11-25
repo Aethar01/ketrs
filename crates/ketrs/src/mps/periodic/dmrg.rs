@@ -70,7 +70,7 @@ impl PeriodicMps {
 
         // Split Hamiltonian onto each window ONCE before sweeping (also validates
         // symmetry conservation up front).
-        let windows = ring_windows(n);
+        let windows = dmrg_windows(hamiltonian, n);
         let charges = self.symmetry.as_ref().map(|s| s.charges.clone());
         let win_hams: Vec<_> = windows
             .into_iter()
@@ -966,6 +966,66 @@ pub(super) fn ring_windows(n: usize) -> Vec<(Vec<usize>, Vec<usize>)> {
     w2.push(0);
     let o2: Vec<usize> = (1..m).collect();
     vec![(w1, o1), (w2, o2)]
+}
+
+/// Windows for periodic DMRG: starts with [`ring_windows`], and only appends
+/// shifted / wider cyclic windows when `hamiltonian` contains multi-site or
+/// wrap-around terms that straddle every base window cut (ensuring every term
+/// lies strictly inside `mpo_w` of at least one window so DMRG with noise
+/// never stalls from a product state).
+fn dmrg_windows(hamiltonian: &PauliSum, n: usize) -> Vec<(Vec<usize>, Vec<usize>)> {
+    let mut windows = ring_windows(n);
+    if n <= 2 {
+        return windows;
+    }
+    let covered = |windows: &[(Vec<usize>, Vec<usize>)], supp: &[usize]| -> bool {
+        windows
+            .iter()
+            .any(|(w, _)| supp.iter().all(|q| w.contains(q)))
+    };
+
+    let mut uncovered: std::collections::BTreeSet<Vec<usize>> = std::collections::BTreeSet::new();
+    for &(coeff, ref ps) in hamiltonian.terms() {
+        if ps.ops().is_empty() || coeff == 0.0 {
+            continue;
+        }
+        let supp: Vec<usize> = ps.ops().iter().map(|&(q, _)| q).collect();
+        if !covered(&windows, &supp) {
+            uncovered.insert(supp);
+        }
+    }
+    if uncovered.is_empty() {
+        return windows;
+    }
+
+    if n >= 4 {
+        let m = n / 2;
+        let q0 = m / 2;
+        for start in [q0, (q0 + m) % n] {
+            let (w, o) = super::tdvp::cyclic_window(start, m + 1, n);
+            if uncovered.iter().any(|s| s.iter().all(|q| w.contains(q))) {
+                uncovered.retain(|s| !s.iter().all(|q| w.contains(q)));
+                windows.push((w, o));
+            }
+        }
+    }
+
+    if !uncovered.is_empty() {
+        let mut rest: Vec<(usize, usize, Vec<usize>)> = uncovered
+            .into_iter()
+            .map(|s| {
+                let (start, span) = super::tdvp::shortest_cyclic_arc(&s, n);
+                (span, start, s)
+            })
+            .collect();
+        rest.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        for (span, start, supp) in rest {
+            if !covered(&windows, &supp) {
+                windows.push(super::tdvp::cyclic_window(start, span, n));
+            }
+        }
+    }
+    windows
 }
 
 /// Dense two-site tensor `theta[(l, p, q), r]` from `a` and `b`.

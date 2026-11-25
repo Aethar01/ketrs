@@ -26,6 +26,7 @@
 //!   Gauss's laws.
 
 mod dmrg;
+mod expand;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod solver;

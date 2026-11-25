@@ -862,6 +862,390 @@ fn periodic_from_mps_roundtrip_and_with_charges_seam_unfold() {
     assert!(diff2 < 1e-11, "unfolded with_charges diff {diff2}");
 }
 
+#[test]
+fn periodic_tdvp_multisite_long_range_and_wrap_around_match_exact_and_open_mps() {
+    let n = 8;
+    let mut bits = vec![false; n];
+    bits[0] = true; // |10000000⟩ (qubit 0 excited)
+    let mut prep = Circuit::new(n);
+    prep.x(0);
+
+    let z_ops: Vec<PauliSum> = (0..n)
+        .map(|q| PauliSum::from(pauli_term(&[(q, Pauli::Z)])))
+        .collect();
+
+    let h_from = |list: &[(&str, f64)]| PauliSum::from_list(list.iter().copied()).unwrap();
+
+    // Cases: 2q NN, 3q contiguous, 2q span-4, 3q wrap-around across seam,
+    // antipodal span-5 (1,5), 6q wrap-around across seam (6,7,0,1,2,3), and
+    // full-ring 8q term (exercises empty complement `opp = []`).
+    let cases: Vec<(&str, PauliSum)> = vec![
+        (
+            "2q_NN(0,1)",
+            h_from(&[("IIIIIIXX", 1.0), ("IIIIIIYY", 1.0)]),
+        ),
+        (
+            "3q_contig(0,1,2)",
+            h_from(&[("IIIIIXXX", 1.0), ("IIIIIXYY", 1.0)]),
+        ),
+        (
+            "2q_span4(0,3)",
+            h_from(&[("IIIIXIIX", 1.0), ("IIIIYIIY", 1.0)]),
+        ),
+        (
+            "3q_wrap(7,0,1)",
+            h_from(&[("XIIIIIXX", 1.0), ("XIIIIIYY", 1.0)]),
+        ),
+        (
+            "2q_antipodal(1,5)",
+            h_from(&[("IIXIIIXI", 1.0), ("IIYIIIYI", 1.0)]),
+        ),
+        (
+            "6q_wrap(6,7,0,1,2,3)",
+            h_from(&[("XXIIXXXX", 1.0), ("XXIIXXYY", 1.0)]),
+        ),
+        (
+            "8q_full_ring",
+            h_from(&[("XXXXXXXX", 1.0), ("XXXXXXYY", 1.0)]),
+        ),
+    ];
+
+    let opts = MpsOptions {
+        max_bond: 16,
+        cutoff: 1e-12,
+    };
+    let t = 0.5;
+    let steps = 4;
+
+    for (name, h) in &cases {
+        let mut sv = Statevector::from_circuit(&prep);
+        sv.evolve(h, t).unwrap();
+        let mut open = Mps::basis(n, &bits, opts);
+        open.tdvp(h, t, steps).unwrap();
+        let mut pbc = PeriodicMps::basis(n, &bits, opts);
+        pbc.tdvp(h, t, steps).unwrap();
+
+        assert!(
+            (pbc.norm_sqr() - 1.0).abs() < 1e-10,
+            "{name}: norm_sqr = {}",
+            pbc.norm_sqr()
+        );
+        let z_exact: Vec<f64> = z_ops.iter().map(|o| sv.expectation(o).unwrap()).collect();
+        let z_open = open.expectations(&z_ops).unwrap();
+        let z_pbc = pbc.expectations(&z_ops).unwrap();
+        for q in 0..n {
+            assert!(
+                (z_pbc[q] - z_exact[q]).abs() < 1e-6,
+                "{name} q{q}: PeriodicMps <Z>={} vs exact {} (open {})",
+                z_pbc[q],
+                z_exact[q],
+                z_open[q]
+            );
+            assert!(
+                (z_pbc[q] - z_open[q]).abs() < 1e-6,
+                "{name} q{q}: PeriodicMps <Z>={} vs MPS {}",
+                z_pbc[q],
+                z_open[q]
+            );
+        }
+        let amp_diff = pbc
+            .to_amplitudes()
+            .iter()
+            .zip(sv.amplitudes())
+            .map(|(a, b)| (a - b).norm())
+            .fold(0.0f64, f64::max);
+        assert!(amp_diff < 1e-6, "{name}: amplitude diff {amp_diff}");
+    }
+
+    // Combined non-commuting Hamiltonian mixing NN, 3q, span-4, and wrap-around terms.
+    let mut h_mix = PauliSum::new();
+    for (_, h) in &cases[..4] {
+        for (c, s) in h.terms() {
+            h_mix.add(0.4 * c, s.clone());
+        }
+    }
+    let mut sv = Statevector::from_circuit(&prep);
+    sv.evolve(&h_mix, 0.4).unwrap();
+    let mut pbc_coarse = PeriodicMps::basis(
+        n,
+        &bits,
+        MpsOptions {
+            max_bond: 32,
+            cutoff: 1e-13,
+        },
+    );
+    pbc_coarse.tdvp(&h_mix, 0.4, 4).unwrap();
+    let mut pbc_fine = PeriodicMps::basis(
+        n,
+        &bits,
+        MpsOptions {
+            max_bond: 32,
+            cutoff: 1e-13,
+        },
+    );
+    pbc_fine.tdvp(&h_mix, 0.4, 8).unwrap();
+    let err_coarse = pbc_coarse
+        .to_amplitudes()
+        .iter()
+        .zip(sv.amplitudes())
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0f64, f64::max);
+    let err_fine = pbc_fine
+        .to_amplitudes()
+        .iter()
+        .zip(sv.amplitudes())
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0f64, f64::max);
+    assert!(
+        err_coarse < 5e-3,
+        "combined multi-site pTDVP coarse err {err_coarse}"
+    );
+    assert!(
+        err_fine < err_coarse / 3.0,
+        "expected 2nd-order convergence: coarse={err_coarse:.2e}, fine={err_fine:.2e}"
+    );
+}
+
+#[test]
+fn periodic_tdvp_multisite_and_wrap_around_with_charges() {
+    let n = 8;
+    let mut bits = vec![false; n];
+    bits[0] = true;
+    bits[2] = true;
+    bits[6] = true;
+    let charge = Charge::weights(vec![1; n]);
+
+    // Charge-conserving multi-site terms:
+    // - 3q contiguous JW hop (0,1,2)
+    // - 2q span-4 hop (0,3)
+    // - 5q wrap-around JW hop across seam (6,7,0,1,2)
+    // - 6q wrap-around dressed hop across seam (5,6,7,0,1,2) with Z dressers
+    let mut h = PauliSum::new();
+    for p in [Pauli::X, Pauli::Y] {
+        h.add(0.7, pauli_term(&[(0, p), (1, Pauli::Z), (2, p)]));
+        h.add(0.6, pauli_term(&[(0, p), (3, p)]));
+        h.add(
+            0.5,
+            pauli_term(&[(6, p), (7, Pauli::Z), (0, Pauli::Z), (1, Pauli::Z), (2, p)]),
+        );
+        h.add(
+            0.4,
+            pauli_term(&[
+                (5, p),
+                (6, Pauli::Z),
+                (7, Pauli::Z),
+                (0, Pauli::Z),
+                (1, Pauli::Z),
+                (2, p),
+            ]),
+        );
+    }
+
+    let mut prep = Circuit::new(n);
+    for (q, &b) in bits.iter().enumerate() {
+        if b {
+            prep.x(q);
+        }
+    }
+    let t = 0.35;
+    let mut sv = Statevector::from_circuit(&prep);
+    sv.evolve(&h, t).unwrap();
+
+    let opts = MpsOptions {
+        max_bond: 32,
+        cutoff: 1e-13,
+    };
+    let mut dense = PeriodicMps::basis(n, &bits, opts);
+    dense.tdvp(&h, t, 8).unwrap();
+    let mut sym = PeriodicMps::basis(n, &bits, opts)
+        .with_charges(std::slice::from_ref(&charge))
+        .unwrap();
+    sym.tdvp(&h, t, 8).unwrap();
+
+    let diff_dense_sv = dense
+        .to_amplitudes()
+        .iter()
+        .zip(sv.amplitudes())
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0f64, f64::max);
+    let diff_sym_dense = sym
+        .to_amplitudes()
+        .iter()
+        .zip(dense.to_amplitudes())
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0f64, f64::max);
+    assert!(
+        diff_dense_sv < 5e-3,
+        "dense charged multi-site pTDVP vs exact: {diff_dense_sv}"
+    );
+    assert!(
+        diff_sym_dense < 1e-7,
+        "symmetric vs dense charged multi-site pTDVP: {diff_sym_dense}"
+    );
+    assert!(sym.bond_sectors(n - 1).unwrap().len() >= 2);
+
+    // Explicit-link U(1) Schwinger ring (3-qubit and 4-qubit gauge-covariant
+    // hopping including across the periodic seam) evolved by symmetric TDVP
+    // from the bare vacuum product state with ALL local Gauss's laws conserved!
+    let m_sites = 4;
+    let n_sch = 3 * m_sites; // 12 qubits
+    let (h_sch, charges_sch, vac) = periodic_schwinger_ring(m_sites, 0.8, 0.5, 1.0, 0.3);
+    let mut prep_sch = Circuit::new(n_sch);
+    for (q, &b) in vac.iter().enumerate() {
+        if b {
+            prep_sch.x(q);
+        }
+    }
+    let mut sv_sch = Statevector::from_circuit(&prep_sch);
+    sv_sch.evolve(&h_sch, 0.3).unwrap();
+
+    let mut sym_sch = PeriodicMps::basis(
+        n_sch,
+        &vac,
+        MpsOptions {
+            max_bond: 24,
+            cutoff: 1e-13,
+        },
+    )
+    .with_charges(&charges_sch)
+    .unwrap();
+    sym_sch.tdvp(&h_sch, 0.3, 6).unwrap();
+
+    // Must evolve non-trivially and match exact Schwinger evolution!
+    let diff_sch = sym_sch
+        .to_amplitudes()
+        .iter()
+        .zip(sv_sch.amplitudes())
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0f64, f64::max);
+    assert!(
+        diff_sch < 1e-2,
+        "Schwinger ring symmetric pTDVP vs exact: {diff_sch}"
+    );
+    for site in 0..m_sites {
+        let g2 = sym_sch.expectation(&gauss_law_sqr(m_sites, site)).unwrap();
+        assert!(
+            g2.abs() < 1e-10,
+            "Gauss's law violated after pTDVP at site {site}: <G^2>={g2}"
+        );
+    }
+    assert!(sym_sch.bond_sectors(n_sch - 1).unwrap().len() >= 2);
+}
+
+#[test]
+fn periodic_tdvp_n3_and_dmrg_expectation_multisite_wrap_around() {
+    // 1. n = 3 with 2-qubit seam terms and a 3-qubit full-ring term (dense + symmetric).
+    let n3 = 3;
+    let mut h3 = PauliSum::new();
+    for p in [Pauli::X, Pauli::Y] {
+        h3.add(0.8, pauli_term(&[(2, p), (0, p)]));
+        h3.add(0.6, pauli_term(&[(0, p), (1, Pauli::Z), (2, p)]));
+    }
+    let bits3 = [true, false, false];
+    let mut prep3 = Circuit::new(n3);
+    prep3.x(0);
+    let mut sv3 = Statevector::from_circuit(&prep3);
+    sv3.evolve(&h3, 0.4).unwrap();
+
+    let opts3 = MpsOptions {
+        max_bond: 8,
+        cutoff: 1e-14,
+    };
+    let mut p3 = PeriodicMps::basis(n3, &bits3, opts3);
+    p3.tdvp(&h3, 0.4, 8).unwrap();
+    let mut s3 = PeriodicMps::basis(n3, &bits3, opts3)
+        .with_charges(&[Charge::weights(vec![1; n3])])
+        .unwrap();
+    s3.tdvp(&h3, 0.4, 8).unwrap();
+    let d3 = p3
+        .to_amplitudes()
+        .iter()
+        .zip(sv3.amplitudes())
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0f64, f64::max);
+    let ds3 = s3
+        .to_amplitudes()
+        .iter()
+        .zip(p3.to_amplitudes())
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0f64, f64::max);
+    assert!(d3 < 5e-3, "n=3 pTDVP diff {d3}");
+    assert!(ds3 < 1e-8, "n=3 sym vs dense pTDVP diff {ds3}");
+
+    // 2. Periodic DMRG & expectation on seam-straddling 3q and 5q wrap-around
+    //    Hamiltonian starting from a product state (dense + symmetric).
+    let n = 8;
+    let mut h_wrap = PauliSum::new();
+    for p in [Pauli::X, Pauli::Y] {
+        // Straddles seam 7 <-> 0 (not in W1=[0..=4] and not in W2=[4..7,0]!)
+        h_wrap.add(1.0, pauli_term(&[(7, p), (0, Pauli::Z), (1, p)]));
+        // 5-qubit wrap-around straddling seam
+        h_wrap.add(
+            0.7,
+            pauli_term(&[(6, p), (7, Pauli::Z), (0, Pauli::Z), (1, Pauli::Z), (2, p)]),
+        );
+        // Span-4 non-NN term
+        h_wrap.add(0.5, pauli_term(&[(0, p), (3, p)]));
+        h_wrap.add(0.5, pauli_term(&[(4, p), (7, p)]));
+    }
+    for q in 0..n {
+        h_wrap.add(0.15 * (q as f64 - 3.5), pauli_term(&[(q, Pauli::Z)]));
+    }
+
+    // Exact ground state in the 2-particle sector (match via large penalty).
+    let mut h_pen = h_wrap.clone();
+    // (Σ n_q - 2)^2 = (2 - 0.5 Σ Z_q)^2
+    h_pen.add(50.0 * 4.0, pauli_term(&[]));
+    for q in 0..n {
+        h_pen.add(50.0 * (-2.0), pauli_term(&[(q, Pauli::Z)]));
+        for r in 0..n {
+            if q == r {
+                h_pen.add(50.0 * 0.25, pauli_term(&[]));
+            } else {
+                h_pen.add(50.0 * 0.25, pauli_term(&[(q, Pauli::Z), (r, Pauli::Z)]));
+            }
+        }
+    }
+    let e_exact_sector =
+        Statevector::lowest_eigenstates(&h_pen.simplify(0.0), n, 1, &EigenOptions::default())
+            .unwrap()[0]
+            .energy;
+
+    // Symmetric DMRG starting from a 2-particle product state!
+    let mut bits = vec![false; n];
+    bits[0] = true;
+    bits[7] = true;
+    let mut sym = PeriodicMps::basis(n, &bits, MpsOptions::default())
+        .with_charges(&[Charge::weights(vec![1; n])])
+        .unwrap();
+    let res = sym
+        .dmrg(
+            &h_wrap,
+            &DmrgOptions {
+                max_bond: 16,
+                cutoff: 1e-13,
+                max_sweeps: 10,
+                tolerance: 1e-10,
+                noise: 1e-2,
+                noise_decay: 0.2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        (res.energy - e_exact_sector).abs() < 1e-7,
+        "seam-straddling multi-site pDMRG {} vs exact {e_exact_sector}",
+        res.energy
+    );
+    let sv_res = Statevector::from_amplitudes(sym.to_amplitudes()).unwrap();
+    let e_pmps = sym.expectation(&h_wrap).unwrap();
+    let e_sv = sv_res.expectation(&h_wrap).unwrap();
+    assert!(
+        (e_pmps - e_sv).abs() < 1e-11,
+        "multi-site wrap expectation {e_pmps} vs {e_sv}"
+    );
+}
+
 #[cfg(feature = "gpu")]
 #[test]
 fn periodic_gpu_dmrg_and_tdvp_match_cpu() {

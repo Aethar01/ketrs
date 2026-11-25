@@ -32,14 +32,14 @@ const ZERO: C64 = C64::new(0.0, 0.0);
 const MAX_CAP_LABELS: usize = 1 << 16;
 
 /// The positions of a bond's old basis in its expanded basis.
-struct Placement {
-    dim: usize,
+pub(super) struct Placement {
+    pub(super) dim: usize,
     pos: Vec<usize>,
 }
 
 impl Placement {
     /// `t` with its right bond moved to the expanded basis, zero elsewhere.
-    fn right(&self, t: &Tensor) -> Tensor {
+    pub(super) fn right(&self, t: &Tensor) -> Tensor {
         let mut data = vec![ZERO; t.left * 2 * self.dim];
         for lp in 0..t.left * 2 {
             for (c, &p) in self.pos.iter().enumerate() {
@@ -54,7 +54,7 @@ impl Placement {
     }
 
     /// `t` with its left bond moved to the expanded basis, zero elsewhere.
-    fn left(&self, t: &Tensor) -> Tensor {
+    pub(super) fn left(&self, t: &Tensor) -> Tensor {
         let width = 2 * t.right;
         let mut data = vec![ZERO; self.dim * width];
         for (l, &p) in self.pos.iter().enumerate() {
@@ -182,7 +182,7 @@ fn old_size(old: &Sectors, sector: Option<usize>) -> usize {
 /// The mixed environment of an expansion sweep, block by block:
 /// `chain[channel][ket sector] = (bra sector, block)`, each block with rows
 /// on the expanded basis and columns on ψ's.
-type Chain = Vec<Vec<Option<(usize, Mat<C64>)>>>;
+pub(super) type Chain = Vec<Vec<Option<(usize, Mat<C64>)>>>;
 
 /// The chain beyond an end of the state.
 fn boundary_chain() -> Chain {
@@ -191,10 +191,10 @@ fn boundary_chain() -> Chain {
 
 /// A part of one row block of `H|ψ⟩`'s channels: its columns of physical
 /// state `p` and bra sector `b`.
-struct Piece {
-    p: usize,
-    b: usize,
-    m: Mat<C64>,
+pub(super) struct Piece {
+    pub(super) p: usize,
+    pub(super) b: usize,
+    pub(super) m: Mat<C64>,
 }
 
 /// One bond of an expansion sweep, either way. The channel rows are blocks
@@ -205,7 +205,7 @@ struct Piece {
 /// to `room` directions and returns the new sectors, where the old basis
 /// went, the new basis as rows, and the next chain.
 #[allow(clippy::too_many_arguments)]
-fn chain_step(
+pub(super) fn chain_step(
     bond: &Sectors,
     deltas: &[Label],
     charges: &Charges,

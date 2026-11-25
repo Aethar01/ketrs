@@ -1406,3 +1406,65 @@ def test_periodic_mps_tdvp_and_gpu():
         np.testing.assert_allclose(
             gpu_pmps.to_statevector().amplitudes(), pmps.to_statevector().amplitudes(), atol=1e-10
         )
+
+
+def test_periodic_mps_tdvp_multisite_long_range_and_wrap_around():
+    nq = 8
+    qc = ketrs.Circuit(nq)
+    qc.x(0)
+
+    z_ops = [ketrs.PauliSum([("I" * (nq - 1 - q) + "Z" + "I" * q, 1.0)]) for q in range(nq)]
+    cases = [
+        ("2q_NN(0,1)", ketrs.PauliSum([("IIIIIIXX", 1.0), ("IIIIIIYY", 1.0)])),
+        ("3q_contig(0,1,2)", ketrs.PauliSum([("IIIIIXXX", 1.0), ("IIIIIXYY", 1.0)])),
+        ("2q_span4(0,3)", ketrs.PauliSum([("IIIIXIIX", 1.0), ("IIIIYIIY", 1.0)])),
+        ("3q_wrap(7,0,1)", ketrs.PauliSum([("XIIIIIXX", 1.0), ("XIIIIIYY", 1.0)])),
+        ("6q_wrap(6,7,0,1,2,3)", ketrs.PauliSum([("XXIIXXXX", 1.0), ("XXIIXXYY", 1.0)])),
+    ]
+    for name, h in cases:
+        sv = ketrs.Statevector.from_circuit(qc)
+        sv.evolve(h, 0.5)
+        m_open = ketrs.MPS.from_circuit(qc, max_bond=16, cutoff=1e-12)
+        m_pbc = ketrs.PeriodicMPS.from_circuit(qc, max_bond=16, cutoff=1e-12)
+        m_open.tdvp(h, 0.5, steps=4)
+        m_pbc.tdvp(h, 0.5, steps=4)
+
+        ze = np.array([sv.expectation(o) for o in z_ops])
+        zo = np.array(m_open.expectations(z_ops))
+        zp = np.array(m_pbc.expectations(z_ops))
+        np.testing.assert_allclose(zp, ze, atol=1e-6, err_msg=f"{name} vs exact")
+        np.testing.assert_allclose(zp, zo, atol=1e-6, err_msg=f"{name} vs open MPS")
+        np.testing.assert_allclose(
+            m_pbc.to_statevector().amplitudes(), sv.amplitudes(), atol=1e-6, err_msg=name
+        )
+
+    # Symmetric U(1) TDVP with 3-qubit JW, span-4, and 5-qubit seam-crossing wrap-around terms.
+    qc_sym = ketrs.Circuit(nq)
+    qc_sym.x(0)
+    qc_sym.x(6)
+    h_sym = ketrs.PauliSum([
+        ("IIIIIXZX", 0.7),
+        ("IIIIIYZY", 0.7),
+        ("IIIIXIIX", 0.6),
+        ("IIIIYIIY", 0.6),
+        ("ZXIIIXZZ", 0.5),
+        ("ZYIIIYZZ", 0.5),
+    ])
+    charge = ketrs.Charge.weights([1] * nq)
+    sv_s = ketrs.Statevector.from_circuit(qc_sym)
+    sv_s.evolve(h_sym, 0.4)
+    pbc_dense = ketrs.PeriodicMPS.from_circuit(qc_sym, max_bond=24, cutoff=1e-13)
+    pbc_dense.tdvp(h_sym, 0.4, steps=8)
+    pbc_sym = ketrs.PeriodicMPS.from_circuit(qc_sym, max_bond=24, cutoff=1e-13).with_charges(
+        [charge]
+    )
+    pbc_sym.tdvp(h_sym, 0.4, steps=8)
+    np.testing.assert_allclose(
+        pbc_dense.to_statevector().amplitudes(), sv_s.amplitudes(), atol=5e-3
+    )
+    np.testing.assert_allclose(
+        pbc_sym.to_statevector().amplitudes(), pbc_dense.to_statevector().amplitudes(), atol=1e-7
+    )
+    assert len(pbc_sym.bond_sectors(nq - 1)) >= 2
+    assert abs(pbc_sym.expectation(h_sym) - sv_s.expectation(h_sym)) < 5e-3
+

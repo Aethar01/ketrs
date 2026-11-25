@@ -112,6 +112,8 @@ pub(super) struct PeriodicSiteBlocks<'a> {
     pub(super) right: &'a Sectors,
     /// `right_of[s * 2 + p]` = right sector `t` with `t = s + Δ_q(p)`.
     pub(super) right_of: Vec<Option<usize>>,
+    /// `left_of[t * 2 + p]` = left sector `s` with `s + Δ_q(p) = t`.
+    pub(super) left_of: Vec<Option<usize>>,
 }
 
 impl<'a> PeriodicSiteBlocks<'a> {
@@ -124,14 +126,21 @@ impl<'a> PeriodicSiteBlocks<'a> {
     ) -> Self {
         debug_assert_eq!((left.dim(), right.dim()), (a.left, a.right));
         let shift = [sym.site_shift(q, 0), sym.site_shift(q, 1)];
-        let right_of = (0..left.len() * 2)
+        let right_of: Vec<Option<usize>> = (0..left.len() * 2)
             .map(|k| right.find(&sym.charges.add(left.label(k / 2), &shift[k % 2])))
             .collect();
+        let mut left_of = vec![None; right.len() * 2];
+        for (k, &t_opt) in right_of.iter().enumerate() {
+            if let Some(t) = t_opt {
+                left_of[t * 2 + (k % 2)] = Some(k / 2);
+            }
+        }
         PeriodicSiteBlocks {
             a,
             left,
             right,
             right_of,
+            left_of,
         }
     }
 

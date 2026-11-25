@@ -144,12 +144,18 @@ pub(super) fn split_hamiltonian_on_window(
     }
 
     // Build remapped Charges for `W` and `opp` if needed for MPO channels.
+    let win_charges = charges.map(|ch| remap_charges(ch, &win_sites));
     let opp_charges = charges.map(|ch| remap_charges(ch, &opp_sites));
 
     let mpo_w = if w_only.is_empty() {
         None
     } else {
-        Some(Mpo::from_local_terms(&w_only, l_win, 0.0, None))
+        Some(Mpo::from_local_terms(
+            &w_only,
+            l_win,
+            0.0,
+            win_charges.as_ref(),
+        ))
     };
     let mpo_opp = if opp_only.is_empty() {
         None
@@ -298,7 +304,9 @@ impl<'a> WindowEnvs<'a> {
 
         // 1. Compress identity transfer matrix across `opp` (for norm and H_W).
         let id_ops = vec![Local::I; l_opp];
-        let norm_ct = compress_string_transfer(tensors, &wh.opp_sites, &id_ops, ONE, comp, sym);
+        let seam_site = wh.win_sites[0];
+        let norm_ct =
+            compress_string_transfer(tensors, &wh.opp_sites, seam_site, &id_ops, ONE, comp, sym);
         let norm_trunc_err = norm_ct.trunc_err;
 
         let mut norm_left = vec![None; l];
@@ -348,7 +356,7 @@ impl<'a> WindowEnvs<'a> {
             .par_iter()
             .map(|ch| match &ch.opp {
                 OppFactor::String(sc, ops) => {
-                    compress_string_transfer(tensors, &wh.opp_sites, ops, *sc, comp, sym)
+                    compress_string_transfer(tensors, &wh.opp_sites, seam_site, ops, *sc, comp, sym)
                 }
                 OppFactor::Mpo(mpo) => {
                     compress_mpo_transfer(tensors, &wh.opp_sites, mpo, comp, sym)
