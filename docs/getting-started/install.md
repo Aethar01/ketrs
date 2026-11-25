@@ -20,7 +20,7 @@ pip install "ketrs[qiskit]"
 |---|---|---|---|
 | **Linux** (glibc 2.28+) | x86-64, arm64 | Included | Included (needs Vulkan driver at runtime) |
 | **Windows** | x86-64 | Included | Included (needs Vulkan driver at runtime) |
-| **macOS** | Apple Silicon | Included | Not yet included |
+| **macOS** | Apple Silicon | Included | Included (bundles MoltenVK; `GpuStatevector` in `complex64`) |
 
 On platforms without a matching wheel, `pip` builds from source (requires Rust 1.88+).
 
@@ -29,7 +29,7 @@ On platforms without a matching wheel, `pip` builds from source (requires Rust 1
     import ketrs
     print(ketrs.gpu_device())  # Prints your GPU name, or None if unavailable
     ```
-    No CUDA or ROCm toolkit is needed; only a working Vulkan 1.2 driver.
+    No CUDA or ROCm toolkit is needed; Linux/Windows need only a Vulkan 1.2 driver, and macOS wheels bundle MoltenVK.
 
 ---
 
@@ -49,8 +49,8 @@ cargo add ketrs --features gpu
 
 !!! note "Build-time shader compiler for `--features gpu`"
     Building from source with `--features gpu` compiles GLSL compute shaders using `glslc`.
-    Install `glslc` / `shaderc` from your package manager or the [Vulkan SDK](https://vulkan.lunarg.com/),
-    or point `GLSLC=/path/to/glslc` to it. Once built, running needs only a Vulkan driver.
+    Install `glslc` / `shaderc` from your package manager (`brew install shaderc molten-vk` on macOS) or the [Vulkan SDK](https://vulkan.lunarg.com/),
+    or point `GLSLC=/path/to/glslc` to it. Once built, running needs only a Vulkan driver (or MoltenVK on macOS).
 
 ---
 

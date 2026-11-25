@@ -9,7 +9,7 @@
 ## Why ketrs?
 
 - **Fast out of the box:** 2.2–9.1× faster than Qiskit Aer on CPU statevectors, 18–460× faster on mid-circuit measurement circuits, and 6.3–32.5× faster on MPS TEBD.
-- **Vendor-neutral GPU support:** runs on NVIDIA, AMD, and Intel GPUs through Vulkan 1.2 (up to 31 qubits). Only a Vulkan driver is needed at run time: no CUDA or ROCm install.
+- **Vendor-neutral GPU support:** runs on NVIDIA, AMD, Intel, and Apple Silicon GPUs through Vulkan 1.2 (and MoltenVK on macOS, up to 31 qubits). No CUDA or ROCm install needed.
 - **Scales from a few qubits to hundreds:** exact `Statevector` (`complex128`, `float64`, `complex64`, `float32`), `GpuStatevector`, `SectorStatevector`, `DensityMatrix`, `MPS`, and `PeriodicMPS` with DMRG, TDVP, TEBD, and conserved `U(1)` / `Zₙ` charges.
 - **Drop-in interop:** convert Qiskit `QuantumCircuit`, `SparsePauliOp`, and Aer `NoiseModel` objects directly, or import/export OpenQASM 3.
 

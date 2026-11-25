@@ -7,7 +7,7 @@ All six simulation engines in `ketrs` share the same `Circuit` and `PauliSum` re
 | Workload | Recommended Engine | Typical Scale | Key Strengths |
 |---|---|---|---|
 | **General exact circuits (CPU)** | `Statevector` | Up to ~28 qubits | Parallel, cache-blocked, gate-fused; supports `complex128`, `float64`, `complex64`, `float32`. |
-| **Large exact circuits (GPU)** | `GpuStatevector` | 18–31 qubits | Any Vulkan 1.2 GPU (NVIDIA, AMD, Intel); gates, expectations, sampling, gradients, and `exp(-iHt)` on GPU. |
+| **Large exact circuits (GPU)** | `GpuStatevector` | 18–31 qubits | Any Vulkan 1.2 GPU (NVIDIA, AMD, Intel, Apple Silicon via MoltenVK); gates, expectations, sampling, gradients, and `exp(-iHt)` on GPU. |
 | **Conserved particle / spin number** | `SectorStatevector` | Sector-dependent | Stores only states matching fixed Hamming weights; rejects sector-breaking ops. |
 | **Exact mixed states & noise** | `DensityMatrix` | Up to ~14 qubits | Exact Kraus channels and per-gate `NoiseModel`s (1.3–4.2× faster than Aer). |
 | **Noisy circuits (>14 qubits)** | `Statevector` (`noise=...`) | Up to ~28 qubits | Quantum trajectories with per-gate Kraus channels and readout error. |

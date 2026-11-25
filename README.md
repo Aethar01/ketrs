@@ -21,7 +21,7 @@
 `ketrs` is built for researchers and developers who want high-speed quantum circuit and many-body simulation without heavy runtime toolchains:
 
 - **Fast out of the box:** 3–9× faster than Qiskit Aer on CPU statevectors, 18–460× faster on mid-circuit measurement circuits, and 6–32× faster on MPS TEBD.
-- **Vendor-neutral GPU support:** runs on NVIDIA, AMD, and Intel GPUs through Vulkan 1.2 (up to 31 qubits). Only a Vulkan driver is needed at run time: no CUDA or ROCm install.
+- **Vendor-neutral GPU support:** runs on NVIDIA, AMD, Intel, and Apple Silicon GPUs through Vulkan 1.2 (and MoltenVK on macOS, up to 31 qubits). No CUDA or ROCm install needed.
 - **One API, six engines:** move smoothly from exact statevectors and density matrices to symmetry sectors and Matrix Product States on hundreds of qubits (open chains and periodic rings, DMRG, TDVP, TEBD, conserved `U(1)` / `Zₙ` charges).
 - **Drop-in interop:** convert Qiskit `QuantumCircuit`, `SparsePauliOp`, and Aer `NoiseModel` objects directly, or import/export OpenQASM 3.
 
@@ -37,8 +37,7 @@ pip install "ketrs[qiskit]"    # includes Qiskit converter support
 ```
 
 Prebuilt wheels are published for **Linux** (x86-64, arm64, glibc 2.28+), **Windows** (x86-64), and **macOS** (Apple Silicon).
-- Linux and Windows wheels ship with `GpuStatevector` enabled (just have a Vulkan driver installed).
-- macOS wheels are currently CPU-only.
+- All prebuilt wheels ship with `GpuStatevector` enabled: Linux and Windows use the system Vulkan driver, and macOS wheels bundle MoltenVK (single precision, `complex64`, as Apple GPUs lack native 64-bit floats).
 - On other platforms, `pip` builds from source (requires Rust 1.88+).
 
 ### Rust
@@ -101,7 +100,7 @@ All engines share the same `Circuit` and `PauliSum` types, so you can prototype 
 | What you need | Engine | Highlights & scale |
 |---|---|---|
 | **Exact circuits (CPU)** | `Statevector` | Parallel, cache-blocked, gate-fused. Pass `dtype="real"` (half memory for real circuits), `"complex64"`, or `"float32"` (1.65× / 4× faster at 22–26 qubits, ~10⁻⁶ accuracy). In Rust: `Statevector`, `RealStatevector`, `Statevector32`, `RealStatevector32`. |
-| **Large exact circuits (GPU)** | `GpuStatevector` | Any Vulkan 1.2 GPU (NVIDIA, AMD, Intel), up to 31 qubits. Double (`"complex128"`) or single (`"complex64"`, 2.8–5.8× faster on consumer cards) precision. Runs gates, expectations, sampling, `apply_pauli_sum`, adjoint gradients, and exact `exp(-iHt)` on GPU. |
+| **Large exact circuits (GPU)** | `GpuStatevector` | Any Vulkan 1.2 GPU (NVIDIA, AMD, Intel, Apple Silicon via MoltenVK), up to 31 qubits. Double (`"complex128"`) or single (`"complex64"`, 2.8–5.8× faster on consumer cards) precision. Runs gates, expectations, sampling, `apply_pauli_sum`, adjoint gradients, and exact `exp(-iHt)` on GPU. |
 | **Fixed particle / spin / charge** | `SectorStatevector` | Stores only basis states matching fixed Hamming-weight constraints (`SectorBasis`), rejecting any operation that leaves the sector. |
 | **Noise & mixed states** | `DensityMatrix` | Exact Kraus channels (depolarizing, amplitude/phase damping, Pauli, custom) and per-gate `NoiseModel`s (matches Qiskit Aer and runs 1.3–4.2× faster). For larger qubit counts, run the same `NoiseModel` (plus readout error) on `Statevector` as quantum trajectories. |
 | **Many-qubit open chains** | `MPS` | Weakly entangled states of hundreds of qubits. TEBD, TDVP (any Hamiltonian range, with global subspace expansion), DMRG (with noise to avoid local traps), sampling, post-selection (`project`), batched `expectations`, conserved `U(1)`/`Zₙ` charges (`with_charges`), and optional Vulkan FP64 GPU sweeps (`mps.gpu = True`). |
@@ -471,7 +470,7 @@ cargo test --workspace        # Rust tests (add --all-features for GPU)
 pytest                        # Python tests
 ```
 
-Building with GPU support (`--features gpu`) compiles GLSL compute shaders using `glslc` at build time: install `glslc` / `shaderc` from your package manager or the Vulkan SDK, or set `GLSLC=/path/to/glslc`. Running the compiled binary or wheel needs only a Vulkan driver.
+Building with GPU support (`--features gpu`) compiles GLSL compute shaders using `glslc` at build time: install `glslc` / `shaderc` from your package manager (`brew install shaderc molten-vk` on macOS) or the Vulkan SDK, or set `GLSLC=/path/to/glslc`. Running needs only a Vulkan driver (or MoltenVK on macOS, bundled in the macOS Python wheels).
 
 **Status:** Early releases (`0.2.x`); APIs may still evolve. See [CHANGELOG.md](https://github.com/Aethar01/ketrs/blob/main/CHANGELOG.md) for release notes and [docs.rs/ketrs](https://docs.rs/ketrs) for the Rust API reference.
 
