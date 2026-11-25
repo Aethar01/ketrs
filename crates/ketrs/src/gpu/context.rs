@@ -299,24 +299,16 @@ impl GpuContext {
     /// Load Vulkan and open the best compute device: discrete GPUs first,
     /// and among those, ones with 64-bit floats.
     pub fn new() -> Result<Arc<Self>, Error> {
-        // SAFETY: loads the system Vulkan library; failure is reported.
-        let entry = unsafe { ash::Entry::load() }
-            .map_err(|e| Error::Gpu(format!("no Vulkan driver found: {e}")))?;
-        let app = vk::ApplicationInfo::default()
-            .application_name(c"ketrs")
-            .api_version(vk::API_VERSION_1_2);
-        // SAFETY: valid create info; the guard destroys the instance on error.
-        let instance = InstanceGuard(Some(
-            unsafe {
-                entry.create_instance(
-                    &vk::InstanceCreateInfo::default().application_info(&app),
-                    None,
-                )
-            }
-            .map_err(gpu_err("creating Vulkan instance"))?,
-        ));
+        let (entry, instance, physical, family) = Self::open_device()?;
+        Self::from_opened(entry, instance, physical, family)
+    }
 
-        let (physical, family) = Self::pick_device(instance.get())?;
+    fn from_opened(
+        entry: ash::Entry,
+        instance: InstanceGuard,
+        physical: vk::PhysicalDevice,
+        family: u32,
+    ) -> Result<Arc<Self>, Error> {
         // SAFETY: plain queries on a valid physical device.
         let (props, memory) = unsafe {
             (
@@ -352,16 +344,27 @@ impl GpuContext {
             v12.buffer_device_address == vk::TRUE
         };
         // SAFETY: plain query on a valid physical device.
-        let memory_budget = unsafe {
+        let device_exts = unsafe {
             instance
                 .get()
                 .enumerate_device_extension_properties(physical)
         }
-        .unwrap_or_default()
-        .iter()
-        .any(|e| e.extension_name_as_c_str() == Ok(c"VK_EXT_memory_budget"));
-        let extensions = [c"VK_EXT_memory_budget".as_ptr()];
-        let extensions = if memory_budget { &extensions[..] } else { &[] };
+        .unwrap_or_default();
+        let has_ext = |name: &CStr| {
+            device_exts
+                .iter()
+                .any(|e| e.extension_name_as_c_str() == Ok(name))
+        };
+        let memory_budget = has_ext(c"VK_EXT_memory_budget");
+        let mut extensions = Vec::new();
+        if memory_budget {
+            extensions.push(c"VK_EXT_memory_budget".as_ptr());
+        }
+        // Per the Vulkan spec, devices advertising VK_KHR_portability_subset
+        // (such as MoltenVK on macOS) require enabling it at device creation.
+        if has_ext(c"VK_KHR_portability_subset") {
+            extensions.push(c"VK_KHR_portability_subset".as_ptr());
+        }
         let mut v12 =
             vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(chunks_supported);
         // SAFETY: the chosen device supports these features, extensions and
@@ -372,7 +375,7 @@ impl GpuContext {
                 &vk::DeviceCreateInfo::default()
                     .queue_create_infos(&queue_info)
                     .enabled_features(&features)
-                    .enabled_extension_names(extensions)
+                    .enabled_extension_names(&extensions)
                     .push_next(&mut v12),
                 None,
             )
@@ -395,6 +398,7 @@ impl GpuContext {
             tile_bits: choose_tile_bits(
                 props.limits.max_compute_shared_memory_size,
                 props.vendor_id,
+                f64_supported,
             ),
             name,
             command_pool: vk::CommandPool::null(),
@@ -408,6 +412,76 @@ impl GpuContext {
         };
         ctx.create_objects(family)?;
         Ok(Arc::new(ctx))
+    }
+
+    /// Create a Vulkan 1.2 instance, enabling portability enumeration when
+    /// the loader or driver supports it (needed for MoltenVK on macOS).
+    fn create_instance(entry: &ash::Entry) -> Result<InstanceGuard, Error> {
+        let app = vk::ApplicationInfo::default()
+            .application_name(c"ketrs")
+            .api_version(vk::API_VERSION_1_2);
+        // SAFETY: plain query on a loaded Vulkan entry.
+        let portability = unsafe { entry.enumerate_instance_extension_properties(None) }
+            .unwrap_or_default()
+            .iter()
+            .any(|e| e.extension_name_as_c_str() == Ok(c"VK_KHR_portability_enumeration"));
+        let portability_ext = [c"VK_KHR_portability_enumeration".as_ptr()];
+        let mut info = vk::InstanceCreateInfo::default().application_info(&app);
+        if portability {
+            info = info
+                .flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR)
+                .enabled_extension_names(&portability_ext);
+        }
+        // SAFETY: valid create info; the guard destroys the instance on error.
+        let instance = unsafe { entry.create_instance(&info, None) }
+            .map_err(gpu_err("creating Vulkan instance"))?;
+        Ok(InstanceGuard(Some(instance)))
+    }
+
+    /// Load Vulkan, create an instance, and pick a compute device.
+    ///
+    /// On macOS, tries the default Vulkan loader first, then `$VULKAN_SDK`,
+    /// a bundled `libMoltenVK.dylib` next to this binary/extension, and
+    /// standard Homebrew / system loader and MoltenVK paths; if a loader
+    /// finds no device (e.g. installed without an ICD), falls through to
+    /// the next candidate.
+    #[cfg(target_os = "macos")]
+    fn open_device() -> Result<(ash::Entry, InstanceGuard, vk::PhysicalDevice, u32), Error> {
+        let mut last_err = None;
+        for candidate in macos_vulkan_candidates() {
+            // SAFETY: loads a system or bundled Vulkan / MoltenVK dylib;
+            // failure is caught and tried against the next candidate.
+            let entry = match &candidate {
+                None => unsafe { ash::Entry::load() },
+                Some(path) => unsafe { ash::Entry::load_from(path) },
+            };
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    if last_err.is_none() {
+                        last_err = Some(Error::Gpu(format!("no Vulkan driver found: {e}")));
+                    }
+                    continue;
+                }
+            };
+            match Self::create_instance(&entry)
+                .and_then(|inst| Self::pick_device(inst.get()).map(|(p, f)| (inst, p, f)))
+            {
+                Ok((inst, physical, family)) => return Ok((entry, inst, physical, family)),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| Error::Gpu("no Vulkan driver found".into())))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn open_device() -> Result<(ash::Entry, InstanceGuard, vk::PhysicalDevice, u32), Error> {
+        // SAFETY: loads the system Vulkan library; failure is reported.
+        let entry = unsafe { ash::Entry::load() }
+            .map_err(|e| Error::Gpu(format!("no Vulkan driver found: {e}")))?;
+        let instance = Self::create_instance(&entry)?;
+        let (physical, family) = Self::pick_device(instance.get())?;
+        Ok((entry, instance, physical, family))
     }
 
     /// The best GPU with 64-bit floats and a compute queue: discrete first.
@@ -787,11 +861,74 @@ impl GpuContext {
     }
 }
 
-/// The largest compiled tile (16 bytes per amplitude) that fits the
-/// device's shared memory, up to [`PREFERRED_TILE_BITS`] (or
-/// [`NVIDIA_TILE_BITS`]). The environment variable `KETRS_GPU_TILE_BITS`
-/// overrides the preference, for tuning.
-fn choose_tile_bits(shared_memory: u32, vendor: u32) -> u32 {
+/// Candidate Vulkan / MoltenVK library paths on macOS, in preference order.
+/// `None` tries `ash::Entry::load()` (default dyld search).
+#[cfg(target_os = "macos")]
+fn macos_vulkan_candidates() -> Vec<Option<std::path::PathBuf>> {
+    use std::path::PathBuf;
+
+    let mut out = vec![None];
+    if let Some(sdk) = std::env::var_os("VULKAN_SDK") {
+        let lib = PathBuf::from(sdk).join("lib");
+        out.push(Some(lib.join("libvulkan.1.dylib")));
+        out.push(Some(lib.join("libMoltenVK.dylib")));
+    }
+    if let Some(dir) = current_module_dir() {
+        out.push(Some(dir.join("libMoltenVK.dylib")));
+    }
+    for path in [
+        "/opt/homebrew/lib/libvulkan.1.dylib",
+        "/opt/homebrew/lib/libMoltenVK.dylib",
+        "/usr/local/lib/libvulkan.1.dylib",
+        "/usr/local/lib/libMoltenVK.dylib",
+        "/Library/Frameworks/MoltenVK.framework/MoltenVK",
+    ] {
+        out.push(Some(PathBuf::from(path)));
+    }
+    out
+}
+
+/// Directory containing the shared library or executable holding this code,
+/// so macOS wheels can find a bundled `libMoltenVK.dylib` next to `_ketrs`.
+#[cfg(target_os = "macos")]
+fn current_module_dir() -> Option<std::path::PathBuf> {
+    use std::ffi::{c_char, c_int, c_void};
+    use std::os::unix::ffi::OsStrExt;
+
+    #[repr(C)]
+    struct DlInfo {
+        dli_fname: *const c_char,
+        dli_fbase: *mut c_void,
+        dli_sname: *const c_char,
+        dli_saddr: *mut c_void,
+    }
+    unsafe extern "C" {
+        fn dladdr(addr: *const c_void, info: *mut DlInfo) -> c_int;
+    }
+
+    let mut info = DlInfo {
+        dli_fname: std::ptr::null(),
+        dli_fbase: std::ptr::null_mut(),
+        dli_sname: std::ptr::null(),
+        dli_saddr: std::ptr::null_mut(),
+    };
+    // SAFETY: `current_module_dir` is a valid code pointer in this image and
+    // `info` is a valid out-parameter for `dladdr`.
+    let ok = unsafe { dladdr(current_module_dir as *const c_void, &mut info) };
+    if ok == 0 || info.dli_fname.is_null() {
+        return None;
+    }
+    // SAFETY: `dli_fname` is a NUL-terminated path string returned by dyld.
+    let bytes = unsafe { CStr::from_ptr(info.dli_fname) }.to_bytes();
+    std::path::Path::new(std::ffi::OsStr::from_bytes(bytes))
+        .parent()
+        .map(std::path::Path::to_path_buf)
+}
+
+/// The largest compiled tile that fits the device's shared memory, up to
+/// [`PREFERRED_TILE_BITS`] (or [`NVIDIA_TILE_BITS`]). The environment
+/// variable `KETRS_GPU_TILE_BITS` overrides the preference, for tuning.
+fn choose_tile_bits(shared_memory: u32, vendor: u32, f64_supported: bool) -> u32 {
     let preferred = std::env::var("KETRS_GPU_TILE_BITS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -800,10 +937,11 @@ fn choose_tile_bits(shared_memory: u32, vendor: u32) -> u32 {
         } else {
             PREFERRED_TILE_BITS
         });
+    let amp_bytes = if f64_supported { 16u64 } else { 8u64 };
     TILE_SHADERS
         .iter()
         .map(|(bits, _)| *bits)
-        .filter(|&bits| bits <= preferred && 16u64 << bits <= shared_memory as u64)
+        .filter(|&bits| bits <= preferred && amp_bytes << bits <= shared_memory as u64)
         .max()
         .unwrap_or(TILE_SHADERS[0].0)
 }
@@ -1036,5 +1174,37 @@ mod tests {
             Memory::Device,
         );
         assert!(buffer.is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn direct_moltenvk_loads_without_vulkan_loader() {
+        let Some(path) = [
+            "/opt/homebrew/lib/libMoltenVK.dylib",
+            "/usr/local/lib/libMoltenVK.dylib",
+        ]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists()) else {
+            return;
+        };
+        assert!(current_module_dir().is_some());
+        // Load MoltenVK directly (without libvulkan.dylib), as a bundled
+        // macOS Python wheel does on machines with no Vulkan SDK installed.
+        let entry = unsafe { ash::Entry::load_from(path) }.expect("load libMoltenVK.dylib");
+        let instance = GpuContext::create_instance(&entry).expect("create Vulkan instance");
+        let (physical, family) =
+            GpuContext::pick_device(instance.get()).expect("pick MoltenVK device");
+        let ctx = GpuContext::from_opened(entry, instance, physical, family)
+            .expect("create GpuContext directly from libMoltenVK.dylib");
+        assert!(!ctx.device_name().is_empty());
+        let mut bell = crate::Circuit::new(2);
+        bell.h(0).cx(0, 1);
+        let state = crate::GpuStatevector::from_circuit(&ctx, &bell).expect("run Bell circuit");
+        let amps = state.amplitudes().expect("download amplitudes");
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        assert!((amps[0].re - s).abs() < 1e-6);
+        assert!(amps[1].norm() < 1e-6);
+        assert!(amps[2].norm() < 1e-6);
+        assert!((amps[3].re - s).abs() < 1e-6);
     }
 }

@@ -926,12 +926,36 @@ def test_noise_trajectories_and_aer_import_match_aer():
 gpu = pytest.mark.skipif(ketrs.gpu_device() is None, reason="no Vulkan GPU")
 
 
+def _gpu_has_f64() -> bool:
+    return ketrs.gpu_device() is not None and ketrs.GpuStatevector(1).dtype == "complex128"
+
+
+def _gpu_supports_mps() -> bool:
+    if ketrs.gpu_device() is None:
+        return False
+    try:
+        ketrs.MPS(2).gpu = True
+        return True
+    except ValueError:
+        return False
+
+
+gpu_mps = pytest.mark.skipif(not _gpu_supports_mps(), reason="no Vulkan GPU with 64-bit floats")
+
+
+def _gpu_atol(state: ketrs.GpuStatevector | None = None) -> float:
+    has_f64 = state.dtype == "complex128" if state is not None else _gpu_has_f64()
+    return 1e-10 if has_f64 else 1e-4
+
+
 @gpu
 def test_gpu_matches_qiskit():
     for seed in range(5):
         qc = random_circuit(8, depth=10, max_operands=3, seed=seed)
         state = ketrs.GpuStatevector.from_circuit(from_qiskit(qc))
-        np.testing.assert_allclose(state.amplitudes(), QiskitStatevector(qc).data, atol=1e-10)
+        np.testing.assert_allclose(
+            state.amplitudes(), QiskitStatevector(qc).data, atol=_gpu_atol(state)
+        )
 
 
 @gpu
@@ -943,8 +967,9 @@ def test_gpu_run_on_uploaded_state_and_expectation():
     gpu_state.run(circ)
     cpu = ketrs.Statevector.from_amplitudes(psi0)
     cpu.run(circ)
-    np.testing.assert_allclose(gpu_state.amplitudes(), cpu.amplitudes(), atol=1e-10)
-    assert gpu_state.expectation("ZZIIXI") == pytest.approx(cpu.expectation("ZZIIXI"), abs=1e-10)
+    atol = _gpu_atol(gpu_state)
+    np.testing.assert_allclose(gpu_state.amplitudes(), cpu.amplitudes(), atol=atol)
+    assert gpu_state.expectation("ZZIIXI") == pytest.approx(cpu.expectation("ZZIIXI"), abs=atol)
 
 
 @gpu
@@ -953,8 +978,13 @@ def test_gpu_expectation_and_sampling():
     gpu_state = ketrs.GpuStatevector.from_circuit(from_qiskit(qc), seed=3)
     exact = QiskitStatevector(qc)
     h = pauli_sum_from_qiskit(ISING.tensor(SparsePauliOp("IIII")))
-    assert gpu_state.expectation(h) == pytest.approx(exact.expectation_value(ISING.tensor(SparsePauliOp("IIII"))).real, abs=1e-10)
-    assert gpu_state.norm_sqr() == pytest.approx(1.0, abs=1e-12)
+    atol = _gpu_atol(gpu_state)
+    assert gpu_state.expectation(h) == pytest.approx(
+        exact.expectation_value(ISING.tensor(SparsePauliOp("IIII"))).real, abs=atol
+    )
+    assert gpu_state.norm_sqr() == pytest.approx(
+        1.0, abs=1e-12 if gpu_state.dtype == "complex128" else 1e-5
+    )
     counts = gpu_state.sample_counts(50_000)
     probs = exact.probabilities_dict()
     for bits, count in counts.items():
@@ -967,17 +997,18 @@ def test_gpu_gradient_matches_cpu():
     circ = from_qiskit(efficient_su2(6, reps=2))
     x = np.random.default_rng(7).uniform(-2, 2, circ.n_parameters)
     h = pauli_sum_from_qiskit(ISING.tensor(SparsePauliOp("II")))
+    atol = _gpu_atol()
     value, grad = ketrs.GpuStatevector(6).expectation_gradient(circ, x, h)
     want_value, want_grad = ketrs.Statevector(6).expectation_gradient(circ, x, h)
-    assert value == pytest.approx(want_value, abs=1e-10)
-    np.testing.assert_allclose(grad, want_grad, atol=1e-10)
+    assert value == pytest.approx(want_value, abs=atol)
+    np.testing.assert_allclose(grad, want_grad, atol=atol)
 
     gpu_state = ketrs.GpuStatevector.from_circuit(circ.bind(x))
     applied = gpu_state.apply_pauli_sum(h)
     cpu = ketrs.Statevector.from_circuit(circ.bind(x)).apply_pauli_sum(h)
-    np.testing.assert_allclose(applied.amplitudes(), cpu.amplitudes(), atol=1e-10)
+    np.testing.assert_allclose(applied.amplitudes(), cpu.amplitudes(), atol=atol)
     grad = ketrs.GpuStatevector.adjoint_gradient(circ, x, gpu_state, applied)
-    np.testing.assert_allclose(grad, want_grad, atol=1e-10)
+    np.testing.assert_allclose(grad, want_grad, atol=atol)
 
 
 @gpu
@@ -1001,7 +1032,7 @@ def test_gpu_evolution_matches_cpu():
     gpu_state.evolve(h, 2.0)
     cpu = ketrs.Statevector.from_amplitudes(psi0)
     cpu.evolve(h, 2.0)
-    np.testing.assert_allclose(gpu_state.amplitudes(), cpu.amplitudes(), atol=1e-10)
+    np.testing.assert_allclose(gpu_state.amplitudes(), cpu.amplitudes(), atol=_gpu_atol(gpu_state))
 
 
 # --- Measurement and classical control ------------------------------------------------
@@ -1084,14 +1115,14 @@ def test_register_condition_else_branch_and_reset():
     assert state.probability_one(1) == pytest.approx(0.0)  # reset after measuring
 
 
-@gpu
+@gpu_mps
 def test_mps_copy_keeps_the_gpu_setting():
     mps = ketrs.MPS(4)
     mps.gpu = True
     assert mps.copy().gpu and copy.deepcopy(mps).gpu
 
 
-@gpu
+@gpu_mps
 def test_mps_sweeps_on_gpu_match_cpu():
     n = 10
     terms = [("ZZ", [i, j], 1.0 / (j - i)) for i in range(n) for j in range(i + 1, min(n, i + 5))]
@@ -1398,7 +1429,7 @@ def test_periodic_mps_tdvp_and_gpu():
 
     # Vulkan GPU equivalence when built with --features gpu and supported GPU is present.
     assert pmps.gpu is False
-    if ketrs.gpu_device() is not None:
+    if _gpu_supports_mps():
         gpu_pmps = ketrs.PeriodicMPS.from_circuit(neel, max_bond=12, cutoff=1e-14)
         gpu_pmps.gpu = True
         assert gpu_pmps.gpu is True
@@ -1406,6 +1437,10 @@ def test_periodic_mps_tdvp_and_gpu():
         np.testing.assert_allclose(
             gpu_pmps.to_statevector().amplitudes(), pmps.to_statevector().amplitudes(), atol=1e-10
         )
+    elif ketrs.gpu_device() is not None:
+        gpu_pmps = ketrs.PeriodicMPS.from_circuit(neel, max_bond=12, cutoff=1e-14)
+        with pytest.raises(ValueError, match="64-bit floats"):
+            gpu_pmps.gpu = True
 
 
 def test_periodic_mps_tdvp_multisite_long_range_and_wrap_around():

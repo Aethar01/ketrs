@@ -1,6 +1,6 @@
 # GPU Acceleration (Vulkan)
 
-`ketrs` accelerates both exact statevectors (`GpuStatevector`) and MPS DMRG/TDVP sweeps (`mps.gpu = True`) using **Vulkan 1.2 compute shaders**. Because it uses Vulkan, it works across NVIDIA, AMD, and Intel GPUs without installing CUDA or ROCm.
+`ketrs` accelerates both exact statevectors (`GpuStatevector`) and MPS DMRG/TDVP sweeps (`mps.gpu = True`) using **Vulkan 1.2 compute shaders**. Because it uses Vulkan, it works across NVIDIA, AMD, Intel, and Apple Silicon (via MoltenVK) GPUs without installing CUDA or ROCm.
 
 ## Checking Your GPU
 
@@ -10,7 +10,7 @@ import ketrs
 print("GPU:", ketrs.gpu_device())
 ```
 
-If this prints `None`, check that you have a Vulkan 1.2 driver installed (and on macOS, note that prebuilt wheels are currently CPU-only).
+If this prints `None`, check that you have a Vulkan 1.2 driver installed (on macOS, prebuilt wheels bundle MoltenVK automatically; Rust/source builds use `brew install molten-vk` or the Vulkan SDK). Note that Apple Silicon GPUs lack native 64-bit floats, so `GpuStatevector` runs in single precision (`complex64`) and `mps.gpu = True` (which requires FP64) is unavailable on Apple Silicon.
 
 ---
 

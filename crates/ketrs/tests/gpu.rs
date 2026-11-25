@@ -1,5 +1,6 @@
 //! GPU statevectors, checked against the CPU engine. Tests skip (passing)
-//! when no Vulkan GPU with 64-bit floats is available.
+//! when no Vulkan GPU is available; on GPUs without 64-bit floats (such as
+//! Apple Silicon via MoltenVK) they run in single precision.
 #![cfg(feature = "gpu")]
 
 mod common;
@@ -82,13 +83,42 @@ fn assert_close(got: &[C64], want: &[C64]) {
     }
 }
 
+fn default_precision(ctx: &GpuContext) -> GpuPrecision {
+    if ctx.supports_f64() {
+        GpuPrecision::Double
+    } else {
+        GpuPrecision::Single
+    }
+}
+
+fn zero_chunked(
+    ctx: &Arc<GpuContext>,
+    n_qubits: usize,
+    chunk_bits: u32,
+) -> Result<GpuStatevector, Error> {
+    GpuStatevector::zero_with_layout(ctx, n_qubits, chunk_bits, default_precision(ctx))
+}
+
+fn assert_close_for(ctx: &GpuContext, got: &[C64], want: &[C64]) {
+    if ctx.supports_f64() {
+        assert_close(got, want);
+    } else {
+        assert_close_single(got, want);
+    }
+}
+
+fn tol(ctx: &GpuContext) -> f64 {
+    if ctx.supports_f64() { 1e-10 } else { 1e-4 }
+}
+
 #[test]
 fn random_circuits_match_cpu() {
     let Some(ctx) = gpu() else { return };
     for (n, seed) in [(2, 1), (5, 2), (9, 3), (12, 4), (20, 5)] {
         let circ = random_circuit(n, 60, seed);
         let gpu_state = GpuStatevector::from_circuit(&ctx, &circ).unwrap();
-        assert_close(
+        assert_close_for(
+            &ctx,
             &gpu_state.amplitudes().unwrap(),
             Statevector::from_circuit(&circ).amplitudes(),
         );
@@ -108,7 +138,8 @@ fn multi_controlled_operations_match_cpu() {
             .multi_controlled(ketrs::Gate::H, &[], 4);
         circ.extend(&random_circuit(n, 30, seed + 1)).unwrap();
         let gpu_state = GpuStatevector::from_circuit(&ctx, &circ).unwrap();
-        assert_close(
+        assert_close_for(
+            &ctx,
             &gpu_state.amplitudes().unwrap(),
             Statevector::from_circuit(&circ).amplitudes(),
         );
@@ -125,9 +156,9 @@ fn upload_run_download_round_trip() {
     gpu_state.run(&circ).unwrap();
     let mut cpu = start.clone();
     cpu.run(&circ).unwrap();
-    assert_close(&gpu_state.amplitudes().unwrap(), cpu.amplitudes());
+    assert_close_for(&ctx, &gpu_state.amplitudes().unwrap(), cpu.amplitudes());
     let h = PauliSum::from_list([("ZZIIIIIIII", 1.0), ("IIIIXYIIII", 0.4)]).unwrap();
-    assert!((gpu_state.expectation(&h).unwrap() - cpu.expectation(&h).unwrap()).abs() < 1e-10);
+    assert!((gpu_state.expectation(&h).unwrap() - cpu.expectation(&h).unwrap()).abs() < tol(&ctx));
 }
 
 #[test]
@@ -158,7 +189,7 @@ fn tiled_runs_are_correct_every_time() {
     let want = Statevector::from_circuit(&circ);
     for _ in 0..5 {
         let got = GpuStatevector::from_circuit(&ctx, &circ).unwrap();
-        assert_close(&got.amplitudes().unwrap(), want.amplitudes());
+        assert_close_for(&ctx, &got.amplitudes().unwrap(), want.amplitudes());
     }
 }
 
@@ -183,17 +214,17 @@ fn chunked_states_match_cpu() {
     // chunk_bits 8 uses all sixteen buffers.
     for chunk_bits in [8, 9, 10, 11] {
         let circ = random_circuit(n, 80, chunk_bits as u64);
-        let mut gpu_state = GpuStatevector::zero_with_chunk_bits(&ctx, n, chunk_bits).unwrap();
+        let mut gpu_state = zero_chunked(&ctx, n, chunk_bits).unwrap();
         gpu_state.run(&circ).unwrap();
         let cpu = Statevector::from_circuit(&circ);
-        assert_close(&gpu_state.amplitudes().unwrap(), cpu.amplitudes());
+        assert_close_for(&ctx, &gpu_state.amplitudes().unwrap(), cpu.amplitudes());
         let h = hamiltonian(n, 7);
         let got = gpu_state.expectation(&h).unwrap();
         assert!(
-            (got - cpu.expectation(&h).unwrap()).abs() < 1e-10,
+            (got - cpu.expectation(&h).unwrap()).abs() < tol(&ctx),
             "chunk_bits {chunk_bits}"
         );
-        assert!((gpu_state.norm_sqr().unwrap() - 1.0).abs() < 1e-10);
+        assert!((gpu_state.norm_sqr().unwrap() - 1.0).abs() < tol(&ctx));
     }
 }
 
@@ -209,7 +240,10 @@ fn expectation_on_gpu_matches_cpu() {
             gpu_state.expectation(&h).unwrap(),
             cpu.expectation(&h).unwrap(),
         );
-        assert!((got - want).abs() < 1e-10, "n={n}: GPU {got}, CPU {want}");
+        assert!(
+            (got - want).abs() < tol(&ctx),
+            "n={n}: GPU {got}, CPU {want}"
+        );
     }
 }
 
@@ -223,7 +257,7 @@ fn sampling_on_gpu_follows_born_rule() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(5);
     let shots = 200_000;
     for chunk_bits in [12, 10] {
-        let mut gpu_state = GpuStatevector::zero_with_chunk_bits(&ctx, n, chunk_bits).unwrap();
+        let mut gpu_state = zero_chunked(&ctx, n, chunk_bits).unwrap();
         gpu_state.run(&circ).unwrap();
         let counts = gpu_state.sample_counts(shots, &mut rng).unwrap();
         assert_eq!(counts.values().sum::<usize>(), shots);
@@ -251,14 +285,14 @@ fn pauli_sums_apply_on_gpu() {
     let Some(ctx) = gpu() else { return };
     for (n, chunk_bits, seed) in [(5, 5, 1), (12, 12, 2), (12, 10, 3)] {
         let circ = random_circuit(n, 40, seed);
-        let mut gpu_state = GpuStatevector::zero_with_chunk_bits(&ctx, n, chunk_bits).unwrap();
+        let mut gpu_state = zero_chunked(&ctx, n, chunk_bits).unwrap();
         gpu_state.run(&circ).unwrap();
         let h = hamiltonian(n, seed + 20);
         let got = gpu_state.apply_pauli_sum(&h).unwrap();
         let want = Statevector::from_circuit(&circ)
             .apply_pauli_sum(&h)
             .unwrap();
-        assert_close(&got.amplitudes().unwrap(), want.amplitudes());
+        assert_close_for(&ctx, &got.amplitudes().unwrap(), want.amplitudes());
     }
     // H = 0 gives the zero vector.
     let mut gpu_state = GpuStatevector::zero(&ctx, 3).unwrap();
@@ -304,17 +338,17 @@ fn gradients_on_gpu_match_cpu() {
     for (n, chunk_bits, seed) in [(7, 7, 1), (13, 13, 2), (13, 11, 3)] {
         let (circ, values) = parametric(n, seed);
         let h = hamiltonian(n, seed + 30);
-        let start = GpuStatevector::zero_with_chunk_bits(&ctx, n, chunk_bits).unwrap();
+        let start = zero_chunked(&ctx, n, chunk_bits).unwrap();
         let (value, gradient) = start.expectation_gradient(&circ, &values, &h).unwrap();
         let (want_value, want) = Statevector::zero(n)
             .expectation_gradient(&circ, &values, &h)
             .unwrap();
         assert!(
-            (value - want_value).abs() < 1e-10,
+            (value - want_value).abs() < tol(&ctx),
             "{value} vs {want_value}"
         );
         for (g, w) in gradient.iter().zip(&want) {
-            assert!((g - w).abs() < 1e-10, "n={n}: {gradient:?} vs {want:?}");
+            assert!((g - w).abs() < tol(&ctx), "n={n}: {gradient:?} vs {want:?}");
         }
     }
 }
@@ -334,7 +368,7 @@ fn gradients_through_multi_controlled_operations() {
         .expectation_gradient(&circ, &values, &h)
         .unwrap();
     for (g, w) in gradient.iter().zip(&want) {
-        assert!((g - w).abs() < 1e-10, "{gradient:?} vs {want:?}");
+        assert!((g - w).abs() < tol(&ctx), "{gradient:?} vs {want:?}");
     }
 }
 
@@ -363,7 +397,7 @@ fn adjoint_gradient_on_gpu_for_an_overlap_loss() {
     )
     .unwrap();
     for (g, w) in got.iter().zip(&want) {
-        assert!((g - w).abs() < 1e-10, "{got:?} vs {want:?}");
+        assert!((g - w).abs() < tol(&ctx), "{got:?} vs {want:?}");
     }
 }
 
@@ -374,14 +408,23 @@ fn evolution_on_gpu_matches_cpu() {
     // splits the state over buffers.
     for (n, chunk_bits, seed, time) in [(6, 6, 1, 0.3), (12, 12, 2, 4.0), (12, 10, 3, 2.5)] {
         let circ = random_circuit(n, 40, seed);
-        let mut gpu_state = GpuStatevector::zero_with_chunk_bits(&ctx, n, chunk_bits).unwrap();
+        let mut gpu_state = zero_chunked(&ctx, n, chunk_bits).unwrap();
         gpu_state.run(&circ).unwrap();
         let h = hamiltonian(n, seed + 40);
         gpu_state.evolve(&h, time).unwrap();
         let mut cpu = Statevector::from_circuit(&circ);
         cpu.evolve(&h, time).unwrap();
-        assert_close(&gpu_state.amplitudes().unwrap(), cpu.amplitudes());
-        assert!((gpu_state.norm_sqr().unwrap() - 1.0).abs() < 1e-10);
+        let amp_tol = if ctx.supports_f64() { 1e-10 } else { 2e-4 };
+        for (i, (g, w)) in gpu_state
+            .amplitudes()
+            .unwrap()
+            .iter()
+            .zip(cpu.amplitudes())
+            .enumerate()
+        {
+            assert!((g - w).norm() < amp_tol, "amplitude {i}: GPU {g}, CPU {w}");
+        }
+        assert!((gpu_state.norm_sqr().unwrap() - 1.0).abs() < tol(&ctx));
     }
 }
 
@@ -389,10 +432,7 @@ fn evolution_on_gpu_matches_cpu() {
 fn too_many_buffers_are_rejected() {
     let Some(ctx) = gpu() else { return };
     // 12 qubits in buffers of 2⁷ would need 32 buffers.
-    assert!(matches!(
-        GpuStatevector::zero_with_chunk_bits(&ctx, 12, 7),
-        Err(Error::Gpu(_))
-    ));
+    assert!(matches!(zero_chunked(&ctx, 12, 7), Err(Error::Gpu(_))));
 }
 
 fn assert_close_single(got: &[C64], want: &[C64]) {
@@ -562,6 +602,9 @@ fn classical_control_on_gpu() {
     circ.if_test(condition(0), z, None);
     circ.reset(0).measure(0, 0).measure(2, 2);
     for precision in [GpuPrecision::Double, GpuPrecision::Single] {
+        if precision == GpuPrecision::Double && !ctx.supports_f64() {
+            continue;
+        }
         let start = GpuStatevector::zero_with_precision(&ctx, 3, precision).unwrap();
         let shots = 2_000;
         let counts = start.sample_circuit(&circ, shots, &mut rng).unwrap();
@@ -582,11 +625,12 @@ fn classical_control_on_gpu() {
     let mut state = GpuStatevector::zero(&ctx, 2).unwrap();
     let bits = state.run_trajectory(&bell, &mut rng).unwrap();
     let p1 = state.probability_one(1).unwrap();
-    assert!((p1 - if bits[0] { 1.0 } else { 0.0 }).abs() < 1e-12);
-    assert!((state.norm_sqr().unwrap() - 1.0).abs() < 1e-12);
+    let eps = if ctx.supports_f64() { 1e-12 } else { 1e-5 };
+    assert!((p1 - if bits[0] { 1.0 } else { 0.0 }).abs() < eps);
+    assert!((state.norm_sqr().unwrap() - 1.0).abs() < eps);
 }
 
-/// A 28-qubit state (4 GiB, two buffers on most GPUs) without downloading
+/// A 28-qubit state (4 GiB in double, 2 GiB in single) without downloading
 /// it. Ignored by default for its memory; run with `--ignored`.
 #[test]
 #[ignore]
@@ -595,11 +639,11 @@ fn twenty_eight_qubits() {
     let Some(ctx) = gpu() else { return };
     let n = 28;
     let mut ghz = GpuStatevector::from_circuit(&ctx, &ketrs::library::ghz(n)).unwrap();
-    assert!((ghz.norm_sqr().unwrap() - 1.0).abs() < 1e-10);
+    assert!((ghz.norm_sqr().unwrap() - 1.0).abs() < tol(&ctx));
     let ends = PauliSum::from(PauliString::new([(0, Pauli::Z), (n - 1, Pauli::Z)]).unwrap());
-    assert!((ghz.expectation(&ends).unwrap() - 1.0).abs() < 1e-10);
+    assert!((ghz.expectation(&ends).unwrap() - 1.0).abs() < tol(&ctx));
     let parity = PauliSum::from(PauliString::new((0..n).map(|q| (q, Pauli::X))).unwrap());
-    assert!((ghz.expectation(&parity).unwrap() - 1.0).abs() < 1e-10);
+    assert!((ghz.expectation(&parity).unwrap() - 1.0).abs() < tol(&ctx));
     let mut rng = rand::rngs::StdRng::seed_from_u64(1);
     let counts = ghz.sample_counts(1000, &mut rng).unwrap();
     assert_eq!(

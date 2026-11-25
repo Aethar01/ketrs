@@ -1,7 +1,7 @@
 //! GPU statevectors through Vulkan compute.
 //!
-//! Works on any Vulkan 1.2 GPU with 64-bit floats (NVIDIA, AMD and others)
-//! with nothing but the system Vulkan driver, loaded at run time. The GLSL
+//! Works on any Vulkan 1.2 GPU (NVIDIA, AMD, Apple silicon via MoltenVK, …),
+//! loading the Vulkan driver (or MoltenVK on macOS) at run time. The GLSL
 //! shaders in `shaders/` are compiled to SPIR-V by `build.rs` with glslc.
 //!
 //! A circuit is fused (fully in single precision, only runs of one-qubit

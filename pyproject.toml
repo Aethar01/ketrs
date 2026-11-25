@@ -37,6 +37,11 @@ docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.27", "ruff"]
 manifest-path = "crates/ketrs-py/Cargo.toml"
 python-source = "python"
 module-name = "ketrs._ketrs"
+# Bundled on macOS wheel builds (absent on Linux, Windows and sdist).
+include = [
+    { path = "python/ketrs/libMoltenVK.*", format = "wheel" },
+    { path = "python/ketrs/LICENSE-MoltenVK*", format = "wheel" },
+]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]

@@ -7,3 +7,5 @@ proptest-regressions/
 bench/results.json
 todo.md
 /site
+python/ketrs/libMoltenVK.dylib
+python/ketrs/LICENSE-MoltenVK
