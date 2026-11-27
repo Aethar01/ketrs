@@ -3379,6 +3379,31 @@ impl PyHybridState {
         Ok(slf)
     }
 
+    fn s(mut slf: PyRefMut<'_, Self>, qubit: usize) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.s(qubit).map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    fn sdg(mut slf: PyRefMut<'_, Self>, qubit: usize) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.sdg(qubit).map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    fn t(mut slf: PyRefMut<'_, Self>, qubit: usize) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.t(qubit).map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    fn tdg(mut slf: PyRefMut<'_, Self>, qubit: usize) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.tdg(qubit).map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    fn p(mut slf: PyRefMut<'_, Self>, lam: f64, qubit: usize) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.p(lam, qubit).map_err(to_py_err)?;
+        Ok(slf)
+    }
+
     fn rx(mut slf: PyRefMut<'_, Self>, theta: f64, qubit: usize) -> PyResult<PyRefMut<'_, Self>> {
         slf.inner.rx(theta, qubit).map_err(to_py_err)?;
         Ok(slf)
@@ -3442,6 +3467,24 @@ impl PyHybridState {
         Ok(slf)
     }
 
+    fn quadratic_phase(
+        mut slf: PyRefMut<'_, Self>,
+        s: f64,
+        mode: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.quadratic_phase(s, mode).map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    fn cubic_phase(
+        mut slf: PyRefMut<'_, Self>,
+        gamma: f64,
+        mode: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.cubic_phase(gamma, mode).map_err(to_py_err)?;
+        Ok(slf)
+    }
+
     fn kerr(mut slf: PyRefMut<'_, Self>, kappa: f64, mode: usize) -> PyResult<PyRefMut<'_, Self>> {
         slf.inner.kerr(kappa, mode).map_err(to_py_err)?;
         Ok(slf)
@@ -3466,6 +3509,65 @@ impl PyHybridState {
         slf.inner
             .beam_splitter(theta, phi, a, b)
             .map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    fn two_mode_squeeze(
+        mut slf: PyRefMut<'_, Self>,
+        r: f64,
+        phi: f64,
+        a: usize,
+        b: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner
+            .two_mode_squeeze(r, phi, a, b)
+            .map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    fn cx_mode(
+        mut slf: PyRefMut<'_, Self>,
+        s: f64,
+        a: usize,
+        b: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.cx_mode(s, a, b).map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    fn cz_mode(
+        mut slf: PyRefMut<'_, Self>,
+        s: f64,
+        a: usize,
+        b: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.cz_mode(s, a, b).map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    fn cross_kerr(
+        mut slf: PyRefMut<'_, Self>,
+        kappa: f64,
+        a: usize,
+        b: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.inner.cross_kerr(kappa, a, b).map_err(to_py_err)?;
+        Ok(slf)
+    }
+
+    fn passive<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        modes: Vec<usize>,
+        matrix: Matrix2C<'_>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let (mat, k) = matrix.to_square_vec()?;
+        if k != modes.len() {
+            return Err(PyValueError::new_err(format!(
+                "passive block on {} modes got a {k}×{k} matrix",
+                modes.len()
+            )));
+        }
+        slf.inner.apply_passive(&modes, &mat).map_err(to_py_err)?;
         Ok(slf)
     }
 

@@ -36,6 +36,15 @@ const GATE_PAR_MIN_DIM: usize = 8192;
 /// Minimum shot count for parallelising multi-shot sampling.
 const SAMPLE_PAR_MIN_SHOTS: usize = 256;
 
+fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
 /// Precomputed table of `D(m, k) = C(m + k - 1, k)` (number of `m`-mode states
 /// with `k` photons).
 #[derive(Clone, Debug)]
@@ -47,22 +56,38 @@ struct DimTable {
 }
 
 impl DimTable {
-    fn new(max_m: usize, max_n: usize) -> Self {
-        let stride = max_n + 1;
-        let mut table = vec![0usize; (max_m + 1) * stride];
+    fn new(max_m: usize, max_n: usize) -> Result<Self, Error> {
+        let stride = max_n.checked_add(1).ok_or_else(|| {
+            Error::InvalidArgument(format!("photon count {max_n} overflows usize"))
+        })?;
+        let table_len = max_m
+            .checked_add(1)
+            .and_then(|rows| rows.checked_mul(stride))
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "FixedNFockState table for ({max_m}, {max_n}) overflows usize"
+                ))
+            })?;
+        let mut table = vec![0usize; table_len];
         for m in 0..=max_m {
             table[m * stride] = 1; // D(m, 0) = 1
         }
         for m in 1..=max_m {
             for k in 1..=max_n {
-                table[m * stride + k] = table[(m - 1) * stride + k] + table[m * stride + (k - 1)];
+                table[m * stride + k] = table[(m - 1) * stride + k]
+                    .checked_add(table[m * stride + (k - 1)])
+                    .ok_or_else(|| {
+                        Error::InvalidArgument(format!(
+                            "FixedNFockState basis dimension C({max_m}+{max_n}-1, {max_n}) overflows usize"
+                        ))
+                    })?;
             }
         }
-        DimTable {
+        Ok(DimTable {
             max_m,
             max_n,
             table,
-        }
+        })
     }
 
     #[inline(always)]
@@ -82,7 +107,8 @@ pub struct FixedNFockState {
 }
 
 impl FixedNFockState {
-    /// Dimension `C(m + N - 1, N)` of the `m`-mode `N`-photon Fock space.
+    /// Dimension `C(m + N - 1, N)` of the `m`-mode `N`-photon Fock space
+    /// (saturating at `usize::MAX` on overflow).
     pub fn basis_dim(n_modes: usize, n_photons: usize) -> usize {
         if n_photons == 0 {
             return 1;
@@ -90,11 +116,25 @@ impl FixedNFockState {
         if n_modes == 0 {
             return 0;
         }
-        let n = n_modes + n_photons - 1;
+        let Some(n) = n_modes
+            .checked_add(n_photons)
+            .and_then(|s| s.checked_sub(1))
+        else {
+            return usize::MAX;
+        };
         let k = n_photons.min(n_modes - 1);
         let mut acc: u128 = 1;
         for i in 0..k {
-            acc = acc * ((n - i) as u128) / ((i + 1) as u128);
+            let num = (n - i) as u128;
+            let den = (i + 1) as u128;
+            let g = gcd_u128(num, den);
+            let num_r = num / g;
+            let den_r = den / g;
+            acc /= den_r;
+            match acc.checked_mul(num_r) {
+                Some(v) if v <= usize::MAX as u128 => acc = v,
+                _ => return usize::MAX,
+            }
         }
         acc as usize
     }
@@ -107,8 +147,13 @@ impl FixedNFockState {
                 "FixedNFockState requires at least one mode".into(),
             ));
         }
-        let n_photons: usize = pattern.iter().sum();
-        let dims = DimTable::new(n_modes, n_photons);
+        let mut n_photons: usize = 0;
+        for &p in pattern {
+            n_photons = n_photons.checked_add(p).ok_or_else(|| {
+                Error::InvalidArgument("total photon count overflows usize".into())
+            })?;
+        }
+        let dims = DimTable::new(n_modes, n_photons)?;
         let total = dims.dim(n_modes, n_photons);
         let mut amps = vec![C64::new(0.0, 0.0); total];
         let idx = pattern_index(&dims, pattern);
@@ -305,8 +350,13 @@ impl FixedNFockState {
                 unitary.len()
             )));
         }
-        let n_photons: usize = input.iter().sum();
-        let dims = DimTable::new(m, n_photons);
+        let mut n_photons: usize = 0;
+        for &p in input {
+            n_photons = n_photons.checked_add(p).ok_or_else(|| {
+                Error::InvalidArgument("total photon count overflows usize".into())
+            })?;
+        }
+        let dims = DimTable::new(m, n_photons)?;
         if n_photons == 0 {
             return Ok(FixedNFockState {
                 n_modes: m,
@@ -810,7 +860,7 @@ impl FixedNFockState {
         // Project onto `n_mode == outcome` and shift to `n_mode == 0` in the
         // `(N - outcome)`-photon subspace!
         let new_n = n - outcome;
-        let new_dims = DimTable::new(self.n_modes, new_n);
+        let new_dims = DimTable::new(self.n_modes, new_n)?;
         let mut new_amps = vec![C64::new(0.0, 0.0); new_dims.dim(self.n_modes, new_n)];
         let mut pat = vec![0usize; self.n_modes];
         project_and_reset_mode(
@@ -1589,5 +1639,11 @@ mod tests {
         }
         assert_eq!(c20 + c02, shots);
         assert!(((c20 as f64 / shots as f64) - 0.5).abs() < 0.05);
+    }
+
+    #[test]
+    fn basis_dim_and_dim_table_guard_against_overflow() {
+        assert_eq!(FixedNFockState::basis_dim(200, 200), usize::MAX);
+        assert!(FixedNFockState::from_fock(&vec![1; 100]).is_err());
     }
 }

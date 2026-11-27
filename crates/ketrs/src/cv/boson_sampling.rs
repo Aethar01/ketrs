@@ -267,6 +267,25 @@ pub fn boson_sample<R: Rng + ?Sized>(
             unitary.len()
         )));
     }
+    if !unitary.iter().all(|z| z.re.is_finite() && z.im.is_finite()) {
+        return Err(Error::InvalidArgument(
+            "boson_sample unitary entries must be finite".into(),
+        ));
+    }
+    for i in 0..m {
+        for j in 0..m {
+            let dot: C64 = (0..m)
+                .map(|r| unitary[r * m + i].conj() * unitary[r * m + j])
+                .sum();
+            let want = if i == j { 1.0 } else { 0.0 };
+            let err = (dot - want).norm();
+            if !err.is_finite() || err > 1e-9 {
+                return Err(Error::InvalidArgument(
+                    "boson_sample matrix is not unitary".into(),
+                ));
+            }
+        }
+    }
     let n: usize = input.iter().sum();
     if shots == 0 {
         return Ok(Vec::new());
@@ -372,13 +391,14 @@ pub fn boson_sample<R: Rng + ?Sized>(
 fn pick_discrete<R: Rng + ?Sized>(weights: &[f64], total: f64, rng: &mut R) -> usize {
     let u = rng.random::<f64>() * total;
     let mut cum = 0.0;
+    let last_nonzero = weights.iter().rposition(|&w| w > 0.0).unwrap_or(0);
     for (i, &w) in weights.iter().enumerate() {
         cum += w;
         if u < cum {
             return i;
         }
     }
-    weights.len() - 1
+    last_nonzero
 }
 
 #[cfg(test)]
@@ -474,5 +494,14 @@ mod tests {
             tvd *= 0.5;
             assert!(tvd < 0.02, "input={input:?} TVD={tvd}");
         }
+
+        // Non-unitary matrix is rejected.
+        let bad = vec![
+            C64::new(2.0, 0.0),
+            C64::new(0.0, 0.0),
+            C64::new(0.0, 0.0),
+            C64::new(2.0, 0.0),
+        ];
+        assert!(boson_sample(&bad, &[1, 0], 10, &mut rng).is_err());
     }
 }

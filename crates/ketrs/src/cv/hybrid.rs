@@ -189,7 +189,7 @@ pub enum HybridOp {
     },
     /// Conditional rotation (dispersive shift) `exp(i θ Z_q n̂_m) = |0⟩⟨0| ⊗ R(+θ) + |1⟩⟨1| ⊗ R(−θ)`.
     ConditionalRotation {
-        /// Rotation angle `θ` (`π/2` gives conditional parity up to global sign).
+        /// Rotation angle `θ` (`π/2` gives conditional parity up to a local mode rotation `R(π/2)`).
         theta: f64,
         /// Control qubit.
         qubit: usize,
@@ -1336,6 +1336,35 @@ impl HybridState {
         self.apply_qubit_1(qubit, [[o, z], [z, -o]])
     }
 
+    /// Phase gate `S = diag(1, i)` on `qubit`.
+    pub fn s(&mut self, qubit: usize) -> Result<(), Error> {
+        self.p(std::f64::consts::FRAC_PI_2, qubit)
+    }
+
+    /// `S† = diag(1, −i)` on `qubit`.
+    pub fn sdg(&mut self, qubit: usize) -> Result<(), Error> {
+        self.p(-std::f64::consts::FRAC_PI_2, qubit)
+    }
+
+    /// `T = diag(1, e^{iπ/4})` on `qubit`.
+    pub fn t(&mut self, qubit: usize) -> Result<(), Error> {
+        self.p(std::f64::consts::FRAC_PI_4, qubit)
+    }
+
+    /// `T† = diag(1, e^{−iπ/4})` on `qubit`.
+    pub fn tdg(&mut self, qubit: usize) -> Result<(), Error> {
+        self.p(-std::f64::consts::FRAC_PI_4, qubit)
+    }
+
+    /// Phase gate `P(λ) = diag(1, e^{iλ})` on `qubit`.
+    pub fn p(&mut self, lam: f64, qubit: usize) -> Result<(), Error> {
+        let z = C64::new(0.0, 0.0);
+        self.apply_qubit_1(
+            qubit,
+            [[C64::new(1.0, 0.0), z], [z, C64::from_polar(1.0, lam)]],
+        )
+    }
+
     /// `Rx(θ)` on `qubit`.
     pub fn rx(&mut self, theta: f64, qubit: usize) -> Result<(), Error> {
         let (s, c) = (0.5 * theta).sin_cos();
@@ -1929,7 +1958,8 @@ impl HybridState {
         let total: f64 = probs.iter().sum();
         let u = rng.random::<f64>() * total;
         let mut acc = 0.0;
-        let mut outcome = d - 1;
+        let last_nonzero = probs.iter().rposition(|&p| p > 0.0).unwrap_or(0);
+        let mut outcome = last_nonzero;
         for (n, &p) in probs.iter().enumerate() {
             acc += p;
             if u < acc {
@@ -2004,7 +2034,8 @@ impl HybridState {
             }
         }
 
-        let q_max = ((2 * d) as f64).sqrt() + 5.0;
+        // Classical turning point of level d is √(4d) (for ħ = 2); add margin 5.
+        let q_max = (4.0 * (d as f64)).sqrt() + 5.0;
         let n_grid = (d * 24).clamp(256, 2048);
         let dq = 2.0 * q_max / (n_grid as f64);
         let mut psi = vec![0.0; d];

@@ -381,7 +381,8 @@ pub fn sample_gbs_pnr<R: Rng + ?Sized>(
 
             let u = local_rng.random::<f64>() * sum_w;
             let mut cum = 0.0;
-            let mut chosen = probs.len() - 1;
+            let last_nonzero = probs.iter().rposition(|&w| w > 0.0).unwrap_or(0);
+            let mut chosen = last_nonzero;
             for (nk, &w) in probs.iter().enumerate() {
                 cum += w;
                 if u < cum {

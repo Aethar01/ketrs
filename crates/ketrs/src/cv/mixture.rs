@@ -34,6 +34,10 @@ const MIXTURE_PAR_MIN_TERMS: usize = 512;
 /// Minimum shot count for parallelising independent mixture trajectories.
 const SAMPLE_PAR_MIN_SHOTS: usize = 32;
 
+/// Maximum Fock photon number `n` supported by the shared-covariance
+/// coherent-state ring decomposition in [`GaussianMixture`].
+pub(crate) const MAX_LCG_FOCK_N: usize = 64;
+
 /// Accuracy and pruning settings for [`GaussianMixture`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixtureOptions {
@@ -43,8 +47,8 @@ pub struct MixtureOptions {
     /// Distance tolerance for merging duplicate `(a, b)` peaks after
     /// measurements (default `1e-9`).
     pub merge_tol: f64,
-    /// Step size `h` for finite-difference Gaussian decomposition of Fock
-    /// input states `|n⟩` (default `1e-3`).
+    /// Target accuracy scale for Fock input decompositions (default `1e-3`,
+    /// targeting `≤ fock_step²` infidelity).
     pub fock_step: f64,
 }
 
@@ -129,39 +133,11 @@ impl GaussianMixture {
             total_err += err;
         }
 
-        // Tensor product of per-mode covariances and terms.
-        let dim = 2 * m;
-        let mut cov_combos: Vec<Vec<usize>> = vec![Vec::new()];
-        for (mc, _) in &per_mode {
-            let mut next = Vec::with_capacity(cov_combos.len() * mc.len());
-            for prefix in &cov_combos {
-                for cid in 0..mc.len() {
-                    let mut p = prefix.clone();
-                    p.push(cid);
-                    next.push(p);
-                }
-            }
-            cov_combos = next;
-        }
-        let mut cov_map: HashMap<Vec<usize>, usize> = HashMap::new();
-        let mut covs = Vec::with_capacity(cov_combos.len());
-        for (id, combo) in cov_combos.into_iter().enumerate() {
-            let mut full = vec![0.0; dim * dim];
-            for (mode, &cid) in combo.iter().enumerate() {
-                let c2 = per_mode[mode].0[cid];
-                let ix = mode;
-                let ip = m + mode;
-                full[ix * dim + ix] = c2[0];
-                full[ix * dim + ip] = c2[1];
-                full[ip * dim + ix] = c2[2];
-                full[ip * dim + ip] = c2[3];
-            }
-            cov_map.insert(combo, id);
-            covs.push(full);
-        }
-
         // Build tensor-product terms, pruning negligible cross-mode products
-        // immediately so multi-mode GKP/cat inputs stay compact with bounded error.
+        // immediately so multi-mode GKP/cat/Fock inputs stay compact with
+        // bounded error, then lazily intern only the covariance combinations
+        // referenced by surviving terms.
+        let dim = 2 * m;
         #[allow(clippy::type_complexity)]
         let mut terms: Vec<(C64, Vec<f64>, Vec<f64>, Vec<usize>)> = vec![(
             C64::new(1.0, 0.0),
@@ -178,7 +154,7 @@ impl GaussianMixture {
                 .max(1e-30);
             let next_max = max_prefix * max_mode;
             let prod_cutoff = options.prune_tol * 0.25 * next_max;
-            let mut next = Vec::with_capacity(terms.len() * m_terms.len());
+            let mut next = Vec::new();
             for (w0, a0, b0, c0) in &terms {
                 let w0_norm = w0.norm();
                 for &(wt, at, bt, cid) in m_terms {
@@ -203,15 +179,35 @@ impl GaussianMixture {
             terms = next;
         }
 
-        let final_terms: Vec<Term> = terms
-            .into_iter()
-            .map(|(w_tilde, a, b, cid_vec)| Term {
+        let mut cov_map: HashMap<Vec<usize>, usize> = HashMap::new();
+        let mut covs: Vec<Vec<f64>> = Vec::new();
+        let mut final_terms = Vec::with_capacity(terms.len());
+        for (w_tilde, a, b, cid_vec) in terms {
+            let cov_id = if let Some(&id) = cov_map.get(&cid_vec) {
+                id
+            } else {
+                let id = covs.len();
+                let mut full = vec![0.0; dim * dim];
+                for (mode, &cid) in cid_vec.iter().enumerate() {
+                    let c2 = per_mode[mode].0[cid];
+                    let ix = mode;
+                    let ip = m + mode;
+                    full[ix * dim + ix] = c2[0];
+                    full[ix * dim + ip] = c2[1];
+                    full[ip * dim + ix] = c2[2];
+                    full[ip * dim + ip] = c2[3];
+                }
+                covs.push(full);
+                cov_map.insert(cid_vec, id);
+                id
+            };
+            final_terms.push(Term {
                 w_tilde,
                 a,
                 b,
-                cov_id: cov_map[&cid_vec],
-            })
-            .collect();
+                cov_id,
+            });
+        }
 
         Ok(GaussianMixture {
             n_modes: m,
@@ -1709,33 +1705,46 @@ fn mode_state_to_lcg(state: &ModeState, options: &MixtureOptions) -> Result<OneM
             Ok((vec![cov], terms, pruned_err))
         }
         ModeState::Fock(n) => {
-            // Finite-difference thermal-state Gaussian expansion (Bourassa et al. 2021):
-            // f(z) = ρ_th(z) / (1 - z) = Σ_k z^k |k⟩⟨k|, where ρ_th(z) is Gaussian with
-            // covariance V(z) = ((1 + z)/(1 - z)) I_2.
-            // Use (n + 2)-point forward difference at z_j = j * h (error O(h²))!
-            let h = options.fock_step.clamp(1e-5, 0.05);
-            let m_pts = n + 2;
-            // Solve Vandermonde system Σ_{j=0}^{n+1} α_j (j h)^k = δ_{k, n} for k = 0..=n+1.
-            let mut vmat = Mat::<f64>::zeros(m_pts, m_pts);
-            for r in 0..m_pts {
-                for c in 0..m_pts {
-                    vmat[(r, c)] = ((c as f64) * h).powi(r as i32);
+            // Well-conditioned shared-covariance coherent-state ring expansion:
+            // |ψ_n⟩ ∝ (1/K) Σ_{k=0}^{K-1} e^{-i 2π n k / K} |R e^{i 2π k / K}⟩.
+            // Every cross-Wigner term |α_j⟩⟨α_k| shares V = I_2, avoiding both
+            // finite-difference cancellation and multi-covariance blow-up.
+            let tol = options
+                .prune_tol
+                .min(options.fock_step * options.fock_step)
+                .clamp(1e-12, 1e-2);
+            let (k_pts, radius, norm2, err_bound) = fock_ring_params(n, tol).ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "Fock({n}) exceeds GaussianMixture limit (max n = {MAX_LCG_FOCK_N}); use FockState"
+                ))
+            })?;
+            let inv_k = 1.0 / (k_pts as f64);
+            let inv_norm2 = 1.0 / norm2;
+            let mut xs = Vec::with_capacity(k_pts);
+            let mut ps = Vec::with_capacity(k_pts);
+            let mut cs = Vec::with_capacity(k_pts);
+            for k in 0..k_pts {
+                let ang = TAU * (k as f64) * inv_k;
+                let (s, c) = ang.sin_cos();
+                xs.push(2.0 * radius * c);
+                ps.push(2.0 * radius * s);
+                cs.push(C64::from_polar(inv_k, -TAU * ((n * k) as f64) * inv_k));
+            }
+            let mut terms = Vec::with_capacity(k_pts * k_pts);
+            for j in 0..k_pts {
+                let (x1, p1, cj) = (xs[j], ps[j], cs[j]);
+                for k in 0..k_pts {
+                    let (x2, p2, ck) = (xs[k], ps[k], cs[k]);
+                    let ax = 0.5 * (x1 + x2);
+                    let ap = 0.5 * (p1 + p2);
+                    let bx = 0.5 * (p1 - p2);
+                    let bp = -0.5 * (x1 - x2);
+                    let phase = C64::from_polar(1.0, 0.25 * (p1 * x2 - p2 * x1));
+                    let wt = (cj * ck.conj() * inv_norm2) * phase;
+                    terms.push((wt, [ax, ap], [bx, bp], 0));
                 }
             }
-            let mut rhs = vec![0.0; m_pts];
-            rhs[n] = 1.0;
-            let coeffs = solve_linear_real(&vmat, &rhs);
-
-            let mut covs = Vec::with_capacity(m_pts);
-            let mut terms = Vec::with_capacity(m_pts);
-            for (j, &alpha) in coeffs.iter().enumerate() {
-                let z = (j as f64) * h;
-                let v = (1.0 + z) / (1.0 - z);
-                covs.push([v, 0.0, 0.0, v]);
-                let weight = alpha / (1.0 - z);
-                terms.push((C64::new(weight, 0.0), [0.0, 0.0], [0.0, 0.0], j));
-            }
-            Ok((covs, terms, h * h))
+            Ok((vec![eye], terms, err_bound))
         }
         ModeState::FockVector(_) => Err(Error::InvalidArgument(
             "arbitrary FockVector inputs are not yet decomposed in GaussianMixture; use FockState"
@@ -1744,37 +1753,61 @@ fn mode_state_to_lcg(state: &ModeState, options: &MixtureOptions) -> Result<OneM
     }
 }
 
-fn solve_linear_real(a: &Mat<f64>, b: &[f64]) -> Vec<f64> {
-    let n = b.len();
-    let mut aug = vec![vec![0.0; n + 1]; n];
-    for r in 0..n {
-        for c in 0..n {
-            aug[r][c] = a[(r, c)];
-        }
-        aug[r][n] = b[r];
+fn ln_factorial(k: usize) -> f64 {
+    (1..=k).map(|i| (i as f64).ln()).sum()
+}
+
+/// Choose `(k_pts, radius, norm2, err_bound)` for the coherent-state ring
+/// representation of `ModeState::Fock(n)`.
+pub(crate) fn fock_ring_params(n: usize, tol: f64) -> Option<(usize, f64, f64, f64)> {
+    if n == 0 || n > MAX_LCG_FOCK_N {
+        return None;
     }
-    for col in 0..n {
-        let mut pivot = col;
-        for r in (col + 1)..n {
-            if aug[r][col].abs() > aug[pivot][col].abs() {
-                pivot = r;
-            }
+    let target = tol.clamp(1e-12, 1e-2);
+    let log_alias = -(target * 0.1).min(1e-7).ln();
+    let ln_n_fact = ln_factorial(n);
+    let mut k_pts = (n + 3).max(4);
+    let max_k = n + 16;
+    let mut radius;
+    loop {
+        let log_ratio = 0.5 * (ln_factorial(n + k_pts) - ln_n_fact);
+        radius = ((log_ratio - log_alias) / (k_pts as f64))
+            .exp()
+            .min((n as f64).sqrt());
+        let log_pn = -radius * radius + 2.0 * (n as f64) * radius.max(1e-300).ln() - ln_n_fact;
+        if log_pn > -10.0 || k_pts >= max_k {
+            break;
         }
-        aug.swap(col, pivot);
-        let div = aug[col][col];
-        for v in aug[col].iter_mut().skip(col) {
-            *v /= div;
-        }
-        for r in 0..n {
-            if r != col {
-                let f = aug[r][col];
-                for c in col..=n {
-                    aug[r][c] -= f * aug[col][c];
-                }
-            }
-        }
+        k_pts += 1;
     }
-    (0..n).map(|r| aug[r][n]).collect()
+    let r2 = radius * radius;
+    let ln_r2 = r2.max(1e-300).ln();
+    let mut p_n = 0.0;
+    let mut norm2 = 0.0;
+    for m in 0..8usize {
+        let l = n + m * k_pts;
+        let log_p = -r2 + (l as f64) * ln_r2 - ln_factorial(l);
+        if log_p < -740.0 {
+            break;
+        }
+        let p = log_p.exp();
+        if m == 0 {
+            p_n = p;
+        }
+        norm2 += p;
+    }
+    let trace_err = (1.0 - p_n / norm2).max(0.0).sqrt();
+    let cond_err = 1e-15 / norm2;
+    Some((k_pts, radius, norm2, trace_err + cond_err))
+}
+
+/// Term count used by [`GaussianMixture`] for `ModeState::Fock(n)`.
+pub(crate) fn fock_lcg_term_count(n: usize, tol: f64) -> Option<usize> {
+    if n == 0 {
+        return Some(1);
+    }
+    let (k_pts, _, _, _) = fock_ring_params(n, tol)?;
+    Some(k_pts * k_pts)
 }
 
 fn cholesky_real(a: &[f64], dim: usize) -> Option<Vec<f64>> {
@@ -2077,11 +2110,33 @@ mod tests {
 
     #[test]
     fn fock_input_in_gaussian_mixture_matches_exact_wigner() {
-        // Fock |1⟩ Wigner at (0, 0) is -1 / (2π), and mean_photons is 1.0!
-        let mut c = ModeCircuit::new(1);
-        c.set_input(0, ModeState::Fock(1)).unwrap();
-        let mix = GaussianMixture::from_circuit(&c, MixtureOptions::default()).unwrap();
-        close(mix.wigner(&[0.0], &[0.0]).unwrap(), -1.0 / TAU, 1e-4);
-        close(mix.mean_photons(0).unwrap(), 1.0, 1e-4);
+        // Check Fock |n⟩ for n = 0..=10: exact 2π W(0) = (-1)^n, exact ⟨n̂⟩ = n,
+        // single shared covariance, and honest error bound.
+        for n in [0usize, 1, 2, 4, 5, 6, 8, 10] {
+            let mut c = ModeCircuit::new(1);
+            c.set_input(0, ModeState::Fock(n)).unwrap();
+            let mix = GaussianMixture::from_circuit(&c, MixtureOptions::default()).unwrap();
+            let expected_w0 = if n % 2 == 0 { 1.0 } else { -1.0 } / TAU;
+            close(mix.wigner(&[0.0], &[0.0]).unwrap(), expected_w0, 1e-6);
+            close(mix.mean_photons(0).unwrap(), n as f64, 1e-6);
+            assert_eq!(mix.covs.len(), 1);
+            assert!(mix.error_bound() < 1e-5);
+        }
+
+        // High-n Fock input beyond coherent-ring limit returns a clean error (no panic).
+        let mut big = ModeCircuit::new(1);
+        big.set_input(0, ModeState::Fock(100)).unwrap();
+        assert!(GaussianMixture::from_circuit(&big, MixtureOptions::default()).is_err());
+
+        // Multi-mode Fock inputs share a single covariance matrix (no Cartesian cov blow-up).
+        let mut multi = ModeCircuit::new(3);
+        for m in 0..3 {
+            multi.set_input(m, ModeState::Fock(1)).unwrap();
+        }
+        let mix_m = GaussianMixture::from_circuit(&multi, MixtureOptions::default()).unwrap();
+        assert_eq!(mix_m.covs.len(), 1);
+        for m in 0..3 {
+            close(mix_m.mean_photons(m).unwrap(), 1.0, 1e-6);
+        }
     }
 }

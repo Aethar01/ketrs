@@ -88,6 +88,23 @@ fn is_all_real(slice: &[C64]) -> bool {
     slice.iter().all(|z| z.im == 0.0)
 }
 
+fn check_symmetric(matrix: &[C64], n: usize) -> Result<(), Error> {
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let a = matrix[i * n + j];
+            let b = matrix[j * n + i];
+            let scale = a.norm().max(b.norm()).max(1.0);
+            let diff = (a - b).norm();
+            if !diff.is_finite() || diff > 1e-9 * scale {
+                return Err(Error::InvalidArgument(format!(
+                    "hafnian requires a symmetric matrix, but A[{i},{j}] = {a} != A[{j},{i}] = {b}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Hafnian of an `n × n` row-major symmetric matrix (diagonal entries are
 /// ignored).
 ///
@@ -100,6 +117,7 @@ pub fn hafnian(matrix: &[C64], n: usize) -> Result<C64, Error> {
             matrix.len()
         )));
     }
+    check_symmetric(matrix, n)?;
     if n == 0 {
         return Ok(C64::new(1.0, 0.0));
     }
@@ -134,6 +152,7 @@ pub fn loop_hafnian(matrix: &[C64], diag: &[C64], n: usize) -> Result<C64, Error
             diag.len()
         )));
     }
+    check_symmetric(matrix, n)?;
     if n == 0 {
         return Ok(C64::new(1.0, 0.0));
     }
@@ -166,6 +185,7 @@ pub fn hafnian_repeated(matrix: &[C64], repeats: &[usize]) -> Result<C64, Error>
             matrix.len()
         )));
     }
+    check_symmetric(matrix, m)?;
     let total: usize = repeats.iter().sum();
     if total == 0 {
         return Ok(C64::new(1.0, 0.0));
@@ -206,6 +226,7 @@ pub fn loop_hafnian_repeated(
             diag.len()
         )));
     }
+    check_symmetric(matrix, m)?;
     let total: usize = repeats.iter().sum();
     if total == 0 {
         return Ok(C64::new(1.0, 0.0));
@@ -2182,5 +2203,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hafnian_rejects_non_symmetric_matrices() {
+        let asym = vec![c(0.0, 0.0), c(1.0, 0.0), c(5.0, 0.0), c(0.0, 0.0)];
+        let d = vec![c(1.0, 0.0), c(1.0, 0.0)];
+        assert!(hafnian(&asym, 2).is_err());
+        assert!(loop_hafnian(&asym, &d, 2).is_err());
+        assert!(hafnian_repeated(&asym, &[1, 1]).is_err());
+        assert!(loop_hafnian_repeated(&asym, &d, &[1, 1]).is_err());
     }
 }

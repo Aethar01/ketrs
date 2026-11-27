@@ -126,7 +126,7 @@ impl WindowSampler {
                             // Mode was previously destructively measured -> fresh vacuum!
                             &vac_vec
                         };
-                        st = append_mode(&st, init);
+                        st = append_mode(&st, init)?;
                         active_modes.push(mode);
                     }
                 }
@@ -248,11 +248,17 @@ fn slot_of(active: &[usize], global_mode: usize) -> usize {
 
 /// Tensor-append a new mode (as the most significant digit `new_slot = st.n_modes()`)
 /// with 1-mode amplitudes `mode_amps`.
-fn append_mode(st: &FockState, mode_amps: &[C64]) -> FockState {
+fn append_mode(st: &FockState, mode_amps: &[C64]) -> Result<FockState, Error> {
     let d = st.cutoff();
     let old = st.amplitudes();
     let old_len = old.len();
-    let mut amps = vec![C64::new(0.0, 0.0); old_len * d];
+    let new_len = old_len.checked_mul(d).ok_or_else(|| {
+        Error::InvalidArgument(format!(
+            "WindowSampler active state size {d}^{} overflows usize",
+            st.n_modes() + 1
+        ))
+    })?;
+    let mut amps = vec![C64::new(0.0, 0.0); new_len];
     for (n, &cn) in mode_amps.iter().enumerate() {
         if cn.re == 0.0 && cn.im == 0.0 {
             continue;
@@ -262,7 +268,7 @@ fn append_mode(st: &FockState, mode_amps: &[C64]) -> FockState {
             *y = x * cn;
         }
     }
-    FockState::from_raw(st.n_modes() + 1, d, amps)
+    Ok(FockState::from_raw(st.n_modes() + 1, d, amps))
 }
 
 /// Remove `slot` from `st` assuming `slot` is already projected onto vacuum `|0⟩`.

@@ -44,6 +44,8 @@ pub enum CvBackend {
     WindowSampler,
     /// Universal cutoff Fock statevector (`FockState`).
     Fock,
+    /// Exact cutoff Fock density matrix (`FockDensityMatrix`) for mixed inputs / noisy circuits.
+    FockDensityMatrix,
     /// Bosonic Matrix Product State (`BosonicMps`) for large 1D / weakly entangled circuits.
     BosonicMps,
 }
@@ -59,6 +61,7 @@ impl CvBackend {
             CvBackend::GbsSampler => "gbs_sampler",
             CvBackend::WindowSampler => "window_sampler",
             CvBackend::Fock => "fock",
+            CvBackend::FockDensityMatrix => "fock_density_matrix",
             CvBackend::BosonicMps => "bosonic_mps",
         }
     }
@@ -73,10 +76,12 @@ impl CvBackend {
             "gbs_sampler" | "gbs" => Ok(CvBackend::GbsSampler),
             "window_sampler" | "window" => Ok(CvBackend::WindowSampler),
             "fock" => Ok(CvBackend::Fock),
+            "fock_density_matrix" | "density_matrix" | "dm" => Ok(CvBackend::FockDensityMatrix),
             "bosonic_mps" | "mps" => Ok(CvBackend::BosonicMps),
             _ => Err(Error::InvalidArgument(format!(
                 "unknown CV backend {name:?}; expected one of gaussian, gaussian_mixture, \
-                 fixed_n, boson_sampler, gbs_sampler, window_sampler, fock, bosonic_mps"
+                 fixed_n, boson_sampler, gbs_sampler, window_sampler, fock, \
+                 fock_density_matrix, bosonic_mps"
             ))),
         }
     }
@@ -153,7 +158,10 @@ pub fn plan_circuit(circuit: &ModeCircuit, options: &PlanOptions) -> CvPlan {
             reason: format!("explicitly overridden to {}", backend.as_str()),
             cutoff: matches!(
                 backend,
-                CvBackend::Fock | CvBackend::BosonicMps | CvBackend::WindowSampler
+                CvBackend::Fock
+                    | CvBackend::FockDensityMatrix
+                    | CvBackend::BosonicMps
+                    | CvBackend::WindowSampler
             )
             .then_some(cutoff),
             max_bond: (backend == CvBackend::BosonicMps).then_some(options.max_bond),
@@ -166,6 +174,8 @@ pub fn plan_circuit(circuit: &ModeCircuit, options: &PlanOptions) -> CvPlan {
     let inputs = circuit.inputs();
     let all_gaussian_inputs = inputs.iter().all(ModeState::is_gaussian);
     let all_fock_inputs = inputs.iter().all(ModeState::is_fock);
+    let all_pure_inputs = inputs.iter().all(ModeState::is_pure);
+    let has_channels = ops.iter().any(|op| matches!(op, ModeOp::Channel { .. }));
     let all_lcg_inputs = inputs
         .iter()
         .all(|s| !matches!(s, ModeState::FockVector(_)));
@@ -276,7 +286,7 @@ pub fn plan_circuit(circuit: &ModeCircuit, options: &PlanOptions) -> CvPlan {
 
     // 3. Gaussian gates + non-Gaussian inputs (cat / GKP / Fock) without PNR/threshold.
     if all_gaussian_gates && !all_gaussian_inputs && all_lcg_inputs && !has_pnr_or_thresh {
-        let est_terms = estimate_lcg_terms(inputs);
+        let est_terms = estimate_lcg_terms(inputs, options.tolerance);
         if est_terms <= MAX_AUTO_MIXTURE_TERMS {
             return CvPlan {
                 backend: CvBackend::GaussianMixture,
@@ -288,8 +298,8 @@ pub fn plan_circuit(circuit: &ModeCircuit, options: &PlanOptions) -> CvPlan {
         }
     }
 
-    // 4. Local / streaming circuits with mid-circuit measurements -> WindowSampler.
-    if options.sampling && has_measurements && m > 1 {
+    // 4. Local / streaming pure-input circuits with mid-circuit measurements -> WindowSampler.
+    if options.sampling && all_pure_inputs && has_measurements && m > 1 {
         let width = WindowSampler::max_window_width(circuit);
         if width < m && width <= MAX_AUTO_WINDOW_WIDTH {
             return CvPlan {
@@ -304,7 +314,34 @@ pub fn plan_circuit(circuit: &ModeCircuit, options: &PlanOptions) -> CvPlan {
         }
     }
 
-    // 5. Universal non-Gaussian: dense FockState if d^m fits, else BosonicMps.
+    // 5. Non-Gaussian circuits with mixed inputs or inline noise channels:
+    //    FockState::sample handles pure-input sampling trajectories with channels;
+    //    exact state evolution or mixed inputs require FockDensityMatrix (BosonicMps
+    //    does not support mixed inputs or noise channels).
+    if !all_pure_inputs || has_channels {
+        if options.sampling && all_pure_inputs {
+            return CvPlan {
+                backend: CvBackend::Fock,
+                reason: format!(
+                    "noisy non-Gaussian sampling circuit uses FockState trajectories ({cutoff}^{m} amplitudes)"
+                ),
+                cutoff: Some(cutoff),
+                max_bond: None,
+                window_width: None,
+            };
+        }
+        return CvPlan {
+            backend: CvBackend::FockDensityMatrix,
+            reason: format!(
+                "non-Gaussian circuit with mixed inputs or noise channels requires FockDensityMatrix (dim={cutoff}^{m})"
+            ),
+            cutoff: Some(cutoff),
+            max_bond: None,
+            window_width: None,
+        };
+    }
+
+    // 6. Universal pure non-Gaussian: dense FockState if d^m fits, else BosonicMps.
     let fock_dim = (cutoff as u128).checked_pow(m as u32);
     if fock_dim.is_some_and(|dim| dim <= MAX_DENSE_FOCK_DIM as u128) {
         CvPlan {
@@ -355,7 +392,7 @@ fn estimate_cutoff(circuit: &ModeCircuit) -> usize {
     d
 }
 
-fn estimate_lcg_terms(inputs: &[ModeState]) -> usize {
+fn estimate_lcg_terms(inputs: &[ModeState], tol: f64) -> usize {
     let mut prod = 1usize;
     for st in inputs {
         let k = match *st {
@@ -365,7 +402,10 @@ fn estimate_lcg_terms(inputs: &[ModeState]) -> usize {
             | ModeState::Thermal { .. }
             | ModeState::Fock(0) => 1,
             ModeState::Cat { .. } => 4,
-            ModeState::Fock(n) => n + 1,
+            ModeState::Fock(n) => match super::mixture::fock_lcg_term_count(n, tol) {
+                Some(t) => t,
+                None => return usize::MAX,
+            },
             ModeState::Gkp { epsilon, .. } => {
                 let peaks = (((14.0 / (0.5 * std::f64::consts::PI * epsilon.tanh()))
                     .sqrt()
@@ -535,6 +575,51 @@ mod tests {
             )
             .backend,
             CvBackend::BosonicMps
+        );
+
+        // 8. Mixed inputs + non-Gaussian gate -> FockDensityMatrix (not FockState)
+        let mut th_kerr = ModeCircuit::new(1);
+        th_kerr
+            .set_input(0, ModeState::Thermal { mean_photons: 0.5 })
+            .unwrap()
+            .kerr(0.3, 0);
+        assert_eq!(
+            plan_circuit(&th_kerr, &PlanOptions::default()).backend,
+            CvBackend::FockDensityMatrix
+        );
+
+        // 9. Large circuit with inline non-Gaussian channel never routes to BosonicMps
+        let mut big_noisy = ModeCircuit::new(12);
+        for i in 0..12 {
+            big_noisy
+                .apply_channel(crate::cv::CvChannel::Dephasing { sigma: 0.1 }, i)
+                .unwrap();
+        }
+        assert_eq!(
+            plan_circuit(&big_noisy, &PlanOptions::default()).backend,
+            CvBackend::FockDensityMatrix
+        );
+        assert_eq!(
+            plan_circuit(
+                &big_noisy,
+                &PlanOptions {
+                    sampling: true,
+                    ..Default::default()
+                }
+            )
+            .backend,
+            CvBackend::Fock
+        );
+
+        // 10. Huge Fock circuit does not wrap basis_dim into FixedN
+        let mut huge_fock = ModeCircuit::new(200);
+        for i in 0..200 {
+            huge_fock.set_input(i, ModeState::Fock(1)).unwrap();
+        }
+        huge_fock.beam_splitter(FRAC_PI_4, 0.0, 0, 1);
+        assert_ne!(
+            plan_circuit(&huge_fock, &PlanOptions::default()).backend,
+            CvBackend::FixedN
         );
     }
 }

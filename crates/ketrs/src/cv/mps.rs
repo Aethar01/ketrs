@@ -133,15 +133,37 @@ impl BosonicMps {
         let n_modes = circuit.n_modes();
         let mut sites = Vec::with_capacity(n_modes);
         let mut norm_prod = 1.0f64;
+        let mut tail_scale = 1.0f64;
         for (mode, st) in circuit.inputs().iter().enumerate() {
-            let amps = st.fock_amplitudes(cutoff).ok_or_else(|| {
+            let mut amps = st.fock_amplitudes(cutoff).ok_or_else(|| {
                 Error::InvalidArgument(format!(
                     "mode {mode} input {st:?} is mixed; BosonicMps supports pure inputs"
                 ))
             })?;
             let n2: f64 = amps.iter().map(|z| z.norm_sqr()).sum();
             norm_prod *= n2.min(1.0);
+            if mode > 0 {
+                // Keep sites `1..n_modes` strictly right-isometric (unit norm)
+                // so `center = 0` is a valid mixed-canonical orthogonality center.
+                let nrm = n2.sqrt();
+                tail_scale *= nrm;
+                if nrm > 0.0 {
+                    let inv = 1.0 / nrm;
+                    for z in &mut amps {
+                        *z *= inv;
+                    }
+                } else if !amps.is_empty() {
+                    amps[0] = C64::new(1.0, 0.0);
+                }
+            }
             sites.push(Site::from_amplitudes(amps));
+        }
+        if let Some(first) = sites.first_mut()
+            && tail_scale != 1.0
+        {
+            for z in &mut first.data {
+                *z *= tail_scale;
+            }
         }
         Ok(BosonicMps {
             n_modes,
@@ -166,8 +188,13 @@ impl BosonicMps {
             ));
         }
         if !circuit.is_unitary() {
+            if circuit.has_measurements() {
+                return Err(Error::InvalidArgument(
+                    "circuit has measurements; use BosonicMps::run or BosonicMps::sample".into(),
+                ));
+            }
             return Err(Error::InvalidArgument(
-                "circuit has measurements; use BosonicMps::run or BosonicMps::sample".into(),
+                "BosonicMps does not support non-unitary noise channels".into(),
             ));
         }
         let mut st = Self::from_inputs(circuit, cutoff, options)?;
@@ -368,11 +395,11 @@ impl BosonicMps {
             .sum()
     }
 
-    /// Cumulative truncation error bound: Fock leakage `(1 − ‖ψ‖²)` plus
-    /// discarded SVD weight `Σ s_discarded²`.
+    /// Cumulative truncation error bound: Fock leakage plus discarded SVD
+    /// weight `Σ s_discarded²` (without double-counting SVD norm loss).
     pub fn truncation_error(&self) -> f64 {
-        let norm_loss = (1.0 - self.norm_sqr()).max(0.0);
-        norm_loss.max(self.input_truncation_error) + self.svd_truncation_error
+        let fock_loss = (1.0 - self.norm_sqr() - self.svd_truncation_error).max(0.0);
+        fock_loss.max(self.input_truncation_error) + self.svd_truncation_error
     }
 
     /// Exact Fock amplitude `⟨n_0, …, n_{m-1} | ψ⟩` in `O(m χ²)`.
@@ -953,7 +980,8 @@ impl BosonicMps {
         let total: f64 = probs.iter().sum();
         let u = rng.random::<f64>() * total;
         let mut acc = 0.0;
-        let mut outcome = d - 1;
+        let last_nonzero = probs.iter().rposition(|&pr| pr > 0.0).unwrap_or(0);
+        let mut outcome = last_nonzero;
         for (p, &pr) in probs.iter().enumerate() {
             acc += pr;
             if u < acc {
@@ -1005,8 +1033,8 @@ impl BosonicMps {
         let d = self.cutoff;
         let rho = self.local_reduced_density(mode);
 
-        // Grid covering the Fock support ±(√(2d) + 5).
-        let q_max = ((2 * d) as f64).sqrt() + 5.0;
+        // Classical turning point of level d is √(4d) (for ħ = 2); add margin 5.
+        let q_max = (4.0 * (d as f64)).sqrt() + 5.0;
         let n_grid = (d * 24).clamp(256, 2048);
         let dq = 2.0 * q_max / (n_grid as f64);
         let mut psi = vec![0.0; d];
@@ -1459,5 +1487,51 @@ mod tests {
             .sum::<f64>()
             / rows.iter().filter(|r| r[0] == 2.0).count() as f64;
         assert!((mean_x2_m2 - 2.0).abs() < 0.35, "mean_x2_m2={mean_x2_m2}");
+    }
+
+    #[test]
+    fn bosonic_mps_canonical_on_truncated_inputs_and_no_svd_double_count() {
+        // Mode 1 is heavily truncated by cutoff=6, while mode 0 is Fock(1).
+        // Mixed-canonical invariant must hold at construction (before moving center).
+        let mut c = ModeCircuit::new(2);
+        c.set_input(0, ModeState::Fock(1)).unwrap();
+        c.set_input(1, ModeState::Coherent { r: 2.5, phi: 0.0 })
+            .unwrap();
+        let fock = FockState::from_circuit(&c, 6).unwrap();
+        let mut mps = BosonicMps::from_circuit(&c, 6, BosonicMpsOptions::default()).unwrap();
+        close(mps.norm_sqr(), fock.norm_sqr(), 1e-12);
+        close(
+            mps.mean_photons(0).unwrap(),
+            fock.mean_photons(0).unwrap(),
+            1e-12,
+        );
+        close(mps.truncation_error(), fock.truncation_error(), 1e-12);
+
+        // SVD truncation error must not be double-counted on top of (1 - norm_sqr).
+        let mut ent = ModeCircuit::new(2);
+        ent.set_input(0, ModeState::Fock(1)).unwrap();
+        ent.beam_splitter(std::f64::consts::FRAC_PI_4, 0.0, 0, 1);
+        let mps_rank1 = BosonicMps::from_circuit(
+            &ent,
+            4,
+            BosonicMpsOptions {
+                max_bond: 1,
+                cutoff_tol: 0.0,
+            },
+        )
+        .unwrap();
+        // Schmidt values of (|1,0⟩ + |0,1⟩)/√2 are (1/√2, 1/√2), so keeping 1 drops 0.5.
+        close(mps_rank1.norm_sqr(), 0.5, 1e-12);
+        close(mps_rank1.truncation_error(), 0.5, 1e-12);
+
+        // Channels report a channel-specific error in from_circuit.
+        let mut noisy = ModeCircuit::new(1);
+        noisy
+            .apply_channel(crate::cv::CvChannel::Loss { eta: 0.8 }, 0)
+            .unwrap();
+        let err = BosonicMps::from_circuit(&noisy, 4, BosonicMpsOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("channel"), "unexpected error: {err}");
     }
 }

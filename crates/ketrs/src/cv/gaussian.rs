@@ -1385,9 +1385,8 @@ impl GaussianState {
 
     /// Postselect a heterodyne measurement on `mode` onto `α = re + i·im`,
     /// conditioning the remaining modes and resetting `mode` to the vacuum.
-    /// Returns the probability density `p(Re α, Im α)` (the Husimi Q function
-    /// times `π`—wait: normalised over `d(Re α) d(Im α)` so `∫ p d²α = 1`,
-    /// i.e. `Q(α) = ⟨α|ρ|α⟩ / π`).
+    /// Returns the Husimi Q probability density `Q(α) = ⟨α|ρ|α⟩ / π`,
+    /// normalised over `d(Re α) d(Im α)` so `∫ Q(α) d²α = 1`.
     pub fn postselect_heterodyne(&mut self, mode: usize, re: f64, im: f64) -> Result<f64, Error> {
         self.check_mode(mode)?;
         let dim = 2 * self.n_modes;
@@ -1988,18 +1987,9 @@ mod tests {
         // Feed-forward displace mode 2 by √2·(m_x + i m_p) / 2 ->
         // in ħ=2: D(r, 0) shifts x by 2r, D(r, π/2) shifts p by 2r,
         // so D(m_x / √2, 0) shifts x by √2 m_x, and D(m_p / √2, π/2) shifts p by √2 m_p!
-        // Wait: check sign of BS(π/4, 0):
-        //   x_0' = (x_0 - x_1)/√2, x_1' = (x_0 + x_1)/√2
-        //   p_0' = (p_0 - p_1)/√2, p_1' = (p_0 + p_1)/√2
-        // And S_2(r, 0) correlates x_1 ≈ -x_2 (since x_1' = ch x_1 - sh x_2) and p_1 ≈ +p_2!
-        // Check: for S_2(r, 0): x_1 + x_2 = e^{-r}(x_1^0 + x_2^0) → 0, so x_2 ≈ -x_1!
-        // And p_1 - p_2 = e^{-r}(p_1^0 - p_2^0) → 0, so p_2 ≈ +p_1!
-        // Then:
-        //   m_x = x_0' = (x_0 - x_1)/√2 ≈ (x_0 + x_2)/√2 => x_2 ≈ √2 m_x - x_0 (so wait: flip BS or use S_2(r, π)!)
-        // With S_2(r, π): x_1 - x_2 → 0 (x_2 ≈ x_1) and p_1 + p_2 → 0 (p_2 ≈ -p_1)!
-        // Then:
-        //   m_x = (x_0 - x_1)/√2 ≈ (x_0 - x_2)/√2 => x_2 + √2 m_x ≈ x_0!
-        //   m_p = (p_0 + p_1)/√2 ≈ (p_0 - p_2)/√2 => p_2 + √2 m_p ≈ p_0!
+        // With S_2(r, π): x_1 - x_2 → 0 (x_2 ≈ x_1) and p_1 + p_2 → 0 (p_2 ≈ -p_1).
+        // Then m_x = (x_0 - x_1)/√2 ≈ (x_0 - x_2)/√2 => x_2 + √2 m_x ≈ x_0,
+        // and m_p = (p_0 + p_1)/√2 ≈ (p_0 - p_2)/√2 => p_2 + √2 m_p ≈ p_0.
         // Exact finite-squeezing teleportation identity: with feed-forward gain
         // g = tanh(r) / √2, the conditional state on mode 2 has mean
         // (tanh(r) x_0, tanh(r) p_0) and vacuum covariance I_2 identically,

@@ -13,7 +13,7 @@ $$
 - The vacuum $|0\rangle$ has quadrature variance $\langle \hat{x}^2 \rangle = \langle \hat{p}^2 \rangle = 1$ (covariance matrix $V = I_{2m}$ in `xxpp` ordering).
 - Mode `0` is the least-significant digit in Fock-basis indices, matching qubit `0` on the discrete-variable side.
 - Mid-circuit measurements are destructive and reset the measured mode to vacuum $|0\rangle$.
-- Noise is opt-in: attach `CvChannel` operations directly to a `ModeCircuit` via `apply_channel(channel, mode)` (supported by `GaussianState`, `GaussianMixture`, `FockDensityMatrix`, `FockState.sample`, and `WindowSampler` without widening the active window).
+- Noise is opt-in: attach `CvChannel` operations directly to a `ModeCircuit` via `apply_channel(channel, mode)` (supported by `GaussianState`, `GaussianMixture`, `FockDensityMatrix`, `FockState.sample_circuit`, and `WindowSampler` without widening the active window).
 
 ---
 

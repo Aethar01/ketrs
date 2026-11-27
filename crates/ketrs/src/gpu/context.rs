@@ -638,9 +638,25 @@ impl GpuContext {
                     let pipeline = self.compute_pipeline(spv, self.mps_layout)?;
                     self.mps_pipelines.push(pipeline);
                 }
+                // CV pipelines are optional: a compilation failure on an exotic
+                // driver disables CV GPU kernels without impacting qubit GPU use.
+                let mut cv_ok = Vec::with_capacity(CV_SHADERS.len());
+                let mut cv_failed = false;
                 for spv in CV_SHADERS {
-                    let pipeline = self.compute_pipeline(spv, self.mps_layout)?;
-                    self.cv_pipelines.push(pipeline);
+                    match self.compute_pipeline(spv, self.mps_layout) {
+                        Ok(pipeline) => cv_ok.push(pipeline),
+                        Err(_) => {
+                            cv_failed = true;
+                            break;
+                        }
+                    }
+                }
+                if cv_failed {
+                    for p in cv_ok {
+                        d.destroy_pipeline(p, None);
+                    }
+                } else {
+                    self.cv_pipelines = cv_ok;
                 }
             }
 

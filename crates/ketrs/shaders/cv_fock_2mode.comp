@@ -29,8 +29,23 @@ dvec2 cmul(dvec2 a, dvec2 b) {
 }
 
 uint sum_sq(uint m) {
-    // 1^2 + 2^2 + ... + m^2 = m(m+1)(2m+1)/6
-    return (m * (m + 1u) * (2u * m + 1u)) / 6u;
+    // 1^2 + 2^2 + ... + m^2 = m(m+1)(2m+1)/6, dividing early to avoid u32 overflow.
+    uint a = m;
+    uint b = m + 1u;
+    uint c = 2u * m + 1u;
+    if ((a & 1u) == 0u) {
+        a >>= 1u;
+    } else {
+        b >>= 1u;
+    }
+    if (a % 3u == 0u) {
+        a /= 3u;
+    } else if (b % 3u == 0u) {
+        b /= 3u;
+    } else {
+        c /= 3u;
+    }
+    return a * b * c;
 }
 
 void main() {

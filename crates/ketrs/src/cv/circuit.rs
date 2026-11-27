@@ -261,6 +261,13 @@ impl ModeCircuit {
                 values.len()
             )));
         }
+        for (i, &v) in values.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(Error::InvalidArgument(format!(
+                    "parameter {i} value {v} is not finite"
+                )));
+            }
+        }
         Ok(ModeCircuit {
             inputs: self.inputs.clone(),
             ops: self
@@ -569,11 +576,17 @@ fn check_unitary(k: usize, u: &[C64]) -> Result<(), Error> {
             u.len()
         )));
     }
+    if !u.iter().all(|z| z.re.is_finite() && z.im.is_finite()) {
+        return Err(Error::InvalidArgument(
+            "passive block matrix entries must be finite".into(),
+        ));
+    }
     for i in 0..k {
         for j in 0..k {
             let dot: C64 = (0..k).map(|r| u[r * k + i].conj() * u[r * k + j]).sum();
             let want = if i == j { 1.0 } else { 0.0 };
-            if (dot - want).norm() > UNITARY_TOLERANCE {
+            let err = (dot - want).norm();
+            if !err.is_finite() || err > UNITARY_TOLERANCE {
                 return Err(Error::InvalidArgument(
                     "passive block matrix is not unitary".into(),
                 ));
@@ -633,6 +646,10 @@ mod tests {
         let m = c.measure_photons(0);
         c.displace(m * 0.5, theta, 1);
         assert!(c.bind(&[]).is_err());
+        assert!(c.bind(&[f64::NAN]).is_err());
+        assert!(c.bind(&[f64::INFINITY]).is_err());
+        let nan_mat = vec![C64::new(f64::NAN, 0.0); 4];
+        assert!(c.clone().passive(&[0, 1], nan_mat).is_err());
         let bound = c.bind(&[0.25]).unwrap();
         assert_eq!(bound.n_parameters(), 0);
         assert_eq!(

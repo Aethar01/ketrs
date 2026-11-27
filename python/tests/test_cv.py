@@ -247,11 +247,13 @@ def test_gaussian_mixture_cat_gkp_and_qec():
         assert mix.mean_p(mode) == pytest.approx(fock.mean_p(mode), abs=1e-5)
         assert mix.mean_photons(mode) == pytest.approx(fock.mean_photons(mode), abs=1e-5)
 
-    # Fock |1⟩ Wigner negativity at origin: W(0, 0) = -1 / (2π)
-    cf = ketrs.ModeCircuit(1).set_input(0, ketrs.ModeState.fock(1))
-    mf = ketrs.GaussianMixture.from_circuit(cf)
-    assert mf.wigner([0.0], [0.0]) == pytest.approx(-1.0 / (2.0 * math.pi), abs=1e-4)
-    assert mf.mean_photons(0) == pytest.approx(1.0, abs=1e-4)
+    # Fock |n⟩ Wigner negativity & exact mean_photons across small and higher n
+    for n in (1, 5, 6, 8):
+        cf = ketrs.ModeCircuit(1).set_input(0, ketrs.ModeState.fock(n))
+        mf = ketrs.GaussianMixture.from_circuit(cf)
+        sign = 1.0 if n % 2 == 0 else -1.0
+        assert mf.wigner([0.0], [0.0]) == pytest.approx(sign / (2.0 * math.pi), abs=1e-5)
+        assert mf.mean_photons(0) == pytest.approx(float(n), abs=1e-5)
 
     # GKP |0_ε⟩ cross-check against FockState + logical X_L / H_L
     eps = 0.18
@@ -401,3 +403,42 @@ def test_hybrid_qubit_qumode_circuits():
     assert samples.shape == (300, 2)
     assert abs(samples[:, 0].mean() - 0.5) < 0.09
     assert abs(samples[:, 1].mean() - 0.5) < 0.09
+
+    # Imperative HybridState parity with HybridCircuit gates
+    st_imp = (
+        ketrs.HybridState(1, 2, cutoff=6)
+        .h(0)
+        .s(0)
+        .t(0)
+        .p(0.2, 0)
+        .sdg(0)
+        .tdg(0)
+        .quadratic_phase(0.15, 0)
+        .cubic_phase(0.05, 0)
+        .two_mode_squeeze(0.2, 0.1, 0, 1)
+        .cx_mode(0.1, 0, 1)
+        .cz_mode(-0.1, 0, 1)
+        .cross_kerr(0.2, 0, 1)
+        .passive([0, 1], np.eye(2, dtype=np.complex128))
+    )
+    assert st_imp.norm_sqr() > 0.99
+
+
+def test_cv_validation_and_planner_edge_cases():
+    # Planner routes mixed + non-Gaussian to fock_density_matrix
+    th_kerr = ketrs.ModeCircuit(1).set_input(0, ketrs.ModeState.thermal(0.5)).kerr(0.2, 0)
+    assert ketrs.plan_circuit(th_kerr).backend == "fock_density_matrix"
+
+    # Non-finite bind / NaN passive / non-unitary boson_sample / asymmetric hafnian rejected
+    c = ketrs.ModeCircuit(2)
+    p = c.parameter()
+    c.rotation(p, 0)
+    with pytest.raises(ValueError):
+        c.bind([float("nan")])
+    with pytest.raises(ValueError):
+        ketrs.ModeCircuit(2).passive([0, 1], np.full((2, 2), float("nan"), dtype=np.complex128))
+    with pytest.raises(ValueError):
+        ketrs.boson_sample(2.0 * np.eye(2, dtype=np.complex128), [1, 0], 10)
+    with pytest.raises(ValueError):
+        ketrs.hafnian(np.array([[0.0, 1.0], [5.0, 0.0]], dtype=np.complex128))
+    assert ketrs.FixedNFockState.basis_dim(200, 200) == (1 << 64) - 1

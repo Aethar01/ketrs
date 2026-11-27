@@ -831,6 +831,11 @@ fn prepare_op(
             let sb = stride(b)?;
             match *gate {
                 TwoModeGate::BeamSplitter { theta, phi } => {
+                    if cutoff > 1024 {
+                        return Err(Error::InvalidArgument(format!(
+                            "GpuFockState two-mode beam splitter cutoff {cutoff} exceeds shader index limit 1024"
+                        )));
+                    }
                     let blocks =
                         beam_splitter_blocks(theta.evaluate(&[])?, phi.evaluate(&[])?, cutoff);
                     let off = (pool.len() * 16) as u64;
@@ -848,6 +853,11 @@ fn prepare_op(
                     let rv = r.evaluate(&[])?;
                     let pv = phi.evaluate(&[])?;
                     if rv != 0.0 {
+                        if cutoff > 1024 {
+                            return Err(Error::InvalidArgument(format!(
+                                "GpuFockState two-mode squeezing cutoff {cutoff} exceeds shader index limit 1024"
+                            )));
+                        }
                         let blocks = two_mode_squeezing_blocks(rv, pv, cutoff);
                         let off = (pool.len() * 16) as u64;
                         for blk in blocks {
@@ -881,6 +891,11 @@ fn prepare_op(
                 TwoModeGate::ControlledX { s } => {
                     let sv = s.evaluate(&[])?;
                     if sv != 0.0 {
+                        if cutoff > 255 {
+                            return Err(Error::InvalidArgument(format!(
+                                "GpuFockState CX cutoff {cutoff} exceeds dense 2-mode shader limit 255"
+                            )));
+                        }
                         let mat = build_quad_product_matrix(cutoff, sv, true);
                         let off = push_pool(pool, &mat);
                         out.push(PreparedGate::TwoMode {
@@ -894,6 +909,11 @@ fn prepare_op(
                 TwoModeGate::ControlledZ { s } => {
                     let sv = s.evaluate(&[])?;
                     if sv != 0.0 {
+                        if cutoff > 255 {
+                            return Err(Error::InvalidArgument(format!(
+                                "GpuFockState CZ cutoff {cutoff} exceeds dense 2-mode shader limit 255"
+                            )));
+                        }
                         let mat = build_quad_product_matrix(cutoff, sv, false);
                         let off = push_pool(pool, &mat);
                         out.push(PreparedGate::TwoMode {
@@ -937,6 +957,11 @@ fn prepare_op(
                     cutoff,
                 )?;
             } else if k >= 2 {
+                if cutoff > 1024 {
+                    return Err(Error::InvalidArgument(format!(
+                        "GpuFockState passive block cutoff {cutoff} exceeds shader index limit 1024"
+                    )));
+                }
                 let (ops, diag_phases) = givens_decompose(matrix, k);
                 for (i, &phi) in diag_phases.iter().enumerate() {
                     if phi.abs() > 1e-15 {

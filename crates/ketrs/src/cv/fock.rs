@@ -104,8 +104,7 @@ impl FockState {
             .map(|(m, s)| {
                 s.fock_amplitudes(cutoff).ok_or_else(|| {
                     Error::InvalidArgument(format!(
-                        "input on mode {m} is mixed ({s:?}); use FockDensityMatrix or \
-                         FockState::run_noisy"
+                        "input on mode {m} is mixed ({s:?}); use FockDensityMatrix"
                     ))
                 })
             })
@@ -904,7 +903,8 @@ impl FockState {
         let total: f64 = probs.iter().sum();
         let u = rng.random::<f64>() * total;
         let mut cum = 0.0;
-        let mut outcome = d - 1;
+        let last_nonzero = probs.iter().rposition(|&p| p > 0.0).unwrap_or(0);
+        let mut outcome = last_nonzero;
         for (k, &p) in probs.iter().enumerate() {
             cum += p;
             if u < cum {
@@ -1322,7 +1322,12 @@ impl FockDensityMatrix {
     /// `cutoff`.
     pub fn vacuum(n_modes: usize, cutoff: usize) -> Result<Self, Error> {
         let dim = FockState::checked_dim(n_modes, cutoff)?;
-        let mut rho = vec![C64::new(0.0, 0.0); dim * dim];
+        let entries = dim.checked_mul(dim).ok_or_else(|| {
+            Error::InvalidArgument(format!(
+                "FockDensityMatrix dimension {dim}×{dim} overflows usize"
+            ))
+        })?;
+        let mut rho = vec![C64::new(0.0, 0.0); entries];
         rho[0] = C64::new(1.0, 0.0);
         Ok(FockDensityMatrix {
             n_modes,
@@ -1365,6 +1370,11 @@ impl FockDensityMatrix {
         }
         let n_modes = circuit.n_modes();
         let dim = FockState::checked_dim(n_modes, cutoff)?;
+        let entries = dim.checked_mul(dim).ok_or_else(|| {
+            Error::InvalidArgument(format!(
+                "FockDensityMatrix dimension {dim}×{dim} overflows usize"
+            ))
+        })?;
 
         // Build tensor product of 1-mode input density matrices.
         let mode_rhos: Vec<Vec<C64>> = circuit
@@ -1373,7 +1383,7 @@ impl FockDensityMatrix {
             .map(|s| single_mode_rho(s, cutoff))
             .collect();
 
-        let mut rho = vec![C64::new(0.0, 0.0); dim * dim];
+        let mut rho = vec![C64::new(0.0, 0.0); entries];
         let mut strides = vec![1usize; n_modes];
         for m in 1..n_modes {
             strides[m] = strides[m - 1] * cutoff;
