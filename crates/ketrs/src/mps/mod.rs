@@ -26,7 +26,7 @@ mod expand;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod layers;
-mod linalg;
+pub(crate) mod linalg;
 mod measure;
 mod mpo;
 mod periodic;

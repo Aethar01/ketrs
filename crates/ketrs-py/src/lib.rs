@@ -79,6 +79,7 @@ macro_rules! by_dtype {
     };
 }
 
+mod cv;
 mod density;
 #[cfg(feature = "gpu")]
 mod gpu;
@@ -114,14 +115,14 @@ fn to_py_err(e: Error) -> PyErr {
 /// by `Circuit.parameter()` and arithmetic such as `2 * theta + 0.5`.
 #[pyclass(name = "Parameter", module = "ketrs", frozen, from_py_object)]
 #[derive(Clone, Copy)]
-struct PyParameter {
-    parameter: Parameter,
-    scale: f64,
-    offset: f64,
+pub(crate) struct PyParameter {
+    pub(crate) parameter: Parameter,
+    pub(crate) scale: f64,
+    pub(crate) offset: f64,
 }
 
 impl PyParameter {
-    fn angle(&self) -> Angle {
+    pub(crate) fn angle(&self) -> Angle {
         Angle::Linear {
             parameter: self.parameter,
             scale: self.scale,
@@ -1679,6 +1680,7 @@ fn _ketrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySectorStatevector>()?;
     mps::register(m)?;
     density::register(m)?;
+    cv::register(m)?;
     #[cfg(feature = "gpu")]
     gpu::register(m)?;
     #[cfg(not(feature = "gpu"))]

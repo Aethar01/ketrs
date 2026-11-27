@@ -1,0 +1,51 @@
+#version 460
+// Parallel reduction over a CV Fock statevector in VRAM:
+//   stride == 0: computes `Σ |ψ_i|²` (norm_sqr)
+//   stride > 0:  computes `Σ n_mode(i) · |ψ_i|²` (unnormalised mean_photons)
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer StateIn { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer PartialOut { double v[]; };
+
+layout(push_constant) uniform Push {
+    uvec2 state_addr;
+    uvec2 out_addr;
+    uint total_len;
+    uint d;
+    uint stride; // 0 => norm_sqr; >0 => mean_photons on mode with this stride
+    uint _pad;
+};
+
+shared double red_s[256];
+
+void main() {
+    StateIn st = StateIn(state_addr);
+    uint lid = gl_LocalInvocationID.x;
+    uint step = gl_NumWorkGroups.x * 256u;
+    double acc = 0.0;
+    for (uint idx = gl_GlobalInvocationID.x; idx < total_len; idx += step) {
+        dvec2 z = st.v[idx];
+        double p = z.x * z.x + z.y * z.y;
+        if (stride == 0u) {
+            acc += p;
+        } else {
+            uint n = (idx / stride) % d;
+            acc += double(n) * p;
+        }
+    }
+    red_s[lid] = acc;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (lid < s) {
+            red_s[lid] += red_s[lid + s];
+        }
+        barrier();
+    }
+    if (lid == 0u) {
+        PartialOut out_buf = PartialOut(out_addr);
+        out_buf.v[gl_WorkGroupID.x] = red_s[0];
+    }
+}

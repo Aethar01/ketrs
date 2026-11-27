@@ -1,0 +1,100 @@
+#version 460
+// Exact double-precision Glynn Gray-code permanent on Vulkan compute.
+//
+// Input matrix `A` (`n × n`, column-major: column `j` at `A[j * n + i]`,
+// `n <= 28`) is staged once per workgroup into shared memory. Each thread
+// processes a contiguous slice `[k_start, k_end)` of the `2^(n-1)` Gray-code
+// steps entirely in registers (`s[28]`), then reduces across the workgroup
+// into `out[gl_WorkGroupID.x]`.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 64) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MatIn { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer PartialOut { dvec2 v[]; };
+
+layout(push_constant) uniform Push {
+    uvec2 mat_addr;
+    uvec2 out_addr;
+    uint n;
+    uint total_steps;
+    uint steps_per_thread;
+    uint _pad;
+};
+
+const uint MAX_N = 28u;
+shared dvec2 mat_s[MAX_N * MAX_N];
+shared dvec2 red_s[64];
+
+dvec2 cmul(dvec2 a, dvec2 b) {
+    return dvec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint nn = n * n;
+    MatIn mat = MatIn(mat_addr);
+    for (uint idx = lid; idx < nn; idx += 64u) {
+        mat_s[idx] = mat.v[idx];
+    }
+    barrier();
+
+    uint gid = gl_GlobalInvocationID.x;
+    uint k_start = gid * steps_per_thread;
+    uint k_end = min(k_start + steps_per_thread, total_steps);
+
+    dvec2 local_sum = dvec2(0.0);
+    if (k_start < k_end) {
+        dvec2 s[MAX_N];
+        uint g = k_start ^ (k_start >> 1u);
+        for (uint i = 0u; i < n; i++) {
+            dvec2 acc = mat_s[i]; // column 0 always has sign +1
+            for (uint j = 1u; j < n; j++) {
+                dvec2 v = mat_s[j * n + i];
+                if (((g >> (j - 1u)) & 1u) != 0u) {
+                    acc -= v;
+                } else {
+                    acc += v;
+                }
+            }
+            s[i] = acc;
+        }
+        double sgn = (bitCount(g) & 1) == 0 ? 1.0 : -1.0;
+
+        dvec2 prod = s[0];
+        for (uint i = 1u; i < n; i++) {
+            prod = cmul(prod, s[i]);
+        }
+        local_sum += sgn * prod;
+
+        for (uint k = k_start + 1u; k < k_end; k++) {
+            uint bit = uint(findLSB(k));
+            uint col_off = (bit + 1u) * n;
+            g ^= (1u << bit);
+            double delta = ((g >> bit) & 1u) != 0u ? -2.0 : 2.0;
+            sgn = -sgn;
+
+            s[0] += delta * mat_s[col_off];
+            dvec2 p = s[0];
+            for (uint i = 1u; i < n; i++) {
+                s[i] += delta * mat_s[col_off + i];
+                p = cmul(p, s[i]);
+            }
+            local_sum += sgn * p;
+        }
+    }
+
+    red_s[lid] = local_sum;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lid < stride) {
+            red_s[lid] += red_s[lid + stride];
+        }
+        barrier();
+    }
+    if (lid == 0u) {
+        PartialOut out_buf = PartialOut(out_addr);
+        out_buf.v[gl_WorkGroupID.x] = red_s[0];
+    }
+}

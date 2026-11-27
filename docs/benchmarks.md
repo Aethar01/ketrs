@@ -14,6 +14,10 @@ Measured on a Ryzen 5 5600X and an AMD RX 9060 XT (through Vulkan), plus an NVID
 | **MPS GPU TDVP & DMRG** (64–192q, $\chi = 64$) | RX 9060 XT (Vulkan FP64) | ketrs CPU (3 threads) | **2.7–3.4×** |
 | **Symmetric MPS TDVP** (194q gauge theory, $\chi = 64\text{–}256$) | Ryzen 5 5600X (6 threads) | ketrs dense GPU (RX 9060 XT) | **28–137×** |
 | **Exact $\exp(-iHt)$ & Lanczos** (14–20q Heisenberg) | Ryzen 5 5600X | SciPy `expm_multiply` / `eigsh` | **2.8–17.0×** |
+| **CV Gaussian / GBS / Hafnians / Torontonian** | Ryzen 5 5600X | The Walrus 0.22 / Piquasso 8.1 | **4.0–5,251×** |
+| **CV Fixed-$N$ SLOS & Boson Sampling** | Ryzen 5 5600X | Perceval 1.3.1 / Piquasso 8.1 | **1.7–5,300×** |
+| **CV Cutoff Fock (CPU & RX 9060 XT GPU)** | Ryzen 5 5600X / RX 9060 XT | Piquasso 8.1 / QuTiP 5.3 / ketrs CPU | **6.5–65,700×** (GPU **9.7–20.5×**) |
+| **Qubit–Qumode Hybrids** (`CD + JC + SNAP + CBS`) | Ryzen 5 5600X | Bosonic Qiskit 15.1 / QuTiP 5.3 | **109–6,187×** |
 
 ---
 
@@ -130,3 +134,29 @@ Heisenberg chain against SciPy's `expm_multiply` and `eigsh` on a pre-built spar
 | Ground state | 20 | 2.74 s | 11.06 s | `████` 4.0× |
 
 At 20 qubits the Pauli-sum table exceeds its 64 MiB budget and `ketrs` falls back to a slower path.
+
+---
+
+## Continuous-Variable (Qumode) & Hybrid Benchmarks
+
+Measured on the same Ryzen 5 5600X and AMD RX 9060 XT (Vulkan FP64) with `python bench/cv.py` against `thewalrus 0.22.0`, `piquasso 8.1.0`, `perceval-quandela 1.3.1`, `qutip 5.3.1`, and `bosonic-qiskit 15.1` (`qiskit-aer 0.16.4`). Every case verifies numerical agreement before timing.
+
+| Benchmark Class | Workload | Baseline | ketrs speedup |
+|---|---|---|---:|
+| **Gaussian evolution** | 10–200 modes, depth-10 `S + BS + D` | Piquasso 8.1 | **54–513×** |
+| **Torontonian** | $m = 6\text{–}14$ modes ($2m \times 2m$) | The Walrus 0.22 | **4.0–21×** |
+| **Loop hafnian (complex)** | $N = 8\text{–}18$ | The Walrus 0.22 / Piquasso 8.1 | **4.7–35.7×** / **1.5–2.6×** |
+| **Fixed-$N$ SLOS** | $(m, N) = (10, 4)\text{–}(12, 6)$ Haar unitary | Perceval 1.3.1 SLOS | **11–30×** |
+| **Cutoff Fock (CPU)** | 2–4 modes, `S + D + BS + Kerr + CK` | Piquasso 8.1 / QuTiP 5.3 | **6.5–40×** / **7,389–65,767×** |
+| **Boson Sampling** | 100 shots, Haar unitary | Perceval 1.3.1 / Piquasso 8.1 | **1.7–4.5×** / **145–5,300×** |
+| **GBS Threshold Sampling** | 100 shots, $m = 8\text{–}16$ | The Walrus 0.22 / Piquasso 8.1 | **833–5,251×** / **77–506×** |
+| **GBS PNR Sampling** | 100 shots, $m = 6\text{–}12$ | The Walrus 0.22 / Piquasso 8.1 | **13–39×** / **1.6–4.8×** |
+| **GaussianMixture vs Fock** | 2-mode cat ($\vert\alpha\vert = 2.0\text{–}3.5$) / GKP `CX(1)` | ketrs `FockState` (matched acc.) | **34–705×** / **1.9–4.6×** |
+| **GPU Permanent (FP64)** | $N = 18\text{–}24$ exact complex permanent | ketrs multi-core CPU | **2.1–4.6×** |
+| **GPU Cutoff Fock (FP64)** | $(m, d) = (4, 16)\text{–}(6, 10)$, up to $10^6$ amps | ketrs multi-core CPU | **9.7–20.5×** |
+| **Qubit–Qumode Hybrids** | `H + CX + CD + JC + SNAP + CR + BS + CBS` | Bosonic Qiskit 15.1 / QuTiP 5.3 | **686–6,187×** / **109–910×** |
+
+### Bosonic MPS & Window Sampler Scaling
+
+- **`BosonicMps`** (1D non-Gaussian `Squeeze + Kerr + BS` chain, $d = 8$, $\chi_{\max} = 24$): 10 modes in `311 µs`, 20 modes in `675 µs`, **40 modes in `1.43 ms`** ($\text{trunc err} = 2.9 \times 10^{-5}$).
+- **`WindowSampler`** (500-mode single-loop time-bin interferometer, $W = 2$, $d = 8$): 100 shots in **`35.9 ms`**.

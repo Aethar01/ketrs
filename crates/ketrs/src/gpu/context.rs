@@ -163,6 +163,30 @@ const MPS_SHADERS: [&[u8]; 8] = [
     spirv!("mps_bmix"),
 ];
 
+/// Continuous-variable (qumode) GPU compute kernels (`cv_*.comp`), using the
+/// same push-constant buffer-device-address layout as [`MpsKernel`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CvKernel {
+    /// Exact double-precision Glynn Gray-code permanent (`cv_perm.comp`).
+    Permanent = 0,
+    /// In-place 1-mode / 2-mode diagonal phase gate (`cv_fock_diag.comp`).
+    FockDiag = 1,
+    /// Dense 1-mode Fock gate (`cv_fock_1mode.comp`).
+    Fock1Mode = 2,
+    /// Block-sparse or dense 2-mode Fock gate (`cv_fock_2mode.comp`).
+    Fock2Mode = 3,
+    /// Parallel norm / photon-number reduction (`cv_fock_reduce.comp`).
+    FockReduce = 4,
+}
+
+const CV_SHADERS: [&[u8]; 5] = [
+    spirv!("cv_perm"),
+    spirv!("cv_fock_diag"),
+    spirv!("cv_fock_1mode"),
+    spirv!("cv_fock_2mode"),
+    spirv!("cv_fock_reduce"),
+];
+
 /// Push-constant bytes of the MPS kernels' layout (Vulkan's guaranteed
 /// minimum).
 pub(crate) const MPS_PUSH_BYTES: u32 = 128;
@@ -284,6 +308,9 @@ pub struct GpuContext {
     /// The MPS kernels in [`MpsKernel`] order; empty without 64-bit floats
     /// or buffer device addresses.
     mps_pipelines: Vec<vk::Pipeline>,
+    /// The CV kernels in [`CvKernel`] order; empty without 64-bit floats or
+    /// buffer device addresses.
+    cv_pipelines: Vec<vk::Pipeline>,
     pub(crate) descriptor_pool: vk::DescriptorPool,
     /// Serialises the command pool, descriptor pool and queue, which Vulkan
     /// requires to be externally synchronised.
@@ -407,6 +434,7 @@ impl GpuContext {
             pipelines: Vec::new(),
             mps_layout: vk::PipelineLayout::null(),
             mps_pipelines: Vec::new(),
+            cv_pipelines: Vec::new(),
             descriptor_pool: vk::DescriptorPool::null(),
             lock: Mutex::new(()),
         };
@@ -610,6 +638,26 @@ impl GpuContext {
                     let pipeline = self.compute_pipeline(spv, self.mps_layout)?;
                     self.mps_pipelines.push(pipeline);
                 }
+                // CV pipelines are optional: a compilation failure on an exotic
+                // driver disables CV GPU kernels without impacting qubit GPU use.
+                let mut cv_ok = Vec::with_capacity(CV_SHADERS.len());
+                let mut cv_failed = false;
+                for spv in CV_SHADERS {
+                    match self.compute_pipeline(spv, self.mps_layout) {
+                        Ok(pipeline) => cv_ok.push(pipeline),
+                        Err(_) => {
+                            cv_failed = true;
+                            break;
+                        }
+                    }
+                }
+                if cv_failed {
+                    for p in cv_ok {
+                        d.destroy_pipeline(p, None);
+                    }
+                } else {
+                    self.cv_pipelines = cv_ok;
+                }
             }
 
             let sizes = [vk::DescriptorPoolSize::default()
@@ -679,6 +727,42 @@ impl GpuContext {
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.mps_pipelines[kernel as usize],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                self.mps_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                push,
+            );
+            self.device
+                .cmd_dispatch(cmd, groups[0], groups[1], groups[2]);
+        }
+    }
+
+    /// Whether the CV GPU kernels (Fock statevector and permanent) are
+    /// available: they require 64-bit floats and buffer device addresses.
+    pub fn supports_cv(&self) -> bool {
+        !self.cv_pipelines.is_empty()
+    }
+
+    /// Record one dispatch of a CV compute kernel with push constants
+    /// (at most [`MPS_PUSH_BYTES`]).
+    pub(crate) fn cv_dispatch(
+        &self,
+        cmd: vk::CommandBuffer,
+        kernel: CvKernel,
+        push: &[u8],
+        groups: [u32; 3],
+    ) {
+        debug_assert!(push.len() as u32 <= MPS_PUSH_BYTES);
+        // SAFETY: recording into a command buffer in the recording state,
+        // with a pipeline and layout of this context.
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.cv_pipelines[kernel as usize],
             );
             self.device.cmd_push_constants(
                 cmd,
@@ -953,7 +1037,12 @@ impl Drop for GpuContext {
         unsafe {
             let d = &self.device;
             let _ = d.device_wait_idle();
-            for &p in self.pipelines.iter().chain(&self.mps_pipelines) {
+            for &p in self
+                .pipelines
+                .iter()
+                .chain(&self.mps_pipelines)
+                .chain(&self.cv_pipelines)
+            {
                 d.destroy_pipeline(p, None);
             }
             d.destroy_pipeline_layout(self.mps_layout, None);

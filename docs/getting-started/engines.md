@@ -51,3 +51,20 @@ Full statevectors double in memory with every qubit:
 - 30 qubits (`complex128`): 16 GiB
 
 When your state has limited entanglement (ground states of 1D / quasi-1D Hamiltonians, shallow circuits, short-to-moderate time evolution), [`MPS`](../guides/mps.md) and [`PeriodicMPS`](../guides/mps.md#periodic-rings-periodicmps) scale linearly in the number of qubits as $O(n \chi^2)$ in memory instead of $O(2^n)$, routinely handling hundreds of qubits. Adding conserved symmetries (`Charge` + `with_charges`) reduces memory and runtime by another order of magnitude or more on structured models like lattice gauge theories.
+
+---
+
+## Continuous-Variable (Qumode) & Hybrid Engines
+
+Continuous-variable circuits (`ModeCircuit`, $\hbar = 2$) have their own family of specialised engines plus an automatic planner (`plan_circuit`, always overridable via `prefer_backend`). See the **[Qumodes & Hybrids guide](../guides/qumodes.md)** for full details.
+
+| Workload | Recommended Engine | Key Strengths |
+|---|---|---|
+| **Gaussian circuits & homodyne/heterodyne** | `GaussianState` | Exact $O(m)$ covariance updates; exact PNR (`loop_hafnian`) & threshold (`torontonian`) probabilities. |
+| **Gaussian Boson Sampling** | `sample_gbs_pnr`, `sample_gbs_threshold` | Exact Quesada–Arrazola chain-rule samplers with Williamson decomposition & incremental Cholesky. |
+| **Passive / number-conserving Fock** | `FixedNFockState`, `boson_sample` | Exact $\binom{m+N-1}{N}$ SLOS interferometer pass; Clifford & Clifford boson sampling with Glynn permanents. |
+| **Streaming / time-bin loops** | `WindowSampler` | Static liveness analysis with $O(d^W)$ memory ($W = 2$ for single-loop delay lines). |
+| **Gaussian circuits on cat / GKP / Fock** | `GaussianMixture` | Bourassa et al. phase-space LCG; beats cutoff Fock by orders of magnitude at matched accuracy. |
+| **Universal non-Gaussian (CPU / GPU)** | `FockState`, `GpuFockState`, `FockDensityMatrix` | Exact Miatto–Quesada recurrences, block-sparse BS/TMS, CPTP `CvChannel` noise, batched Vulkan FP64 GPU. |
+| **Large 1D non-Gaussian chains** | `BosonicMps` | Mixed-canonical MPS scaling linearly in mode count ($O(m \chi^2 d)$). |
+| **Qubit–qumode hybrids** | `HybridCircuit`, `HybridState` | Mixed-radix $2^{n_q} d^{n_m}$ statevector with exact analytic JC, AJC, CD, CR, CS, SNAP, and CBS gates. |

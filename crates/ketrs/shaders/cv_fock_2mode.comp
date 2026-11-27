@@ -1,0 +1,104 @@
+#version 460
+// Two-mode Fock gate kernel supporting:
+//   kind = 0: photon-sum-conserving `(s + 1) × (s + 1)` blocks (BeamSplitter, Passive)
+//   kind = 1: photon-difference-conserving blocks (TwoModeSqueezing)
+//   kind = 2: dense `d² × d²` two-mode matrix (CX, CZ)
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer StateIn { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer StateOut { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer GateBuf { dvec2 v[]; };
+
+layout(push_constant) uniform Push {
+    uvec2 in_addr;
+    uvec2 out_addr;
+    uvec2 gate_addr;
+    uint total_len;
+    uint d;
+    uint stride_a;
+    uint stride_b;
+    uint kind;
+    uint _pad;
+};
+
+dvec2 cmul(dvec2 a, dvec2 b) {
+    return dvec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+uint sum_sq(uint m) {
+    // 1^2 + 2^2 + ... + m^2 = m(m+1)(2m+1)/6, dividing early to avoid u32 overflow.
+    uint a = m;
+    uint b = m + 1u;
+    uint c = 2u * m + 1u;
+    if ((a & 1u) == 0u) {
+        a >>= 1u;
+    } else {
+        b >>= 1u;
+    }
+    if (a % 3u == 0u) {
+        a /= 3u;
+    } else if (b % 3u == 0u) {
+        b /= 3u;
+    } else {
+        c /= 3u;
+    }
+    return a * b * c;
+}
+
+void main() {
+    StateIn src = StateIn(in_addr);
+    StateOut dst = StateOut(out_addr);
+    GateBuf gate = GateBuf(gate_addr);
+    uint step = gl_NumWorkGroups.x * 256u;
+    for (uint idx = gl_GlobalInvocationID.x; idx < total_len; idx += step) {
+        uint na = (idx / stride_a) % d;
+        uint nb = (idx / stride_b) % d;
+        uint base = idx - na * stride_a - nb * stride_b;
+        dvec2 acc = dvec2(0.0);
+
+        if (kind == 0u) {
+            uint s = na + nb;
+            uint dim_s = s + 1u;
+            uint blk_off = sum_sq(s);
+            uint k_lo = (s >= d) ? (s - (d - 1u)) : 0u;
+            uint k_hi = min(s, d - 1u);
+            uint row = blk_off + na * dim_s;
+            for (uint k = k_lo; k <= k_hi; k++) {
+                acc += cmul(gate.v[row + k], src.v[base + k * stride_a + (s - k) * stride_b]);
+            }
+        } else if (kind == 1u) {
+            int diff = int(na) - int(nb);
+            uint abs_d = uint(abs(diff));
+            uint len = d - abs_d;
+            uint oa = (diff > 0) ? abs_d : 0u;
+            uint ob = (diff < 0) ? abs_d : 0u;
+            uint b_idx = uint(diff + int(d) - 1);
+            uint blk_off;
+            if (b_idx < d) {
+                blk_off = sum_sq(b_idx);
+            } else {
+                uint rem = (2u * d - 1u) - b_idx;
+                blk_off = sum_sq(d) + sum_sq(d - 1u) - sum_sq(rem);
+            }
+            uint out_k = na - oa;
+            uint row = blk_off + out_k * len;
+            for (uint k = 0u; k < len; k++) {
+                acc += cmul(gate.v[row + k], src.v[base + (k + oa) * stride_a + (k + ob) * stride_b]);
+            }
+        } else {
+            uint dd = d * d;
+            uint row = (na * d + nb) * dd;
+            for (uint ka = 0u; ka < d; ka++) {
+                uint base_a = base + ka * stride_a;
+                uint row_a = row + ka * d;
+                for (uint kb = 0u; kb < d; kb++) {
+                    acc += cmul(gate.v[row_a + kb], src.v[base_a + kb * stride_b]);
+                }
+            }
+        }
+        dst.v[idx] = acc;
+    }
+}
