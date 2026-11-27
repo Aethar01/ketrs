@@ -88,9 +88,11 @@ nav:
       - Hamiltonians, Evolution & VQE: guides/hamiltonians.md
       - Noise & Dynamic Circuits: guides/noise-and-control-flow.md
       - Matrix Product States & Symmetries: guides/mps.md
+      - Qumodes & Hybrids (CV): guides/qumodes.md
       - Qiskit & OpenQASM 3: guides/qiskit-and-qasm.md
   - Examples:
       - Lattice Schwinger Model: examples/schwinger.md
+      - GKP Error Correction: examples/gkp-qec.md
   - Benchmarks: benchmarks.md
   - API Reference:
       - api/index.md
@@ -98,5 +100,6 @@ nav:
       - Statevectors & GPU: api/statevectors.md
       - Noise & Density Matrices: api/noise.md
       - Matrix Product States: api/mps.md
+      - Qumodes & Hybrids (CV): api/cv.md
       - Qiskit Interop: api/qiskit.md
       - Rust API (docs.rs): https://docs.rs/ketrs

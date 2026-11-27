@@ -9,4 +9,5 @@ For the Rust crate API, see [docs.rs/ketrs](https://docs.rs/ketrs).
 - **[Statevectors & GPU](statevectors.md):** `Statevector`, `GpuStatevector`, `SectorBasis`, `SectorStatevector`, `Eigenstate`, `lowest_eigenstates`, `gpu_device`.
 - **[Noise & Density Matrices](noise.md):** `DensityMatrix`, `NoiseModel`, `Channel`.
 - **[Matrix Product States](mps.md):** `MPS`, `PeriodicMPS`, `Charge`.
+- **[Qumodes & Hybrids (CV)](cv.md):** `ModeCircuit`, `GaussianState`, `GaussianMixture`, `FixedNFockState`, `FockState`, `FockDensityMatrix`, `BosonicMps`, `WindowSampler`, `GpuFockState`, `HybridCircuit`, `HybridState`, `plan_circuit`, exact samplers, hafnians, torontonians, and permanents.
 - **[Qiskit Interop](qiskit.md):** `from_qiskit`, `pauli_sum_from_qiskit`, `noise_model_from_aer`.

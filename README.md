@@ -20,9 +20,9 @@
 
 `ketrs` is built for researchers and developers who want high-speed quantum circuit and many-body simulation without heavy runtime toolchains:
 
-- **Fast out of the box:** 3–9× faster than Qiskit Aer on CPU statevectors, 18–460× faster on mid-circuit measurement circuits, and 6–32× faster on MPS TEBD.
-- **Vendor-neutral GPU support:** runs on NVIDIA, AMD, Intel, and Apple Silicon GPUs through Vulkan 1.2 (and MoltenVK on macOS, up to 31 qubits). No CUDA or ROCm install needed.
-- **One API, six engines:** move smoothly from exact statevectors and density matrices to symmetry sectors and Matrix Product States on hundreds of qubits (open chains and periodic rings, DMRG, TDVP, TEBD, conserved `U(1)` / `Zₙ` charges).
+- **Fast out of the box:** 3–9× faster than Qiskit Aer on CPU statevectors, 18–460× faster on mid-circuit measurement circuits, 6–32× faster on MPS TEBD, and faster than The Walrus, Piquasso, Perceval, QuTiP, and Bosonic Qiskit across continuous-variable (qumode) and hybrid workloads.
+- **Vendor-neutral GPU support:** runs on NVIDIA, AMD, Intel, and Apple Silicon GPUs through Vulkan 1.2 (and MoltenVK on macOS, up to 31 qubits, plus GPU MPS sweeps, CV Fock statevectors, and permanents). No CUDA or ROCm install needed.
+- **Qubits, qumodes & hybrids:** exact statevectors, density matrices, symmetry sectors, open & periodic MPS on hundreds of qubits (DMRG, TDVP, TEBD, conserved `U(1)` / `Zₙ` charges), a full continuous-variable suite (`GaussianState`, `GaussianMixture`, `FixedNFockState`, `FockState`, `BosonicMps`, `WindowSampler`, exact GBS & boson samplers, automatic `plan_circuit`), and mixed-radix qubit–qumode `HybridState`.
 - **Drop-in interop:** convert Qiskit `QuantumCircuit`, `SparsePauliOp`, and Aer `NoiseModel` objects directly, or import/export OpenQASM 3.
 
 ---
