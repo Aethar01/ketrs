@@ -18,7 +18,7 @@ noise = ketrs.NoiseModel(
 
 ### Exact Density Matrix (`DensityMatrix`)
 
-For up to ~14 qubits, `DensityMatrix` tracks the exact mixed state `ρ`:
+For up to ~14 qubits, `DensityMatrix` tracks the exact mixed state $\rho$:
 
 ```python
 import ketrs
@@ -40,7 +40,7 @@ print("⟨ZZ⟩:    ", rho.expectation("ZZ"))
 
 ### Quantum Trajectories on `Statevector`
 
-For larger circuits where storing a `2ⁿ × 2ⁿ` density matrix is infeasible, pass `noise=` to `Statevector.run` or `Statevector.sample_circuit`. Each shot randomly samples Kraus operators after each gate and applies readout error on measurements:
+For larger circuits where storing a $2^n \times 2^n$ density matrix is infeasible, pass `noise=` to `Statevector.run` or `Statevector.sample_circuit`. Each shot randomly samples Kraus operators after each gate and applies readout error on measurements:
 
 ```python
 import ketrs

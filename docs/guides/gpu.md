@@ -37,7 +37,7 @@ cpu_state = gpu_state.to_statevector()
 
 ### Single Precision (`complex64`) vs Double Precision (`complex128`)
 
-Consumer GPUs typically run FP32 at 16–64× the rate of FP64. If ~10⁻⁶ accuracy is sufficient (for example in circuit sampling, VQE sweeps, or exploratory simulations), explicitly select `"complex64"`:
+Consumer GPUs typically run FP32 at 16–64× the rate of FP64. If $\sim 10^{-6}$ accuracy is sufficient (for example in circuit sampling, VQE sweeps, or exploratory simulations), explicitly select `"complex64"`:
 
 ```python
 gpu_f32 = ketrs.GpuStatevector.from_circuit(circ, dtype="complex64")
@@ -72,7 +72,7 @@ print("⟨H⟩:", state.expectation(H))
 
 ## GPU-Accelerated MPS & PeriodicMPS Sweeps
 
-For large bond dimensions (`χ >= 64`), you can offload the effective-Hamiltonian contractions, Krylov/Lanczos recurrences, and TDVP subspace-expansion QR factorizations to a Vulkan GPU with FP64 support:
+For large bond dimensions ($\chi \ge 64$), you can offload the effective-Hamiltonian contractions, Krylov/Lanczos recurrences, and TDVP subspace-expansion QR factorizations to a Vulkan GPU with FP64 support:
 
 ```python
 import ketrs
@@ -83,4 +83,4 @@ mps.gpu = True
 # mps.tdvp(H, time=0.5, steps=5)
 ```
 
-`mps.gpu = True` also works with `PeriodicMPS` and with symmetric (`with_charges`) MPS. On symmetric MPS with small charge blocks, the CPU is often faster at moderate bonds (`χ <= 128`), while the GPU pulls ahead at larger bond dimensions (`χ >= 256–512`).
+`mps.gpu = True` also works with `PeriodicMPS` and with symmetric (`with_charges`) MPS. On symmetric MPS with small charge blocks, the CPU is often faster at moderate bonds ($\chi \le 128$), while the GPU pulls ahead at larger bond dimensions ($\chi \ge 256\text{–}512$).

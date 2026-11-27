@@ -10,16 +10,16 @@ Measured on a Ryzen 5 5600X and an AMD RX 9060 XT (through Vulkan), plus an NVID
 | **GPU statevector, f32** (22–28q ansatz & QFT) | NVIDIA RTX 4090 | Aer 0.18 CUDA | **2.3–4.2×** |
 | **GPU statevector, f64** (22–28q ansatz & QFT) | NVIDIA RTX 4090 | Best of Aer CUDA / cuStateVec | **1.7–2.3×** |
 | **Mid-circuit measurement** (12–20q, 1000 shots) | Ryzen 5 5600X | Best of Aer / Aer shot-branching | **18–460×** |
-| **MPS TEBD** (50–100q, χ = 32–128) | Ryzen 5 5600X | Aer MPS | **6.3–32.5×** |
-| **MPS GPU TDVP & DMRG** (64–192q, χ = 64) | RX 9060 XT (Vulkan FP64) | ketrs CPU (3 threads) | **2.7–3.4×** |
-| **Symmetric MPS TDVP** (194q gauge theory, χ = 64–256) | Ryzen 5 5600X (6 threads) | ketrs dense GPU (RX 9060 XT) | **28–137×** |
-| **Exact `exp(-iHt)` & Lanczos** (14–20q Heisenberg) | Ryzen 5 5600X | SciPy `expm_multiply` / `eigsh` | **2.8–17.0×** |
+| **MPS TEBD** (50–100q, $\chi = 32\text{–}128$) | Ryzen 5 5600X | Aer MPS | **6.3–32.5×** |
+| **MPS GPU TDVP & DMRG** (64–192q, $\chi = 64$) | RX 9060 XT (Vulkan FP64) | ketrs CPU (3 threads) | **2.7–3.4×** |
+| **Symmetric MPS TDVP** (194q gauge theory, $\chi = 64\text{–}256$) | Ryzen 5 5600X (6 threads) | ketrs dense GPU (RX 9060 XT) | **28–137×** |
+| **Exact $\exp(-iHt)$ & Lanczos** (14–20q Heisenberg) | Ryzen 5 5600X | SciPy `expm_multiply` / `eigsh` | **2.8–17.0×** |
 
 ---
 
 ## Statevector Circuits (CPU & AMD Vulkan GPU)
 
-End to end from `|0…0⟩` to the final amplitudes. The GPU column is compared with `ketrs` on the CPU (Aer's GPU mode needs CUDA, which this AMD card cannot run; see below for RTX 4090). GPU times are in double precision and include downloading the state. In the bar charts each block is 1× unless noted.
+End to end from $|0\dots 0\rangle$ to the final amplitudes. The GPU column is compared with `ketrs` on the CPU (Aer's GPU mode needs CUDA, which this AMD card cannot run; see below for RTX 4090). GPU times are in double precision and include downloading the state. In the bar charts each block is 1× unless noted.
 
 ### Layered Ansatz (10 layers of `Ry` + CNOT chain)
 
@@ -47,7 +47,7 @@ Against Qiskit's NumPy `quantum_info.Statevector`, `ketrs` is 29–87× faster a
 
 ## NVIDIA GPU (RTX 4090 vs Aer CUDA / cuStateVec)
 
-Measured on a rented RTX 4090 against Aer 0.18's CUDA backend at matching precision, and in FP64 taking the faster of Aer CUDA and cuStateVec. Times measure GPU work only, reading back one `⟨Z⟩`.
+Measured on a rented RTX 4090 against Aer 0.18's CUDA backend at matching precision, and in FP64 taking the faster of Aer CUDA and cuStateVec. Times measure GPU work only, reading back one $\langle Z \rangle$.
 
 | Circuit | Qubits | Aer f32 | ketrs f32 | vs Aer | best Aer f64 | ketrs f64 | vs Aer |
 |---|---:|---:|---:|:---|---:|---:|:---|
@@ -79,9 +79,9 @@ Measured on a rented RTX 4090 against Aer 0.18's CUDA backend at matching precis
 
 ## MPS TEBD
 
-Transverse-field Ising chain (second-order Trotter, `Δt = 0.1`) against Aer's MPS method at identical bond-dimension cap `χ`. One block is 2×.
+Transverse-field Ising chain (second-order Trotter, $\Delta t = 0.1$) against Aer's MPS method at identical bond-dimension cap $\chi$. One block is 2×.
 
-| Qubits | Steps | χ cap | ketrs | Aer MPS | Speedup |
+| Qubits | Steps | $\chi$ cap | ketrs | Aer MPS | Speedup |
 |---:|---:|---:|---:|---:|:---|
 | 50 | 10 | 32 | 0.01 s | 0.04 s | `███▏` 6.3× |
 | 100 | 10 | 32 | 0.01 s | 0.07 s | `█████▊` 11.5× |
@@ -93,7 +93,7 @@ Transverse-field Ising chain (second-order Trotter, `Δt = 0.1`) against Aer's M
 
 ## MPS on the GPU (RX 9060 XT, FP64)
 
-At bond dimension cap `χ = 64`: one two-site TDVP step (`Δt = 0.6`) of a 192-qubit Schwinger model with link registers (1537 Pauli terms, MPO bond ~25), and six DMRG sweeps from a Néel state for a 64-qubit `J₁–J₂` Heisenberg chain (`J₂ = 0.2`). CPU had 3 threads. One block is 1×.
+At bond dimension cap $\chi = 64$: one two-site TDVP step ($\Delta t = 0.6$) of a 192-qubit Schwinger model with link registers (1537 Pauli terms, MPO bond ~25), and six DMRG sweeps from a Néel state for a 64-qubit $J_1\text{–}J_2$ Heisenberg chain ($J_2 = 0.2$). CPU had 3 threads. One block is 1×.
 
 | Workload | Mean bond | GPU | CPU, 3 threads | Speedup |
 |---|---:|---:|---:|:---|
@@ -104,27 +104,27 @@ At bond dimension cap `χ = 64`: one two-site TDVP step (`Δt = 0.6`) of a 192-q
 
 ## Symmetric MPS (`with_charges`)
 
-Preparing a wave packet in a 194-qubit Schwinger model with link registers (48 sites, 3 qubits per link, 2 packet ancillas): two TDVP steps of a 4032-term generator on the DMRG vacuum, conserving total charge and all 48 Gauss laws, compared against dense TDVP on the RX 9060 XT. Block-sparse environments use 28–33× less memory (0.14 GB vs 4.1 GB at `χ = 256`). One block is 8×.
+Preparing a wave packet in a 194-qubit Schwinger model with link registers (48 sites, 3 qubits per link, 2 packet ancillas): two TDVP steps of a 4032-term generator on the DMRG vacuum, conserving total charge and all 48 Gauss laws, compared against dense TDVP on the RX 9060 XT. Block-sparse environments use 28–33× less memory (0.14 GB vs 4.1 GB at $\chi = 256$). One block is 8×.
 
-| χ cap | Dense, GPU | Symmetric, 6 threads | Symmetric, GPU | Speedup |
+| $\chi$ cap | Dense, GPU | Symmetric, 6 threads | Symmetric, GPU | Speedup |
 |---:|---:|---:|---:|:---|
 | 64 | 33.7 s | 1.2 s | 2.7 s | `███▌` 28× |
 | 128 | 199.5 s | 2.6 s | 4.5 s | `█████████▋` 77× |
 | 256 | 811 s | 5.9 s | 6.5 s | `█████████████████▏` 137× |
 
-At `χ = 512`, symmetric GPU runs 1.6× faster than 6 CPU threads (10.2 s vs 16.4 s). With 402 qubits (100 sites, 101 charges) at `χ = 256`, an evolution step took 19.2 s on six CPU threads and 14.5 s on the GPU.
+At $\chi = 512$, symmetric GPU runs 1.6× faster than 6 CPU threads (10.2 s vs 16.4 s). With 402 qubits (100 sites, 101 charges) at $\chi = 256$, an evolution step took 19.2 s on six CPU threads and 14.5 s on the GPU.
 
 ---
 
 ## Exact Evolution & Ground States vs SciPy
 
-Heisenberg chain against SciPy's `expm_multiply` and `eigsh` on a pre-built sparse matrix (construction not timed). Results agree to ~`10⁻¹⁴`.
+Heisenberg chain against SciPy's `expm_multiply` and `eigsh` on a pre-built sparse matrix (construction not timed). Results agree to $\sim 10^{-14}$.
 
 | Workload | Qubits | ketrs | SciPy | Speedup |
 |---|---:|---:|---:|:---|
-| `exp(-iHt)∣ψ⟩` | 14 | 10.4 ms | 28.7 ms | `██▊` 2.8× |
-| `exp(-iHt)∣ψ⟩` | 18 | 196.5 ms | 728.7 ms | `███▊` 3.7× |
-| `exp(-iHt)∣ψ⟩` | 20 | 732.7 ms | 3.80 s | `█████▏` 5.2× |
+| $\exp(-iHt)\vert\psi\rangle$ | 14 | 10.4 ms | 28.7 ms | `██▊` 2.8× |
+| $\exp(-iHt)\vert\psi\rangle$ | 18 | 196.5 ms | 728.7 ms | `███▊` 3.7× |
+| $\exp(-iHt)\vert\psi\rangle$ | 20 | 732.7 ms | 3.80 s | `█████▏` 5.2× |
 | Ground state | 14 | 16.4 ms | 67.8 ms | `████▏` 4.1× |
 | Ground state | 18 | 165.7 ms | 2.81 s | `█████████████████` 17.0× |
 | Ground state | 20 | 2.74 s | 11.06 s | `████` 4.0× |

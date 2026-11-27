@@ -1,6 +1,6 @@
 # Hamiltonians, Evolution, Ground States & VQE
 
-`ketrs` operates directly on symbolic Pauli sums (`PauliSum`) without building an explicit `2ⁿ × 2ⁿ` matrix, enabling fast expectation values, exact Krylov time evolution, matrix-free Lanczos diagonalization, and adjoint differentiation.
+`ketrs` operates directly on symbolic Pauli sums (`PauliSum`) without building an explicit $2^n \times 2^n$ matrix, enabling fast expectation values, exact Krylov time evolution, matrix-free Lanczos diagonalization, and adjoint differentiation.
 
 ## Building Hamiltonians (`PauliSum`)
 
@@ -44,7 +44,7 @@ print(state.expectation(op))  # 1.0
 
 ## Exact Time Evolution (`evolve`)
 
-`Statevector.evolve`, `SectorStatevector.evolve`, and `GpuStatevector.evolve` compute `exp(-iHt)|ψ⟩` to machine precision via matrix-free Krylov time-stepping:
+`Statevector.evolve`, `SectorStatevector.evolve`, and `GpuStatevector.evolve` compute $\exp(-iHt)|\psi\rangle$ to machine precision via matrix-free Krylov time-stepping:
 
 ```python
 import ketrs
@@ -72,7 +72,7 @@ for idx, eig in enumerate(states):
 
 ### Restricting to a Symmetry Sector (`SectorBasis`)
 
-When `H` conserves particle number, spin projection, or charge, restrict both time evolution and Lanczos diagonalization to the fixed Hamming-weight subspace:
+When $H$ conserves particle number, spin projection, or charge, restrict both time evolution and Lanczos diagonalization to the fixed Hamming-weight subspace:
 
 ```python
 import ketrs
@@ -96,7 +96,7 @@ You can pass multiple `(qubits, weight)` constraints to `SectorBasis`, such as s
 
 ## Variational Circuits & Adjoint Gradients
 
-`expectation_gradient` computes both `⟨ψ(θ)|H|ψ(θ)⟩` and its exact gradient `∇⟨H⟩` in one adjoint pass (costing ~2.3–3.5 forward evaluations regardless of the number of parameters):
+`expectation_gradient` computes both $\langle\psi(\theta)|H|\psi(\theta)\rangle$ and its exact gradient $\nabla\langle H\rangle$ in one adjoint pass (costing ~2.3–3.5 forward evaluations regardless of the number of parameters):
 
 ```python
 import numpy as np
@@ -128,4 +128,4 @@ res = minimize(loss_and_grad, np.zeros(2 * n), jac=True, method="BFGS")
 print(f"VQE energy: {res.fun:.8f}")
 ```
 
-For custom losses (such as state overlap `|⟨φ|ψ(θ)⟩|²`), use `Statevector.adjoint_gradient(circuit, parameters, final_state, cotangent)`. Both methods also exist on `GpuStatevector`.
+For custom losses (such as state overlap $|\langle\phi|\psi(\theta)\rangle|^2$), use `Statevector.adjoint_gradient(circuit, parameters, final_state, cotangent)`. Both methods also exist on `GpuStatevector`.

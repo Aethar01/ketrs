@@ -1,6 +1,6 @@
 # Matrix Product States (MPS, PeriodicMPS & Symmetries)
 
-For weakly entangled states on tens or hundreds of qubits, `MPS` (open chains) and `PeriodicMPS` (closed rings) replace exponential `2ⁿ` storage with tensors of bond dimension `χ`.
+For weakly entangled states on tens or hundreds of qubits, `MPS` (open chains) and `PeriodicMPS` (closed rings) replace exponential $2^n$ storage with tensors of bond dimension $\chi$.
 
 ## Ground States with DMRG
 
@@ -26,7 +26,7 @@ print(f"E0 = {energy:.8f}, converged={converged}, max bond={max(mps.bond_dimensi
 
 ## Time Evolution: TDVP & TEBD
 
-- **`mps.tdvp(H, time, steps=...)`**: two-site TDVP for Hamiltonians of **any range**. While bonds are below `max_bond`, each step automatically applies global subspace expansion (`H|ψ⟩` directions) so long-range and multi-qubit terms evolve accurately even from a product state.
+- **`mps.tdvp(H, time, steps=...)`**: two-site TDVP for Hamiltonians of **any range**. While bonds are below `max_bond`, each step automatically applies global subspace expansion ($H|\psi\rangle$ directions) so long-range and multi-qubit terms evolve accurately even from a product state.
 - **`mps.tebd(H, time, steps=..., order=2)`**: Trotter–Suzuki TEBD with parallel updates on disjoint bonds (ideal for nearest-neighbor chains).
 
 ```python
@@ -57,7 +57,7 @@ counts = mps.sample_counts(1000)
 
 ## Conserved Symmetries (`Charge` & `with_charges`)
 
-If your Hamiltonian conserves one or more Abelian `U(1)` or `Zₙ` charges (such as particle number, `S^z`, parity, or local Gauss laws in a lattice gauge theory), convert the state with `with_charges`.
+If your Hamiltonian conserves one or more Abelian $\mathrm{U}(1)$ or $\mathbb{Z}_n$ charges (such as particle number, $S^z$, parity, or local Gauss laws in a lattice gauge theory), convert the state with `with_charges`.
 
 Every bond is decomposed into charge sectors and DMRG / TDVP run on block-sparse tensors with a charge-graded MPO:
 
@@ -87,9 +87,9 @@ print("Middle bond sectors:", sym.bond_sectors(n // 2))
 
 Available charge constructors:
 
-- `Charge.weights(weights)`: `U(1)` charge counting `weights[q]` when qubit `q` is `|1⟩`.
-- `Charge.u1(values)`: `U(1)` charge with explicit `(val_for_0, val_for_1)` per qubit (e.g. `[(1, -1)] * n` for `2 S^z`).
-- `Charge.modulo(n, values)`: `Zₙ` charge added modulo `n` (e.g. parity with `n=2`).
+- `Charge.weights(weights)`: $\mathrm{U}(1)$ charge counting `weights[q]` when qubit `q` is $|1\rangle$.
+- `Charge.u1(values)`: $\mathrm{U}(1)$ charge with explicit `(val_for_0, val_for_1)` per qubit (e.g. `[(1, -1)] * n` for $2 S^z$).
+- `Charge.modulo(n, values)`: $\mathbb{Z}_n$ charge added modulo $n$ (e.g. parity with `n=2`).
 
 !!! note "Applying gates to a symmetric MPS"
     DMRG, TDVP, `expectation`, `expectations`, `project`, `sample`, and `copy` all work directly on symmetric MPS. To apply arbitrary circuit gates, convert back first via `sym.to_dense()`.
@@ -98,7 +98,13 @@ Available charge constructors:
 
 ## Periodic Rings (`PeriodicMPS`)
 
-For systems with periodic boundary conditions, `PeriodicMPS` represents a periodic-trace MPS `ψ(b₀…bₙ₋₁) = Tr(A[0][b₀] ⋯ A[n-1][bₙ₋₁])` with a direct `(n-1, 0)` seam bond and Pippan–White–Evertz adaptive transfer-matrix compression:
+For systems with periodic boundary conditions, `PeriodicMPS` represents a periodic-trace MPS
+
+$$
+\psi(b_0 \dots b_{n-1}) = \operatorname{Tr}\!\left(A^{[0]b_0} \cdots A^{[n-1]b_{n-1}}\right)
+$$
+
+with a direct $(n-1, 0)$ seam bond and Pippan–White–Evertz adaptive transfer-matrix compression:
 
 ```python
 import ketrs

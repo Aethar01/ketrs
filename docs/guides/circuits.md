@@ -21,7 +21,7 @@ c.cswap(0, 1, 2)
 
 ### Pauli Rotations & Trotter–Suzuki Evolution
 
-Pauli rotations `exp(-i θ/2 · P)` of any weight are applied in a single pass rather than decomposed into CNOT ladders:
+Pauli rotations $\exp(-i \frac{\theta}{2} P)$ of any weight are applied in a single pass rather than decomposed into CNOT ladders:
 
 ```python
 import ketrs
@@ -71,8 +71,8 @@ For computing exact gradients with respect to parameters, see [VQE & Adjoint Gra
 |---|---|
 | `0` | No-op copy. |
 | `1` | Identity removal, adjacent gate cancellation, 1-qubit run consolidation. |
-| `2` *(default)* | Commutation cancellation, local Clifford/SWAP rewrites, exact 2-qubit KAK synthesis (preserving real `SO(4)` blocks when `preserve_real=True`), smart Pauli-gadget lowering under `basis="cx"`. |
-| `3` | Multi-qubit Clifford/Pauli propagation, Pauli-rotation conjugation, and GF(2) CNOT subcircuit optimization. |
+| `2` *(default)* | Commutation cancellation, local Clifford/SWAP rewrites, exact 2-qubit KAK synthesis (preserving real $\mathrm{SO}(4)$ blocks when `preserve_real=True`), smart Pauli-gadget lowering under `basis="cx"`. |
+| `3` | Multi-qubit Clifford/Pauli propagation, Pauli-rotation conjugation, and $\mathrm{GF}(2)$ CNOT subcircuit optimization. |
 
 ```python
 import ketrs

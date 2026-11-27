@@ -7,12 +7,12 @@ All six simulation engines in `ketrs` share the same `Circuit` and `PauliSum` re
 | Workload | Recommended Engine | Typical Scale | Key Strengths |
 |---|---|---|---|
 | **General exact circuits (CPU)** | `Statevector` | Up to ~28 qubits | Parallel, cache-blocked, gate-fused; supports `complex128`, `float64`, `complex64`, `float32`. |
-| **Large exact circuits (GPU)** | `GpuStatevector` | 18–31 qubits | Any Vulkan 1.2 GPU (NVIDIA, AMD, Intel, Apple Silicon via MoltenVK); gates, expectations, sampling, gradients, and `exp(-iHt)` on GPU. |
+| **Large exact circuits (GPU)** | `GpuStatevector` | 18–31 qubits | Any Vulkan 1.2 GPU (NVIDIA, AMD, Intel, Apple Silicon via MoltenVK); gates, expectations, sampling, gradients, and $\exp(-iHt)$ on GPU. |
 | **Conserved particle / spin number** | `SectorStatevector` | Sector-dependent | Stores only states matching fixed Hamming weights; rejects sector-breaking ops. |
 | **Exact mixed states & noise** | `DensityMatrix` | Up to ~14 qubits | Exact Kraus channels and per-gate `NoiseModel`s (1.3–4.2× faster than Aer). |
 | **Noisy circuits (>14 qubits)** | `Statevector` (`noise=...`) | Up to ~28 qubits | Quantum trajectories with per-gate Kraus channels and readout error. |
-| **Weakly entangled open chains** | `MPS` | Tens to hundreds of qubits | TEBD, TDVP (arbitrary range), DMRG, conserved `U(1)`/`Zₙ` charges, optional Vulkan FP64 GPU. |
-| **Weakly entangled closed rings** | `PeriodicMPS` | Tens to hundreds of qubits | Periodic-trace MPS with `(n-1, 0)` seam gates, PWE compressed DMRG, TDVP, TEBD, conserved charges, GPU. |
+| **Weakly entangled open chains** | `MPS` | Tens to hundreds of qubits | TEBD, TDVP (arbitrary range), DMRG, conserved $\mathrm{U}(1)$ / $\mathbb{Z}_n$ charges, optional Vulkan FP64 GPU. |
+| **Weakly entangled closed rings** | `PeriodicMPS` | Tens to hundreds of qubits | Periodic-trace MPS with $(n-1, 0)$ seam gates, PWE compressed DMRG, TDVP, TEBD, conserved charges, GPU. |
 
 ---
 
@@ -22,10 +22,10 @@ All six simulation engines in `ketrs` share the same `Circuit` and `PauliSum` re
 
 | `dtype` | Rust Type | Bytes / Amplitude | Memory (26q) | When to use |
 |---|---|---:|---:|---|
-| `"complex"` / `"complex128"` | `Statevector` | 16 B | 1 GiB | Default; any circuit, ~10⁻¹⁵ accuracy. |
+| `"complex"` / `"complex128"` | `Statevector` | 16 B | 1 GiB | Default; any circuit, $\sim 10^{-15}$ accuracy. |
 | `"real"` / `"float64"` | `RealStatevector` | 8 B | 512 MiB | Circuits with only real gates (`H`, `X`, `Z`, `Ry`, `CX`, `CZ`, `SWAP`, `CCX`). Halves memory. |
-| `"complex64"` | `Statevector32` | 8 B | 512 MiB | General circuits where ~10⁻⁶ accuracy suffices; ~1.65× faster at 22–26q. |
-| `"float32"` | `RealStatevector32` | 4 B | 256 MiB | Real circuits at ~10⁻⁶ accuracy; ~4× faster at 22–26q. |
+| `"complex64"` | `Statevector32` | 8 B | 512 MiB | General circuits where $\sim 10^{-6}$ accuracy suffices; ~1.65× faster at 22–26q. |
+| `"float32"` | `RealStatevector32` | 4 B | 256 MiB | Real circuits at $\sim 10^{-6}$ accuracy; ~4× faster at 22–26q. |
 
 ```python
 import ketrs
@@ -50,4 +50,4 @@ Full statevectors double in memory with every qubit:
 - 26 qubits (`complex128`): 1 GiB
 - 30 qubits (`complex128`): 16 GiB
 
-When your state has limited entanglement (ground states of 1D / quasi-1D Hamiltonians, shallow circuits, short-to-moderate time evolution), [`MPS`](../guides/mps.md) and [`PeriodicMPS`](../guides/mps.md#periodic-rings-periodicmps) scale linearly in the number of qubits as `O(n · χ²)` in memory instead of `O(2ⁿ)`, routinely handling hundreds of qubits. Adding conserved symmetries (`Charge` + `with_charges`) reduces memory and runtime by another order of magnitude or more on structured models like lattice gauge theories.
+When your state has limited entanglement (ground states of 1D / quasi-1D Hamiltonians, shallow circuits, short-to-moderate time evolution), [`MPS`](../guides/mps.md) and [`PeriodicMPS`](../guides/mps.md#periodic-rings-periodicmps) scale linearly in the number of qubits as $O(n \chi^2)$ in memory instead of $O(2^n)$, routinely handling hundreds of qubits. Adding conserved symmetries (`Charge` + `with_charges`) reduces memory and runtime by another order of magnitude or more on structured models like lattice gauge theories.

@@ -63,8 +63,8 @@ Circuit builder methods mutate the circuit in place and return it, so calls chai
 | Bitstring `"10"` | `q1 = 1, q0 = 0` (basis index `2`, i.e. `0b10`) |
 | Bitstring `"01"` | `q1 = 0, q0 = 1` (basis index `1`, i.e. `0b01`) |
 | Pauli label `"XZ"` | `X` on `q1`, `Z` on `q0` |
-| `Circuit(3).x(0)` | Prepares `∣001⟩` (index `1`) |
-| `Circuit(3).x(2)` | Prepares `∣100⟩` (index `4`) |
+| `Circuit(3).x(0)` | Prepares $\vert 001\rangle$ (index `1`) |
+| `Circuit(3).x(2)` | Prepares $\vert 100\rangle$ (index `4`) |
 
 You can verify this directly:
 
@@ -81,7 +81,7 @@ print(state.expectation("ZI"))  # -1.0 (q1 is |1⟩)
 
 ## Reusing and Mutating States
 
-You can also initialize a state in `|0…0⟩` (or from custom amplitudes) and apply multiple circuits sequentially:
+You can also initialize a state in $|0\dots 0\rangle$ (or from custom amplitudes) and apply multiple circuits sequentially:
 
 ```python
 import ketrs
