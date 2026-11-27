@@ -18,7 +18,7 @@
 //! values and sampling run on the GPU, downloading only partial sums and
 //! the sampled blocks.
 
-mod context;
+pub(crate) mod context;
 mod evolve;
 mod gradient;
 

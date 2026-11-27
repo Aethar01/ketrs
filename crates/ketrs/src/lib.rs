@@ -17,6 +17,7 @@
 
 pub mod circuit;
 pub mod classical;
+pub mod cv;
 pub mod density;
 mod error;
 mod fusion;

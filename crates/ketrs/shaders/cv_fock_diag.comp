@@ -1,0 +1,34 @@
+#version 460
+// In-place diagonal 1-mode (Rotation, Kerr) or 2-mode (CrossKerr) phase gate
+// on a CV cutoff Fock statevector in double precision.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer StateBuf { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer PhaseBuf { dvec2 v[]; };
+
+layout(push_constant) uniform Push {
+    uvec2 state_addr;
+    uvec2 phase_addr;
+    uint total_len;
+    uint d;
+    uint stride_a;
+    uint stride_b; // 0 for 1-mode diagonal, >0 for 2-mode diagonal
+};
+
+dvec2 cmul(dvec2 a, dvec2 b) {
+    return dvec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+void main() {
+    StateBuf state = StateBuf(state_addr);
+    PhaseBuf phases = PhaseBuf(phase_addr);
+    uint step = gl_NumWorkGroups.x * 256u;
+    for (uint idx = gl_GlobalInvocationID.x; idx < total_len; idx += step) {
+        uint na = (idx / stride_a) % d;
+        uint p_idx = (stride_b == 0u) ? na : (na * d + ((idx / stride_b) % d));
+        state.v[idx] = cmul(state.v[idx], phases.v[p_idx]);
+    }
+}

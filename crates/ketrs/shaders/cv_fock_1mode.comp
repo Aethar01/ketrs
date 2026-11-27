@@ -1,0 +1,42 @@
+#version 460
+// Dense single-mode Fock gate `U` (`d × d`, row-major) applied to mode with
+// `stride = d^mode`, reading `in_addr` and writing `out_addr`.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer StateIn { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer StateOut { dvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer GateBuf { dvec2 v[]; };
+
+layout(push_constant) uniform Push {
+    uvec2 in_addr;
+    uvec2 out_addr;
+    uvec2 gate_addr;
+    uint total_len;
+    uint d;
+    uint stride;
+    uint _pad;
+};
+
+dvec2 cmul(dvec2 a, dvec2 b) {
+    return dvec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+void main() {
+    StateIn src = StateIn(in_addr);
+    StateOut dst = StateOut(out_addr);
+    GateBuf gate = GateBuf(gate_addr);
+    uint step = gl_NumWorkGroups.x * 256u;
+    for (uint idx = gl_GlobalInvocationID.x; idx < total_len; idx += step) {
+        uint n_out = (idx / stride) % d;
+        uint base = idx - n_out * stride;
+        uint row = n_out * d;
+        dvec2 acc = dvec2(0.0);
+        for (uint k = 0u; k < d; k++) {
+            acc += cmul(gate.v[row + k], src.v[base + k * stride]);
+        }
+        dst.v[idx] = acc;
+    }
+}
